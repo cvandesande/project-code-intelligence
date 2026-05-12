@@ -1,0 +1,24 @@
+{
+  "include": ["src/project_code_intelligence", "scripts", "tests"],
+  "pythonVersion": "3.10",
+  "pythonPlatform": "Linux",
+  "venvPath": ".",
+  "venv": ".venv",
+  "typeCheckingMode": "strict",
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": ["src"]
+    }
+  ],
+  "reportAttributeAccessIssue": "error",
+  "reportAny": "error",
+  "reportExplicitAny": "error",
+  "reportImplicitOverride": "error",
+  "reportMissingModuleSource": "error",
+  "reportMissingTypeStubs": "error",
+  "reportUnnecessaryTypeIgnoreComment": "error",
+  "reportUnusedImport": "error",
+  "reportUnusedCallResult": "error",
+  "reportUnusedParameter": "error"
+}

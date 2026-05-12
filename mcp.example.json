@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "project-code-intelligence": {
+      "command": "/path/to/project-code-intelligence/pci-mcp"
+    }
+  }
+}

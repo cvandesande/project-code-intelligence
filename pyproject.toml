@@ -1,0 +1,131 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "project-code-intelligence"
+version = "0.1.0"
+description = "MCP server and ingestion toolkit for a Postgres/pgvector code-intelligence database."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "project-code-intelligence contributors" },
+]
+keywords = [
+  "code-intelligence",
+  "mcp",
+  "pgvector",
+  "postgresql",
+  "static-analysis",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Indexing",
+]
+dependencies = [
+  "psycopg[binary]>=3.1",
+]
+
+[project.scripts]
+pci-index = "project_code_intelligence.cli:index_main"
+pci-ingest-code = "project_code_intelligence.ingest_code_intel:cli_main"
+pci-llama-embed = "project_code_intelligence.llama_embed:main"
+pci-fastembed-server = "project_code_intelligence.fastembed_server:main"
+pci-embedding-bench = "project_code_intelligence.embedding_bench:main"
+pci-doctor = "project_code_intelligence.doctor:main"
+pci-mcp = "project_code_intelligence.server:main"
+pci-mcp-smoke = "project_code_intelligence.cli:mcp_smoke_main"
+
+[project.optional-dependencies]
+local-embeddings = [
+  "fastembed>=0.8.0",
+]
+dev = [
+  "bandit>=1.7.10",
+  "basedpyright>=1.39",
+  "coverage[toml]>=7.14.0",
+  "ruff>=0.15.12",
+  "typing-extensions>=4.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/cvandesande/project-code-intelligence"
+Repository = "https://github.com/cvandesande/project-code-intelligence"
+Issues = "https://github.com/cvandesande/project-code-intelligence/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["project_code_intelligence*"]
+
+[tool.setuptools.package-data]
+project_code_intelligence = ["schema.sql"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+preview = true
+extend-exclude = [
+  "src/project_code_intelligence.egg-info",
+]
+
+[tool.ruff.lint]
+select = [
+  "A",
+  "ANN",
+  "ARG",
+  "B",
+  "BLE",
+  "C4",
+  "C90",
+  "E",
+  "EM",
+  "EXE",
+  "F",
+  "FBT",
+  "FURB",
+  "I",
+  "N",
+  "PERF",
+  "PIE",
+  "PL",
+  "PTH",
+  "RET",
+  "RUF",
+  "S",
+  "SIM",
+  "T20",
+  "TC",
+  "TRY",
+  "UP",
+]
+ignore = [
+  # Exception-message style is mostly churn for a CLI-oriented tool. The
+  # current code raises direct ValueError/RuntimeError messages at argument,
+  # parser, and boundary checks where a custom exception class per message
+  # would add noise without improving recovery.
+  "EM101",
+  "EM102",
+  "TRY003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Profile methods are extension hooks. They intentionally keep instance method
+# shape even when default/example implementations do not need instance state.
+"src/project_code_intelligence/code_profiles/*.py" = ["PLR6301"]
+"src/project_code_intelligence/http_client.py" = ["S310"]
+"src/project_code_intelligence/fastembed_server.py" = ["A002"]
+"src/project_code_intelligence/process.py" = ["S404", "S603"]
+# SARIF patterns may be absolute or relative and can use **; glob.glob handles
+# that mixed user-input shape more directly than Path.glob/Path.rglob.
+"src/project_code_intelligence/sarif.py" = ["PTH207"]
+# Test doubles mimic third-party interfaces and may not need instance state.
+"tests/test_ingest_code_intel.py" = ["PLR6301"]
+"typings/**/*.pyi" = ["ANN401"]

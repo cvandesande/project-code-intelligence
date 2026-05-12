@@ -1,0 +1,324 @@
+"""Git inventory and file classification for code-intelligence ingestion."""
+
+from __future__ import annotations
+
+import re
+from operator import itemgetter
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from project_code_intelligence import process, profile_context
+from project_code_intelligence.common import sha256_bytes, sha256_text, source_path_for
+from project_code_intelligence.git_utils import GIT_TIMEOUT_SECONDS, git_binary, run_git
+from project_code_intelligence.models import (
+    BINARY_SUFFIXES,
+    CHUNKER_VERSION,
+    PARSER_VERSION,
+    SCHEMA_VERSION,
+    SOURCE_LANGUAGES,
+    TEXT_NAMES,
+    TEXT_SUFFIXES,
+    IntelFile,
+    JsonObject,
+    Snapshot,
+)
+from project_code_intelligence.profile_context import repo_role_for
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+C_LANGUAGE_SUFFIXES = frozenset({".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"})
+ASM_SUFFIXES = frozenset({".s", ".S"})
+JAVASCRIPT_SUFFIXES = frozenset({".js", ".jsx"})
+TYPESCRIPT_SUFFIXES = frozenset({".ts", ".tsx"})
+KCONFIG_NAMES = frozenset({"Kconfig", "Config.in", "Config-defaults.in"})
+CONFIG_NAMES = frozenset({"config", "inittab"})
+CONFIG_SUFFIXES = frozenset({".conf", ".config", ".seed", ".service", ".init"})
+BUILD_FILE_NAMES = frozenset({
+    "cargo.toml",
+    "go.mod",
+    "go.sum",
+    "pyproject.toml",
+    "setup.py",
+    "package.json",
+    "tsconfig.json",
+})
+CONTENT_CLASS_FLAG_ORDER = (
+    ("is_doc", "doc"),
+    ("is_build", "build"),
+    ("is_config", "config"),
+    ("is_test", "test"),
+    ("is_vendor", "vendor"),
+    ("is_source", "source"),
+    ("is_generated", "generated"),
+)
+
+LANGUAGE_SUFFIXES = {
+    ".rs": "rust",
+    ".go": "go",
+    ".py": "python",
+    ".java": "java",
+    ".cs": "csharp",
+    ".php": "php",
+    ".rb": "ruby",
+    ".mk": "make",
+    ".in": "kconfig",
+    ".sh": "shell",
+    ".dts": "dts",
+    ".dtsi": "dts",
+    ".patch": "patch",
+    ".diff": "patch",
+    ".json": "json",
+    ".toml": "toml",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".lua": "lua",
+    ".uc": "ucode",
+    ".md": "doc",
+    ".rst": "doc",
+}
+
+
+def run_git_required(root: Path, args: list[str]) -> str:
+    value = run_git(root, args)
+    if value is None:
+        raise ValueError(f"git {' '.join(args)} failed in {root}; pass --root pointing at a Git checkout")
+    return value
+
+
+def git_dirty_fingerprint(root: Path) -> str | None:
+    status = run_git(root, ["status", "--porcelain=v1", "--untracked-files=no"])
+    if not status:
+        return None
+    staged = run_git(root, ["diff", "--cached", "--binary"]) or ""
+    unstaged = run_git(root, ["diff", "--binary"]) or ""
+    return sha256_text(status + "\n" + staged + "\n" + unstaged)
+
+
+def git_ls_files(repo_root: Path) -> list[tuple[str | None, str]]:
+    binary = git_binary()
+    if binary is None:
+        raise FileNotFoundError("git was not found on PATH")
+    proc = process.run(
+        [binary, "ls-files", "-s"],
+        process.RunOptions(
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+        ),
+    )
+    out: list[tuple[str | None, str]] = []
+    for line in proc.stdout.splitlines():
+        match = re.match(r"^\d+\s+([0-9a-f]{40,64})\s+\d+\t(.+)$", line)
+        if match:
+            out.append((match.group(1), match.group(2)))
+        elif line:
+            out.append((None, line.rsplit(None, 1)[-1]))
+    return out
+
+
+def language_for(path: str) -> str:
+    file_path = Path(path)
+    name = file_path.name
+    suffix = file_path.suffix
+    normalized_suffix = suffix.lower()
+    language = LANGUAGE_SUFFIXES.get(normalized_suffix, "text")
+    if normalized_suffix in C_LANGUAGE_SUFFIXES:
+        language = "c"
+    elif suffix in ASM_SUFFIXES:
+        language = "asm"
+    elif normalized_suffix in JAVASCRIPT_SUFFIXES:
+        language = "javascript"
+    elif normalized_suffix in TYPESCRIPT_SUFFIXES:
+        language = "typescript"
+    elif normalized_suffix == ".mk" or name == "Makefile":
+        language = "make"
+    elif normalized_suffix == ".in" or name in KCONFIG_NAMES:
+        language = "kconfig"
+    elif normalized_suffix == ".sh" or "/init.d/" in path or "/preinit/" in path:
+        language = "shell"
+    elif normalized_suffix in CONFIG_SUFFIXES or name in CONFIG_NAMES:
+        language = "config"
+    return language
+
+
+def content_class_for(language: str, flags: Mapping[str, bool]) -> str:
+    if language == "patch":
+        return "patch"
+    return next((content_class for flag, content_class in CONTENT_CLASS_FLAG_ORDER if flags[flag]), "other")
+
+
+def file_role_for(path: str, content_class: str) -> str:
+    if "/init.d/" in path:
+        return "runtime-service"
+    if path.startswith("package/"):
+        return "package"
+    if path.startswith("include/"):
+        return "source-include"
+    if path.startswith(("scripts/", "tools/")):
+        return "tooling"
+    return content_class
+
+
+def classification_flags(path: str, language: str) -> dict[str, bool]:
+    parts = path.split("/")
+    file_path = Path(path)
+    name = file_path.name.lower()
+    suffix = file_path.suffix.lower()
+    is_test = any(part in {"test", "tests", "testing", "selftests"} for part in parts) or "test" in name
+    is_generated = any(part in {"generated", "autogenerated"} for part in parts) or "generated" in name
+    is_vendor = any(part in {"vendor", "third_party", "3rdparty"} for part in parts)
+    is_doc = language == "doc" or parts[0] in {"docs", "doc", "Documentation"} or suffix in {".md", ".rst"}
+    is_build = language == "make" or file_path.name == "Makefile" or "/cmake/" in path or name in BUILD_FILE_NAMES
+    is_config = language in {"kconfig", "config", "json", "toml", "yaml"} or "Config" in file_path.name
+    is_source = language in SOURCE_LANGUAGES
+    return {
+        "is_generated": is_generated,
+        "is_vendor": is_vendor,
+        "is_test": is_test,
+        "is_source": is_source,
+        "is_build": is_build,
+        "is_config": is_config,
+        "is_doc": is_doc,
+    }
+
+
+def classify_file(path: str, language: str) -> JsonObject:
+    flags = classification_flags(path, language)
+    content_class = content_class_for(language, flags)
+    file_role = file_role_for(path, content_class)
+
+    return {
+        "file_role": file_role,
+        "content_class": content_class,
+        **flags,
+    }
+
+
+def inspect_inventory_file(path: Path, max_file_bytes: int) -> tuple[str | None, bytes, int, bool]:
+    suffix = path.suffix.lower()
+    reason: str | None = None
+    if suffix in BINARY_SUFFIXES:
+        reason = "binary_suffix"
+    try:
+        size_bytes = path.stat().st_size
+    except OSError:
+        return "read_error", b"", 0, False
+    if size_bytes > max_file_bytes:
+        return reason or "file_too_large", b"", size_bytes, False
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return "read_error", b"", size_bytes, False
+    if reason is None and b"\0" in data[:4096]:
+        reason = "binary_nul"
+    return reason, data, size_bytes, True
+
+
+def should_parse_text(repo_rel_path: str, language: str, skipped_reason: str | None) -> bool:
+    if skipped_reason:
+        return False
+    name = Path(repo_rel_path).name
+    suffix = Path(repo_rel_path).suffix
+    if suffix in TEXT_SUFFIXES or name in TEXT_NAMES:
+        return True
+    if "/files/" in repo_rel_path or "/base-files/" in repo_rel_path:
+        return True
+    return language in {"text", "config"}
+
+
+def classification_text(classified: JsonObject, key: str) -> str:
+    value = classified.get(key)
+    if not isinstance(value, str):
+        raise TypeError(f"classification field {key} must be a string")
+    return value
+
+
+def classification_bool(classified: JsonObject, key: str) -> bool:
+    value = classified.get(key)
+    if not isinstance(value, bool):
+        raise TypeError(f"classification field {key} must be a boolean")
+    return value
+
+
+def make_snapshot(root: Path, repo: str, collection: str) -> Snapshot:
+    repo_root = root / repo
+    commit = run_git_required(repo_root, ["rev-parse", "HEAD"])
+    base_tree_sha = run_git_required(repo_root, ["rev-parse", f"{commit}^{{tree}}"])
+    dirty_fingerprint = git_dirty_fingerprint(repo_root)
+    tree_sha = base_tree_sha
+    if dirty_fingerprint:
+        tree_sha = f"{base_tree_sha}:dirty:{dirty_fingerprint[:16]}"
+    return Snapshot(
+        collection=collection,
+        repo=repo,
+        repo_role=repo_role_for(repo),
+        branch=run_git(repo_root, ["branch", "--show-current"]),
+        commit_sha=commit,
+        tree_sha=tree_sha,
+        dirty=bool(dirty_fingerprint),
+        metadata={
+            "schema_version": SCHEMA_VERSION,
+            "chunker_version": CHUNKER_VERSION,
+            "parser_version": PARSER_VERSION,
+            "profile_name": profile_context.active_profile.name,
+            "profile_version": profile_context.active_profile.version,
+            "base_tree_sha": base_tree_sha,
+            "dirty_fingerprint": dirty_fingerprint,
+        },
+    )
+
+
+def discover_files(root: Path, snapshot: Snapshot, max_file_bytes: int) -> list[IntelFile]:
+    repo_root = root / snapshot.repo
+    files: list[IntelFile] = []
+    for git_blob_sha, rel_path in sorted(git_ls_files(repo_root), key=itemgetter(1)):
+        abs_path = repo_root / rel_path
+        if not abs_path.is_file():
+            continue
+        language = profile_context.active_profile.language_for_path(rel_path) or language_for(rel_path)
+        reason, data, size_bytes, read_ok = inspect_inventory_file(abs_path, max_file_bytes)
+        if reason is None and not (
+            should_parse_text(rel_path, language, None)
+            or profile_context.active_profile.should_parse_text(rel_path, language, None)
+        ):
+            reason = "unsupported_file_type"
+        classified = profile_context.active_profile.classify_file(rel_path, language, classify_file(rel_path, language))
+        metadata = {
+            "path_parts": rel_path.split("/")[:8],
+            **profile_context.active_profile.file_metadata(rel_path, language, classified),
+        }
+        files.append(
+            IntelFile(
+                collection=snapshot.collection,
+                repo=snapshot.repo,
+                repo_role=snapshot.repo_role,
+                branch=snapshot.branch,
+                commit_sha=snapshot.commit_sha,
+                tree_sha=snapshot.tree_sha,
+                source_path=source_path_for(snapshot.repo, rel_path),
+                repo_rel_path=rel_path,
+                abs_path=abs_path,
+                git_blob_sha=git_blob_sha,
+                file_sha256=sha256_bytes(data) if read_ok else None,
+                size_bytes=size_bytes,
+                language=language,
+                skipped_reason=reason,
+                metadata={key: value for key, value in metadata.items() if value},
+                file_role=classification_text(classified, "file_role"),
+                content_class=classification_text(classified, "content_class"),
+                is_generated=classification_bool(classified, "is_generated"),
+                is_vendor=classification_bool(classified, "is_vendor"),
+                is_test=classification_bool(classified, "is_test"),
+                is_source=classification_bool(classified, "is_source"),
+                is_build=classification_bool(classified, "is_build"),
+                is_config=classification_bool(classified, "is_config"),
+                is_doc=classification_bool(classified, "is_doc"),
+            )
+        )
+    return files
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")

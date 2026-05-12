@@ -1,0 +1,5 @@
+#!/bin/sh
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
+export PYTHONPATH="$SCRIPT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+: "${PYTHON:=python3}"
+exec "$PYTHON" -m project_code_intelligence.cli mcp-smoke "$@"

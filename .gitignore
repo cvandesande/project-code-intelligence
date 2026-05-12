@@ -1,0 +1,61 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+venv/
+*.egg-info/
+
+# Local agent/editor state.
+.agents/
+.codex/
+
+# Local environment and MCP configs may contain credentials.
+.env
+.env.*
+!.env.example
+.mcp.json
+
+# Unpublished writing drafts.
+docs/blog-draft-*.md
+
+# Database dumps, local stores, and restore artifacts.
+db-dumps/
+dumps/
+pgdata/
+postgres-data/
+*.pgdump
+*.dump
+*.backup
+*.sql.gz
+*.sql.zst
+*.sql.xz
+*.sql.bz2
+
+# Static-analysis output generated from private or local source trees.
+*.sarif
+*.sarif.json
+sarif/
+semgrep-results/
+codeql-results/
+reports/sarif/
+
+# Embedding/model artifacts and vector indexes.
+models/
+embeddings/
+embedding-cache/
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.npy
+*.npz
+*.faiss
