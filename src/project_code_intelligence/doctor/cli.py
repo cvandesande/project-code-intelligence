@@ -165,7 +165,17 @@ def check_results(args: DoctorArgs, env: config.Env | None = None) -> list[Check
     if args.skip_db:
         results.append(result("database", "skip", "database check skipped"))
     else:
-        results.extend(check_database())
+        db_results = check_database()
+        # Auto-initialize schema when database is reachable but schema is missing.
+        by_name = {r.name: r for r in db_results}
+        if (
+            by_name.get("database", result("database", "fail", "")).status == "ok"
+            and by_name.get("schema", result("schema", "ok", "")).status == "warn"
+        ):
+            init_result = init_database_schema()
+            if init_result.status == "ok":
+                db_results = check_database()
+        results.extend(db_results)
     results.extend(check_embedding_endpoint(env=env, mode=args.embedding, timeout=args.timeout))
     return results
 
@@ -204,7 +214,7 @@ def stop_embedding_services() -> int:
         write_stdout("docker not found; skipping Docker Compose services.")
 
     # Stop Core ML server via PID file (preferred), then fall back to pkill.
-    from project_code_intelligence.embedding.coreml_server import stop_server  # noqa: PLC0415
+    from project_code_intelligence.embedding.coreml_lifecycle import stop_server  # noqa: PLC0415
 
     if stop_server():
         write_stdout("Stopped Core ML embedding server via PID file.")
@@ -312,13 +322,12 @@ def clean_all() -> int:
         write_stdout("docker not found; skipping Docker Compose removal.")
 
     # 3. Remove PID files.
-    from project_code_intelligence.embedding.coreml_server import DEFAULT_PID_DIR  # noqa: PLC0415
+    from project_code_intelligence.embedding.coreml_lifecycle import DEFAULT_PID_DIR, PID_FILE_NAME  # noqa: PLC0415
 
-    if DEFAULT_PID_DIR.exists():
-        import shutil  # noqa: PLC0415
-
-        shutil.rmtree(DEFAULT_PID_DIR)
-        write_stdout(f"Removed {DEFAULT_PID_DIR}")
+    pid_file = DEFAULT_PID_DIR / PID_FILE_NAME
+    if pid_file.exists():
+        pid_file.unlink()
+        write_stdout(f"Removed {pid_file}")
 
     write_stdout("Clean complete.")
     return 0

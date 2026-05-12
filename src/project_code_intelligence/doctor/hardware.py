@@ -470,14 +470,13 @@ def check_platform(env: config.Env) -> list[CheckResult]:
             f"Python {platform.python_version()} on {platform.system()} {platform.release()} ({platform.machine()})",
         )
     ]
-    endpoint = config.default_embedding_endpoint(env=env)
     llama_model = config.env_text("PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL", env=env)
     llama_configured = bool(
         llama_model
         or config.env_text("PROJECT_CODE_INTELLIGENCE_LLAMA_SERVER", env=env)
         or config.env_text("PROJECT_CODE_INTELLIGENCE_LLAMA_CPP_DIR", env=env)
     )
-    if platform.system() != "Darwin" or endpoint:
+    if platform.system() != "Darwin":
         return results
 
     apple_backend = (config.env_text("PROJECT_CODE_INTELLIGENCE_APPLE_BACKEND", env=env) or "").strip().lower()

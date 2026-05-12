@@ -22,6 +22,12 @@ else:
 
 
 from project_code_intelligence import config
+from project_code_intelligence.embedding.http_common import (
+    json_error,
+    normalize_input,
+    write_json,
+)
+from project_code_intelligence.embedding.http_common import parse_json_body as _parse_json_body
 from project_code_intelligence.runtime import estimate_embedding_tokens
 
 
@@ -83,21 +89,6 @@ def load_fastembed_model(model_name: str) -> FastEmbedModel:
     return cast("FastEmbedFactory", text_embedding_value)(**kwargs)
 
 
-def normalize_input(value: object) -> list[str]:
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, list):
-        texts: list[str] = []
-        for item in cast("list[object]", value):
-            if not isinstance(item, str):
-                raise TypeError("embedding input array items must be strings")
-            texts.append(item)
-        if not texts:
-            raise ValueError("embedding input array must not be empty")
-        return texts
-    raise TypeError("embedding input must be a string or an array of strings")
-
-
 def vector_values(value: object) -> list[float]:
     tolist_value = cast("object", getattr(value, "tolist", None))
     if callable(tolist_value):
@@ -143,36 +134,8 @@ def embedding_response(model: FastEmbedModel, model_name: str, request: JsonObje
     }
 
 
-def json_error(message: str) -> JsonObject:
-    return {"error": {"message": message, "type": "invalid_request_error"}}
-
-
-def write_json(handler: BaseHTTPRequestHandler, status: int, payload: JsonObject) -> None:
-    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json")
-    handler.send_header("Content-Length", str(len(body)))
-    handler.end_headers()
-    _ = handler.wfile.write(body)
-
-
 def parse_json_body(handler: BaseHTTPRequestHandler) -> JsonObject:
-    length_header = handler.headers.get("Content-Length")
-    if not length_header:
-        raise ValueError("Content-Length is required")
-    try:
-        length = int(length_header)
-    except ValueError as exc:
-        raise ValueError("Content-Length must be an integer") from exc
-    if length <= 0:
-        raise ValueError("request body is empty")
-    if length > fastembed_request_max_bytes():
-        raise ValueError("request body exceeds PROJECT_CODE_INTELLIGENCE_FASTEMBED_MAX_REQUEST_BYTES")
-    raw = handler.rfile.read(length)
-    value = cast("object", json.loads(raw.decode("utf-8")))
-    if not isinstance(value, dict):
-        raise TypeError("request body must be a JSON object")
-    return cast("JsonObject", value)
+    return _parse_json_body(handler, max_bytes=fastembed_request_max_bytes())
 
 
 class FastEmbedHandler(BaseHTTPRequestHandler):

@@ -30,7 +30,7 @@ from project_code_intelligence.doctor import (
 from project_code_intelligence.doctor.hardware import coremltools_available, detect_ane_cores
 from project_code_intelligence.embedding import coreml_server
 from project_code_intelligence.embedding.bench import EmbeddingRequestResult
-from project_code_intelligence.embedding.coreml_server import print_compute_plan
+from project_code_intelligence.embedding.coreml_compute_plan import print_compute_plan
 
 
 def successful_requester(
@@ -211,15 +211,15 @@ class DoctorTests(unittest.TestCase):
                 CheckResult("gpu", "skip", "No local GPU was detected."),
                 CheckResult("npu", "skip", "No supported local NPU device was detected."),
                 CheckResult("database", "ok", "connected to codeintel as codeintel"),
-                CheckResult("embedding", "skip", "embedding check skipped"),
+                CheckResult("embedding-endpoint", "warn", "no endpoint configured"),
                 CheckResult("option-cpu", "ok", "CPU embeddings: FastEmbed default demo."),
             ],
             color=True,
         )
 
         self.assertIn(color_text("Detected", "\033[1m", enabled=True), output)
-        self.assertIn(color_text("cpu", "\033[1;36m", enabled=True), output)
         self.assertIn(color_text("ok", "\033[32m", enabled=True), output)
+        self.assertIn("To start a local CPU embedding server, run:", output)
 
     def test_format_summary_uses_user_facing_issue_labels(self) -> None:
         output = format_summary(
@@ -352,14 +352,13 @@ class DoctorAppleTests(unittest.TestCase):
                 CheckResult("apple-coreml-model", "ok", "Core ML embedding model: test."),
                 CheckResult("npu", "ok", "Apple Neural Engine is available via Core ML."),
                 CheckResult("database", "ok", "connected to codeintel as codeintel"),
-                CheckResult("embedding", "skip", "embedding check skipped"),
-                CheckResult("option-cpu", "ok", "CPU embeddings: FastEmbed default demo."),
+                CheckResult("embedding-endpoint", "warn", "no endpoint configured"),
                 CheckResult("option-gpu-apple", "ok", "Apple embeddings: Core ML default demo."),
             ],
             color=False,
         )
 
-        self.assertIn("apple: pci-coreml-server", output)
+        self.assertIn("To start a local Apple native embedding server, run: pci-coreml-server", output)
         self.assertNotIn("pci-embedding-server", output)
 
     def test_format_summary_shows_apple_metal_startup_command(self) -> None:
@@ -368,8 +367,7 @@ class DoctorAppleTests(unittest.TestCase):
                 CheckResult("platform", "ok", "Python 3.13 on Darwin 25.4.0 (arm64)"),
                 CheckResult("npu", "skip", "Apple Neural Engine requires coremltools."),
                 CheckResult("database", "ok", "connected to codeintel as codeintel"),
-                CheckResult("embedding", "skip", "embedding check skipped"),
-                CheckResult("option-cpu", "ok", "CPU embeddings: FastEmbed default demo."),
+                CheckResult("embedding-endpoint", "warn", "no endpoint configured"),
                 CheckResult(
                     "option-gpu-apple", "ok", "Apple GPU embeddings: host-native llama.cpp Metal default demo.gguf."
                 ),
@@ -377,8 +375,7 @@ class DoctorAppleTests(unittest.TestCase):
             color=False,
         )
 
-        self.assertIn("apple:", output)
-        self.assertIn("pci-embedding-server", output)
+        self.assertIn("To start a local Apple native embedding server, run: pci-embedding-server", output)
         self.assertNotIn("pci-coreml-server", output)
 
     def test_coremltools_available_returns_false_when_not_installed(self) -> None:
@@ -499,7 +496,7 @@ class CoreMLDiagnoseTests(unittest.TestCase):
         with (
             patch.dict(sys.modules, modules),
             patch(
-                "project_code_intelligence.embedding.coreml_server._compile_for_plan",
+                "project_code_intelligence.embedding.coreml_compute_plan._compile_for_plan",
                 return_value="/fake/model.mlmodelc",
             ),
         ):
