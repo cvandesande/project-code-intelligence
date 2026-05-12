@@ -1,6 +1,6 @@
 # Project Code Intelligence
 
-Hardware-Accelerated Codebase Mapping
+## Hardware-Accelerated Codebase Mapping
 
 `project-code-intelligence` indexes a Git repository into Postgres/pgvector and
 serves the result through a small stdio MCP server.
