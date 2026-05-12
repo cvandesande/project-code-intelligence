@@ -275,11 +275,7 @@ def local_embedding_startup_commands(by_name: Mapping[str, CheckResult]) -> list
         if ok_result(by_name, "apple-coreml"):
             commands.append(("apple", "pci-coreml-server"))
         else:
-            commands.append((
-                "apple",
-                "export PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL=/path/to/Qwen3-Embedding-0.6B-Q8_0.gguf; "
-                "pci-embedding-server",
-            ))
+            commands.append(("apple", "pci-embedding-server"))
     return commands
 
 
@@ -330,7 +326,6 @@ def embedding_summary_lines(by_name: Mapping[str, CheckResult], *, color: bool =
         "",
         heading_text("Available embedding paths", color=color),
         *(format_option(item, color=color) for item in options),
-        *startup_command_lines(by_name, color=color),
     ]
 
 
@@ -347,6 +342,88 @@ def _stop_hints(by_name: Mapping[str, CheckResult], *, color: bool = False) -> l
         lines.append(color_text("Stop embedding server: pci-doctor --stop-embedding", ANSI_DIM, enabled=color))
     if db_running:
         lines.append(color_text("Stop database: pci-doctor --stop-database", ANSI_DIM, enabled=color))
+    return lines
+
+
+def _embedding_profile_description(profile: str) -> str:
+    return {
+        "cpu": "a local CPU embedding server",
+        "npu": "a local AMD NPU embedding server",
+        "amdgpu": "a local AMD GPU embedding server",
+        "nvidia": "a local NVIDIA GPU embedding server",
+        "apple": "a local Apple native embedding server",
+    }.get(profile, f"a local {profile} embedding server")
+
+
+def _suggestion_line(text: str, command: str, *, color: bool = False) -> str:
+    return f"{text} {color_text(command, ANSI_BOLD_CYAN, enabled=color)}"
+
+
+def _issue_suggestions(
+    by_name: Mapping[str, CheckResult],
+    issues: Sequence[CheckResult],
+    *,
+    color: bool = False,
+) -> dict[str, list[str]]:
+    """Map the first matching warn/fail check to friendly remediation hints."""
+    suggestions: dict[str, list[str]] = {}
+    db_names = {"database", "database-config", "pgvector", "schema", "schema-version"}
+    embedding_names = {"embedding-endpoint", "embedding-config", "embedding"}
+    db_done = False
+    embedding_done = False
+    for item in issues:
+        if item.name in db_names and not db_done:
+            suggestions[item.name] = [
+                _suggestion_line(
+                    "To start a local database, run:",
+                    "docker compose up -d pgvector",
+                    color=color,
+                ),
+                _suggestion_line(
+                    "Or set",
+                    "PROJECT_CODE_INTELLIGENCE_DATABASE_URL",
+                    color=color,
+                )
+                + " to use an existing Postgres instance.",
+            ]
+            db_done = True
+        elif item.name in embedding_names and not embedding_done:
+            hints: list[str] = []
+            commands = local_embedding_startup_commands(by_name)
+            if commands:
+                for profile, cmd in commands:
+                    desc = _embedding_profile_description(profile)
+                    hints.append(_suggestion_line(f"To start {desc}, run:", cmd, color=color))
+            hints.append(
+                _suggestion_line(
+                    "Or set",
+                    "PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT",
+                    color=color,
+                )
+                + " to use a remote provider."
+            )
+            suggestions[item.name] = hints
+            embedding_done = True
+    return suggestions
+
+
+def _needs_attention_lines(
+    results: Sequence[CheckResult],
+    by_name: Mapping[str, CheckResult],
+    *,
+    color: bool = False,
+) -> list[str]:
+    issues = summary_issue_items(results)
+    if not issues:
+        return []
+    suggestions = _issue_suggestions(by_name, issues, color=color)
+    lines = ["", heading_text("Needs attention", color=color)]
+    for item in issues:
+        label = check_label(item.name)
+        lines.append(f"  {label_text(label, color=color)}: {status_text(item.status, color=color)} {item.message}")
+        if item.detail:
+            lines.append(f"    {color_text(item.detail, ANSI_DIM, enabled=color)}")
+        lines.extend(f"    {s}" for s in suggestions.get(item.name, []))
     return lines
 
 
@@ -387,15 +464,7 @@ def format_summary(results: Sequence[CheckResult], *, color: bool = False) -> st
     )
 
     lines.extend(embedding_summary_lines(by_name, color=color))
-
-    issues = summary_issue_items(results)
-    if issues:
-        lines.extend(["", heading_text("Needs attention", color=color)])
-        for item in issues:
-            label = check_label(item.name)
-            lines.append(f"  {label_text(label, color=color)}: {status_text(item.status, color=color)} {item.message}")
-            if item.detail:
-                lines.append(f"    {color_text(item.detail, ANSI_DIM, enabled=color)}")
+    lines.extend(_needs_attention_lines(results, by_name, color=color))
 
     stop_hints = _stop_hints(by_name, color=color)
     if stop_hints:

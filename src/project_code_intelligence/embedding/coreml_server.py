@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
+import time
 
 # Suppress "PyTorch was not found" advisory from transformers; we only use the
 # tokenizer and do not need PyTorch.  Must be set before any transitive import.
@@ -13,8 +15,6 @@ os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")  # pyright: igno
 # Suppress HuggingFace Hub progress bars during cached model verification.
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")  # pyright: ignore[reportUnusedCallResult]
 
-import signal
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import import_module
 from pathlib import Path
@@ -34,13 +34,26 @@ else:
 
 
 from project_code_intelligence import config
+from project_code_intelligence.embedding.coreml_compute_plan import (
+    format_compute_plan,
+    print_compute_plan,
+)
+from project_code_intelligence.embedding.coreml_lifecycle import (
+    is_pid_alive,
+    read_pid_file,
+    remove_pid_file,
+    write_pid_file,
+)
+from project_code_intelligence.embedding.http_common import (
+    json_error,
+    normalize_input,
+    write_json,
+)
+from project_code_intelligence.embedding.http_common import parse_json_body as _parse_json_body
 from project_code_intelligence.runtime import estimate_embedding_tokens
 
-DEFAULT_COREML_MODEL = "ewchampion/Qwen3-Embedding-0.6B-coreml-4bit.mlpackage"
 DEFAULT_COREML_HOST = "127.0.0.1"
 DEFAULT_COREML_PORT = 18081
-DEFAULT_PID_DIR = Path.home() / ".cache" / "project-code-intelligence"
-PID_FILE_NAME = "pci-coreml-server.pid"
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +188,8 @@ def _mean_pool_and_normalize(token_embeddings: NdArray, attention_mask: NdArray,
 
 def coreml_model_name(env: config.Env | None = None) -> str:
     return (
-        config.env_text("PROJECT_CODE_INTELLIGENCE_COREML_MODEL", DEFAULT_COREML_MODEL, env=env) or DEFAULT_COREML_MODEL
+        config.env_text("PROJECT_CODE_INTELLIGENCE_COREML_MODEL", config.DEFAULT_COREML_MODEL, env=env)
+        or config.DEFAULT_COREML_MODEL
     )
 
 
@@ -386,21 +400,6 @@ def _detect_max_length(model: CoreMLModel) -> int | None:
     return None
 
 
-def normalize_input(value: object) -> list[str]:
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, list):
-        texts: list[str] = []
-        for item in cast("list[object]", value):
-            if not isinstance(item, str):
-                raise TypeError("embedding input array items must be strings")
-            texts.append(item)
-        if not texts:
-            raise ValueError("embedding input array must not be empty")
-        return texts
-    raise TypeError("embedding input must be a string or an array of strings")
-
-
 def embedding_response(embedder: CoreMLEmbedder, request: JsonObject) -> JsonObject:
     texts = normalize_input(request.get("input"))
     vectors = embedder.embed(texts)
@@ -425,36 +424,8 @@ def embedding_response(embedder: CoreMLEmbedder, request: JsonObject) -> JsonObj
     }
 
 
-def json_error(message: str) -> JsonObject:
-    return {"error": {"message": message, "type": "invalid_request_error"}}
-
-
-def write_json(handler: BaseHTTPRequestHandler, status: int, payload: JsonObject) -> None:
-    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json")
-    handler.send_header("Content-Length", str(len(body)))
-    handler.end_headers()
-    _ = handler.wfile.write(body)
-
-
 def parse_json_body(handler: BaseHTTPRequestHandler) -> JsonObject:
-    length_header = handler.headers.get("Content-Length")
-    if not length_header:
-        raise ValueError("Content-Length is required")
-    try:
-        length = int(length_header)
-    except ValueError as exc:
-        raise ValueError("Content-Length must be an integer") from exc
-    if length <= 0:
-        raise ValueError("request body is empty")
-    if length > coreml_request_max_bytes():
-        raise ValueError("request body exceeds PROJECT_CODE_INTELLIGENCE_COREML_MAX_REQUEST_BYTES")
-    raw = handler.rfile.read(length)
-    value = cast("object", json.loads(raw.decode("utf-8")))
-    if not isinstance(value, dict):
-        raise TypeError("request body must be a JSON object")
-    return cast("JsonObject", value)
+    return _parse_json_body(handler, max_bytes=coreml_request_max_bytes())
 
 
 class CoreMLHTTPServer(ThreadingHTTPServer):
@@ -505,186 +476,8 @@ class CoreMLHandler(BaseHTTPRequestHandler):
         write_json(self, 200, payload)
 
 
-def _compile_for_plan(model_path: str) -> str | None:
-    """Compile a .mlpackage to .mlmodelc for compute plan inspection."""
-    if model_path.endswith(".mlmodelc"):
-        return model_path
-    try:
-        ct = import_module("coremltools")
-    except ImportError:
-        return None
-    utils_mod = cast("object", getattr(ct, "utils", None))
-    compile_fn = getattr(utils_mod, "compile_model", None) if utils_mod else None
-    if compile_fn is None:
-        return None
-    try:
-        return cast("str", compile_fn(model_path))
-    except Exception:  # noqa: BLE001 - coremltools compile can raise arbitrary errors
-        return None
-
-
-def _classify_device(
-    device: object,
-    *,
-    ane_cls: type[object] | None,
-    gpu_cls: type[object] | None,
-    cpu_cls: type[object] | None,
-) -> str:
-    """Return a device label for a preferred_compute_device instance."""
-    if ane_cls is not None and isinstance(device, ane_cls):
-        return "ANE"
-    if gpu_cls is not None and isinstance(device, gpu_cls):
-        return "GPU"
-    if cpu_cls is not None and isinstance(device, cpu_cls):
-        return "CPU"
-    return "unknown"
-
-
-def _plan_operations(plan: object) -> list[object]:
-    """Extract the flat list of ML Program operations from a compute plan."""
-    model_structure = cast("object | None", getattr(plan, "model_structure", None))
-    program = cast("object | None", getattr(model_structure, "program", None)) if model_structure is not None else None
-    functions_raw = cast("object | None", getattr(program, "functions", None)) if program is not None else None
-    if functions_raw is None:
-        return []
-    ops: list[object] = []
-    for function in cast("dict[str, object]", functions_raw).values():
-        block = cast("object | None", getattr(function, "block", None))
-        operations_raw = cast("object | None", getattr(block, "operations", None)) if block is not None else None
-        if operations_raw is not None:
-            ops.extend(cast("list[object]", operations_raw))
-    return ops
-
-
-def _walk_plan_operations(
-    plan: object,
-    *,
-    ane_cls: type[object] | None,
-    gpu_cls: type[object] | None,
-    cpu_cls: type[object] | None,
-) -> tuple[dict[str, int], float, int]:
-    """Walk ML Program operations and count device assignments.
-
-    Returns (counts_by_device, ane_weight, total_ops).
-    """
-    ops = _plan_operations(plan)
-    if not ops:
-        return {}, 0.0, 0
-
-    get_usage = getattr(plan, "get_compute_device_usage_for_mlprogram_operation", None)
-    get_cost = getattr(plan, "get_estimated_cost_for_mlprogram_operation", None)
-    counts: dict[str, int] = {"ANE": 0, "GPU": 0, "CPU": 0, "unknown": 0}
-    ane_weight = 0.0
-
-    for op in ops:
-        if get_usage is None:
-            counts["unknown"] += 1
-            continue
-        usage = cast("object | None", get_usage(op))
-        if usage is None:
-            counts["unknown"] += 1
-            continue
-        device = cast("object | None", getattr(usage, "preferred_compute_device", None))
-        if device is None:
-            counts["unknown"] += 1
-            continue
-        label = _classify_device(device, ane_cls=ane_cls, gpu_cls=gpu_cls, cpu_cls=cpu_cls)
-        counts[label] = counts.get(label, 0) + 1
-        if label == "ANE" and get_cost is not None:
-            cost = cast("object | None", get_cost(op))
-            weight = cast("object | None", getattr(cost, "weight", None)) if cost is not None else None
-            if isinstance(weight, float):
-                ane_weight += weight
-    return counts, ane_weight, len(ops)
-
-
-def _load_compute_plan(model_path: str) -> object | None:
-    """Compile model and load its MLComputePlan, or return None on failure."""
-    try:
-        compute_plan_mod = import_module("coremltools.models.compute_plan")
-    except ImportError:
-        _ = sys.stderr.write("  MLComputePlan requires coremltools 8.0+; skipping compute plan analysis.\n")
-        return None
-
-    ct = import_module("coremltools")
-    compute_unit_cls = cast("object", getattr(ct, "ComputeUnit", None))
-    compute_all = cast("object", getattr(compute_unit_cls, "ALL", None)) if compute_unit_cls is not None else None
-    if compute_all is None:
-        _ = sys.stderr.write("  ComputeUnit.ALL not available.\n")
-        return None
-
-    plan_cls = cast("object", getattr(compute_plan_mod, "MLComputePlan", None))
-    load_fn = getattr(plan_cls, "load_from_path", None) if plan_cls is not None else None
-    if load_fn is None:
-        _ = sys.stderr.write("  MLComputePlan.load_from_path not available.\n")
-        return None
-
-    compiled_path = _compile_for_plan(model_path)
-    if compiled_path is None:
-        _ = sys.stderr.write("  Could not compile model for compute plan inspection.\n")
-        return None
-
-    try:
-        return cast("object", load_fn(compiled_path, compute_units=compute_all))
-    except Exception as exc:  # noqa: BLE001 - coremltools internals can raise arbitrary errors
-        _ = sys.stderr.write(f"  Could not load compute plan: {exc}\n")
-        return None
-
-
-def _format_compute_plan(model_path: str) -> str | None:
-    """Load a Core ML compute plan and return a device assignment summary string."""
-    plan = _load_compute_plan(model_path)
-    if plan is None:
-        return None
-
-    try:
-        compute_device_mod = import_module("coremltools.models.compute_device")
-    except ImportError:
-        return None
-
-    ane_cls = cast("type[object] | None", getattr(compute_device_mod, "MLNeuralEngineComputeDevice", None))
-    gpu_cls = cast("type[object] | None", getattr(compute_device_mod, "MLGPUComputeDevice", None))
-    cpu_cls = cast("type[object] | None", getattr(compute_device_mod, "MLCPUComputeDevice", None))
-
-    counts, ane_weight, total = _walk_plan_operations(plan, ane_cls=ane_cls, gpu_cls=gpu_cls, cpu_cls=cpu_cls)
-
-    if total == 0:
-        return None
-
-    lines: list[str] = [f"\n  Compute plan ({total} operations):"]
-    for name in ("ANE", "GPU", "CPU"):
-        count = counts.get(name, 0)
-        if count > 0:
-            lines.append(f"    {name}: {count} ops ({100 * count // total}%)")
-    unknown = counts.get("unknown", 0)
-    if unknown > 0:
-        lines.append(f"    Unassigned: {unknown} ops")
-
-    if counts.get("ANE", 0) > 0:
-        ane_count = counts["ANE"]
-        lines.append(f"\n  Neural Engine will handle {ane_count}/{total} operations.")
-        if ane_weight > 0:
-            lines.append(f"  Estimated ANE workload share: {ane_weight:.0%}")
-    else:
-        lines.extend([
-            "\n  No operations scheduled for Neural Engine.",
-            "  This model may not support ANE acceleration on this hardware.",
-        ])
-    lines.append("")
-    return "\n".join(lines)
-
-
-def print_compute_plan(model_path: str) -> None:
-    """Load a Core ML compute plan and print device assignment summary to stderr."""
-    text = _format_compute_plan(model_path)
-    if text:
-        _ = sys.stderr.write(text)
-
-
 def diagnose() -> int:
     """Load the Core ML model, inspect its compute plan, and benchmark inference."""
-    import time  # noqa: PLC0415
-
     model_name = coreml_model_name()
     _ = sys.stderr.write(f"Core ML diagnostics for {model_name}\n")
     _ = sys.stderr.write("=" * 60 + "\n\n")
@@ -721,66 +514,54 @@ def diagnose() -> int:
     return 0
 
 
-def _pid_file_path() -> Path:
-    """Return the path to the PID file for the Core ML server."""
-    return DEFAULT_PID_DIR / PID_FILE_NAME
-
-
-def _write_pid_file() -> None:
-    """Write the current process PID to the PID file."""
-    pid_file = _pid_file_path()
-    pid_file.parent.mkdir(parents=True, exist_ok=True)
-    _ = pid_file.write_text(str(os.getpid()) + "\n")
-
-
-def _remove_pid_file() -> None:
-    """Remove the PID file if it exists."""
-    _pid_file_path().unlink(missing_ok=True)
-
-
-def _read_pid_file() -> int | None:
-    """Read the PID from the PID file, or None if absent/invalid."""
-    try:
-        text = _pid_file_path().read_text().strip()
-        return int(text) if text else None
-    except (FileNotFoundError, ValueError):
+def _daemonize() -> int | None:
+    """Fork into a background daemon.  Returns a write-fd the child must
+    write to once ready, or *None* in the parent (which should ``return 0``).
+    The parent blocks until the child signals readiness so startup progress
+    is printed before the shell prompt returns.
+    """
+    ready_read_fd, ready_write_fd = os.pipe()
+    pid = os.fork()
+    if pid > 0:
+        # Parent: wait for the child to signal readiness then exit.
+        os.close(ready_write_fd)
+        _ = os.read(ready_read_fd, 1)  # blocks until child writes or pipe breaks
+        os.close(ready_read_fd)
         return None
+    # Child: detach from the controlling terminal but keep stderr for
+    # loading progress.  stdin/stdout go to /dev/null immediately.
+    os.close(ready_read_fd)
+    os.setsid()
+    devnull = os.open(os.devnull, os.O_RDWR)
+    _ = os.dup2(devnull, sys.stdin.fileno())
+    _ = os.dup2(devnull, sys.stdout.fileno())
+    os.close(devnull)
+    return ready_write_fd
 
 
-def _is_pid_alive(pid: int) -> bool:
-    """Check if a process with the given PID is still running."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # process exists but we can't signal it
-    return True
-
-
-def stop_server() -> bool:
-    """Stop a running Core ML server via PID file. Returns True if a signal was sent."""
-    pid = _read_pid_file()
-    if pid is None:
-        return False
-    if not _is_pid_alive(pid):
-        _remove_pid_file()
-        return False
-    import signal  # noqa: PLC0415
-
-    os.kill(pid, signal.SIGTERM)
-    _remove_pid_file()
-    return True
+def _silence_stderr() -> None:
+    """Redirect stderr to /dev/null."""
+    devnull = os.open(os.devnull, os.O_RDWR)
+    _ = os.dup2(devnull, sys.stderr.fileno())
+    os.close(devnull)
 
 
 def serve(*, foreground: bool = False) -> int:
     # Check for an already-running instance.
-    existing_pid = _read_pid_file()
-    if existing_pid is not None and _is_pid_alive(existing_pid):
+    existing_pid = read_pid_file()
+    if existing_pid is not None and is_pid_alive(existing_pid):
         _ = sys.stderr.write(f"Core ML server is already running (PID {existing_pid}).\n")
         _ = sys.stderr.write("Stop it first with: pci-doctor --stop\n")
         return 1
 
+    ready_write_fd: int | None = None
+    if not foreground:
+        ready_write_fd = _daemonize()
+        if ready_write_fd is None:
+            return 0  # parent
+
+    # Load the model in the process that will actually serve requests.
+    # Core ML's Objective-C/Metal/ANE runtime handles do not survive fork().
     model_name = coreml_model_name()
     _ = sys.stderr.write(f"Loading Core ML model {model_name} with compute_units=ALL (ANE + GPU + CPU)...\n")
     _ = sys.stderr.flush()
@@ -791,7 +572,7 @@ def serve(*, foreground: bool = False) -> int:
         huggingface_hub = import_module("huggingface_hub")
         cache_dir = config.env_text("PROJECT_CODE_INTELLIGENCE_COREML_CACHE_DIR")
         model_path = _resolve_model_path(model_name, huggingface_hub=huggingface_hub, cache_dir=cache_dir)
-        compute_plan_text = _format_compute_plan(model_path)
+        compute_plan_text = format_compute_plan(model_path)
     if compute_plan_text:
         _ = sys.stderr.write(compute_plan_text)
         _ = sys.stderr.flush()
@@ -801,25 +582,26 @@ def serve(*, foreground: bool = False) -> int:
     server = CoreMLHTTPServer((host, port), CoreMLHandler, embedder=embedder)
     max_info = f", max_length={embedder.max_length}" if embedder.max_length else ""
     _ = sys.stderr.write(f"Core ML embedding server listening on {host}:{port} with model {model_name}{max_info}\n")
-    _ = sys.stderr.flush()
 
     if not foreground:
-        pid = os.fork()
-        if pid > 0:
-            # Parent: print the daemon PID and exit so the user gets their shell back.
-            _ = sys.stderr.write(f"Daemonized as PID {pid}. Stop with: pci-doctor --stop\n")
-            return 0
-        # Child: detach from the controlling terminal.
-        os.setsid()
+        _ = sys.stderr.write(f"Daemonized as PID {os.getpid()}. Stop with: pci-doctor --stop\n")
+        _ = sys.stderr.flush()
+        # Signal the parent that loading is done so it can return the shell.
+        _ = os.write(ready_write_fd, b"\n")  # type: ignore[arg-type]
+        os.close(ready_write_fd)  # type: ignore[arg-type]
+        # Now redirect stderr to /dev/null for the long-running server.
+        _silence_stderr()
+    else:
+        _ = sys.stderr.flush()
 
-    _write_pid_file()
+    write_pid_file()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
-        _remove_pid_file()
+        remove_pid_file()
     return 0
 
 
