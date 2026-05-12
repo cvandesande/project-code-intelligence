@@ -54,7 +54,7 @@ def conninfo(settings: DatabaseSettings | None = None) -> str:
         raise DatabaseConnectionError(
             "Missing PostgreSQL connection settings for pgvector: "
             + ", ".join(missing)
-            + ". Set PGVECTOR_DSN, or set PGVECTOR_HOST/PGVECTOR_PORT/"
+            + ". Set PROJECT_CODE_INTELLIGENCE_DATABASE_URL, or set PGVECTOR_HOST/PGVECTOR_PORT/"
             "PGVECTOR_DB/PGVECTOR_USER/PGVECTOR_PASS."
         )
 
@@ -80,7 +80,7 @@ def connect(*, readonly: bool | None = None, settings: DatabaseSettings | None =
         raise DatabaseConnectionError(
             "Could not connect to PostgreSQL/pgvector using "
             + connection_hint(settings)
-            + ". Set PGVECTOR_DSN, or set PGVECTOR_HOST/PGVECTOR_PORT/"
+            + ". Set PROJECT_CODE_INTELLIGENCE_DATABASE_URL, or set PGVECTOR_HOST/PGVECTOR_PORT/"
             "PGVECTOR_DB/PGVECTOR_USER/PGVECTOR_PASS for your database.\n" + str(exc)
         ) from exc
     if readonly:

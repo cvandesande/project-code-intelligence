@@ -132,20 +132,42 @@ class DoctorTests(unittest.TestCase):
                 CheckResult("gpu-0", "ok", "AMD GPU: shared/unified=64.0 GiB", "card=card0; driver=amdgpu"),
                 CheckResult("gpu-runtime-amd", "ok", "AMD GPU runtime devices are accessible."),
                 CheckResult("npu", "ok", "AMD NPU device detected: /dev/accel/accel0"),
-                CheckResult("database", "ok", "connected to codeintel as codeintel", "PostgreSQL 17"),
-                CheckResult("embedding-endpoint", "ok", "response model=local; dimensions=768; latency=0.01s"),
+                CheckResult(
+                    "database",
+                    "ok",
+                    "connected to codeintel as codeintel at "
+                    "postgresql://codeintel@127.0.0.1:5433/codeintel sslmode=prefer",
+                    "PostgreSQL 17",
+                ),
+                CheckResult(
+                    "embedding-config",
+                    "ok",
+                    "endpoint=http://127.0.0.1:18081/v1/embeddings model=embed-gemma-300m-FLM",
+                ),
+                CheckResult(
+                    "embedding-endpoint",
+                    "ok",
+                    "response model=embed-gemma-300m-FLM; dimensions=768; latency=0.01s",
+                ),
                 CheckResult("option-cpu", "ok", "CPU embeddings: FastEmbed default demo."),
+                CheckResult("option-npu", "ok", "AMD NPU embeddings: Lemonade FLM default demo."),
                 CheckResult("option-gpu-amd", "ok", "AMD GPU embeddings: llama.cpp ROCm default demo.gguf."),
             ],
             color=False,
         )
 
         self.assertIn("Status: ok ready", output)
-        self.assertIn("Available embedding paths", output)
-        self.assertIn("AMD GPU: ok AMD GPU embeddings", output)
-        self.assertIn("Available startup commands", output)
-        self.assertIn("cpu: docker compose --profile cpu up -d --build", output)
-        self.assertIn("amdgpu: docker compose --profile amdgpu up -d --build", output)
+        self.assertIn("Database: ok connected to codeintel as codeintel at postgresql://codeintel@", output)
+        self.assertNotIn("codeintel:codeintel", output)
+        self.assertIn("Active embedding path", output)
+        self.assertIn("NPU: ok response model=embed-gemma-300m-FLM", output)
+        self.assertNotIn("Available embedding paths", output)
+        self.assertIn("Switch embedding runtime", output)
+        self.assertIn("cpu: docker compose --profile cpu up -d --build fastembed", output)
+        self.assertNotIn("npu: docker compose --profile npu up -d lemonade-npu", output)
+        self.assertNotIn("PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT=", output)
+        self.assertNotIn("PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL=", output)
+        self.assertIn("amdgpu: docker compose --profile amdgpu up -d --build llama-rocm", output)
         self.assertNotIn("nvidia: docker compose --profile nvidia", output)
         self.assertNotIn("card=card0", output)
 
@@ -168,8 +190,10 @@ class DoctorTests(unittest.TestCase):
             color=False,
         )
 
-        self.assertIn("Remote: ok Remote OpenAI-compatible embeddings.", output)
-        self.assertIn("remote: docker compose up -d pgvector", output)
+        self.assertIn("Active embedding path", output)
+        self.assertIn("Remote: ok response model=text-embedding-3-small", output)
+        self.assertNotIn("Available embedding paths", output)
+        self.assertNotIn("remote: no embedding container needed", output)
 
     def test_format_summary_colorizes_headings_and_startup_profiles(self) -> None:
         output = format_summary(

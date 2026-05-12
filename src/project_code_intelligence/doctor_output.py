@@ -182,6 +182,60 @@ def remote_embedding_validated(by_name: Mapping[str, CheckResult]) -> bool:
     return bool(hostname and hostname not in LOOPBACK_HOSTS)
 
 
+def embedding_response_model(by_name: Mapping[str, CheckResult]) -> str | None:
+    endpoint = by_name.get("embedding-endpoint")
+    if endpoint is None:
+        return None
+    match = re.search(r"\bresponse model=([^;]+)", endpoint.message)
+    return match.group(1).strip() if match else None
+
+
+def active_embedding_profile(by_name: Mapping[str, CheckResult]) -> tuple[str, str]:
+    if remote_embedding_validated(by_name):
+        return "remote", "Remote"
+
+    model = (embedding_response_model(by_name) or "").lower()
+    candidates = [
+        ("npu", "NPU", ("embed-gemma" in model or model.endswith("-flm")) and ok_result(by_name, "option-npu")),
+        (
+            "cpu",
+            "CPU",
+            ("jina" in model or "bge" in model or "fastembed" in model) and ok_result(by_name, "option-cpu"),
+        ),
+        ("amdgpu", "AMD GPU", ("qwen" in model or ".gguf" in model) and ok_result(by_name, "option-gpu-amd")),
+        (
+            "nvidia",
+            "NVIDIA GPU",
+            ("qwen" in model or ".gguf" in model) and ok_result(by_name, "option-gpu-nvidia"),
+        ),
+        (
+            "apple-gpu",
+            "Apple GPU",
+            ("qwen" in model or ".gguf" in model) and ok_result(by_name, "option-gpu-apple"),
+        ),
+        ("gpu", "GPU", "qwen" in model or ".gguf" in model),
+    ]
+    for profile, label, matched in candidates:
+        if matched:
+            return profile, label
+    return "local", "Local endpoint"
+
+
+def active_embedding_lines(by_name: Mapping[str, CheckResult], *, color: bool = False) -> list[str]:
+    endpoint = by_name.get("embedding-endpoint")
+    if endpoint is None or endpoint.status != "ok":
+        return []
+    _, label = active_embedding_profile(by_name)
+    message = endpoint.message
+    if config_item := by_name.get("embedding-config"):
+        message = f"{message}; {config_item.message}"
+    return [
+        "",
+        heading_text("Active embedding path", color=color),
+        f"  {label_text(label, color=color)}: {status_text('ok', color=color)} {message}",
+    ]
+
+
 def summary_option_names(by_name: Mapping[str, CheckResult]) -> list[str]:
     option_names = [
         "option-cpu",
@@ -196,42 +250,71 @@ def summary_option_names(by_name: Mapping[str, CheckResult]) -> list[str]:
     return option_names
 
 
+def local_embedding_startup_commands(by_name: Mapping[str, CheckResult]) -> list[tuple[str, str]]:
+    commands: list[tuple[str, str]] = []
+    if ok_result(by_name, "option-cpu"):
+        commands.append(("cpu", "docker compose --profile cpu up -d --build fastembed"))
+    if ok_result(by_name, "option-npu"):
+        commands.append(("npu", "docker compose --profile npu up -d lemonade-npu"))
+    if ok_result(by_name, "option-gpu-amd") and ok_result(by_name, "gpu-runtime-amd"):
+        commands.append(("amdgpu", "docker compose --profile amdgpu up -d --build llama-rocm"))
+    if ok_result(by_name, "option-gpu-nvidia") and ok_result(by_name, "gpu-runtime-nvidia"):
+        commands.append(("nvidia", "docker compose --profile nvidia up -d --build llama-cuda"))
+    if ok_result(by_name, "option-gpu-apple"):
+        commands.append((
+            "apple-gpu",
+            "export PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL=/path/to/Qwen3-Embedding-0.6B-Q8_0.gguf; "
+            "pci-embedding-server",
+        ))
+    return commands
+
+
 def startup_command_lines(by_name: Mapping[str, CheckResult], *, color: bool = False) -> list[str]:
     lines = ["", heading_text("Available startup commands", color=color)]
     lines.append(format_startup_command("pgvector", "docker compose up -d pgvector", color=color))
-    if ok_result(by_name, "option-cpu"):
-        lines.append(format_startup_command("cpu", "docker compose --profile cpu up -d --build", color=color))
-    if ok_result(by_name, "option-npu"):
-        lines.append(
-            format_startup_command(
-                "npu",
-                "docker compose --profile npu up -d; "
-                "export PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL=embed-gemma-300m-FLM",
-                color=color,
-            )
-        )
-    if ok_result(by_name, "option-gpu-amd") and ok_result(by_name, "gpu-runtime-amd"):
-        lines.append(format_startup_command("amdgpu", "docker compose --profile amdgpu up -d --build", color=color))
-    if ok_result(by_name, "option-gpu-nvidia") and ok_result(by_name, "gpu-runtime-nvidia"):
-        lines.append(format_startup_command("nvidia", "docker compose --profile nvidia up -d --build", color=color))
-    if ok_result(by_name, "option-gpu-apple"):
-        lines.append(
-            format_startup_command(
-                "apple-gpu",
-                "export PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL=/path/to/Qwen3-Embedding-0.6B-Q8_0.gguf; "
-                "pci-embedding-server",
-                color=color,
-            )
-        )
+    for profile, command in local_embedding_startup_commands(by_name):
+        lines.append(format_startup_command(profile, command, color=color))
     if remote_embedding_validated(by_name):
         lines.append(
             format_startup_command(
                 "remote",
-                "docker compose up -d pgvector; use the configured remote embedding endpoint",
+                "no embedding container needed; use the configured remote embedding endpoint",
                 color=color,
             )
         )
     return lines
+
+
+def switch_embedding_lines(by_name: Mapping[str, CheckResult], *, color: bool = False) -> list[str]:
+    active_profile, _ = active_embedding_profile(by_name)
+    commands = [
+        (profile, command)
+        for profile, command in local_embedding_startup_commands(by_name)
+        if profile != active_profile
+    ]
+    if not commands:
+        return []
+    lines = ["", heading_text("Switch embedding runtime", color=color)]
+    lines.append(
+        "  Stop current local embedding service first: docker compose stop fastembed lemonade-npu llama-rocm llama-cuda"
+    )
+    lines.extend(format_startup_command(profile, command, color=color) for profile, command in commands)
+    return lines
+
+
+def embedding_summary_lines(by_name: Mapping[str, CheckResult], *, color: bool = False) -> list[str]:
+    option_names = summary_option_names(by_name)
+    options = [by_name[name] for name in option_names if name in by_name and by_name[name].status == "ok"]
+    if ok_result(by_name, "embedding-endpoint"):
+        return [*active_embedding_lines(by_name, color=color), *switch_embedding_lines(by_name, color=color)]
+    if not options:
+        return []
+    return [
+        "",
+        heading_text("Available embedding paths", color=color),
+        *(format_option(item, color=color) for item in options),
+        *startup_command_lines(by_name, color=color),
+    ]
 
 
 def format_summary(results: Sequence[CheckResult], *, color: bool = False) -> str:
@@ -270,13 +353,7 @@ def format_summary(results: Sequence[CheckResult], *, color: bool = False) -> st
         concise_line("Embedding endpoint", by_name.get("embedding-endpoint") or by_name.get("embedding"), color=color)
     )
 
-    option_names = summary_option_names(by_name)
-    options = [by_name[name] for name in option_names if name in by_name and by_name[name].status == "ok"]
-    if options:
-        lines.extend(["", heading_text("Available embedding paths", color=color)])
-        lines.extend(format_option(item, color=color) for item in options)
-
-    lines.extend(startup_command_lines(by_name, color=color))
+    lines.extend(embedding_summary_lines(by_name, color=color))
 
     issues = summary_issue_items(results)
     if issues:

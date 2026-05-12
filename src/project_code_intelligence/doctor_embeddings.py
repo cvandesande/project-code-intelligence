@@ -65,7 +65,8 @@ def check_embedding_options(
                 "option-npu",
                 "ok",
                 f"AMD NPU embeddings: Lemonade FLM default {config.DEFAULT_LEMONADE_EMBEDDING_MODEL}.",
-                "Use docker compose --profile npu up -d, then set PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL.",
+                "Use docker compose --profile npu up -d lemonade-npu. Set "
+                "PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL only to override the default.",
             )
         )
     else:
@@ -85,7 +86,7 @@ def check_embedding_options(
                 "option-gpu-amd",
                 "ok",
                 f"AMD GPU embeddings: llama.cpp ROCm default {GPU_QWEN3_DEFAULT_MODEL}.",
-                f"{gpu_model_detail} Use docker compose --profile amdgpu up -d --build.",
+                f"{gpu_model_detail} Use docker compose --profile amdgpu up -d --build llama-rocm.",
             )
         )
     if has_gpu_vendor(gpus, "NVIDIA"):
@@ -94,7 +95,7 @@ def check_embedding_options(
                 "option-gpu-nvidia",
                 "ok",
                 f"NVIDIA GPU embeddings: llama.cpp CUDA default {GPU_QWEN3_DEFAULT_MODEL}.",
-                f"{gpu_model_detail} Use docker compose --profile nvidia up -d --build.",
+                f"{gpu_model_detail} Use docker compose --profile nvidia up -d --build llama-cuda.",
             )
         )
     if has_gpu_vendor(gpus, "Apple"):

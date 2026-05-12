@@ -23,19 +23,19 @@ as the public example.
 
 ## Quick Start
 
-Use the checkout scripts directly, or install the package into your active
-Python environment.
+Install the CLI once, then pass the repository path you want to index.
 
 ```sh
 cd /path/to/project-code-intelligence
-uv sync --extra dev
-export PATH="$PWD:$PATH"
+uv tool install --editable .
 pci-doctor --skip-db --embedding skip
 ```
 
 The first `pci-doctor` run prints startup commands that fit the current
-machine. Run one of the commands from its `Available startup commands` section,
-then verify the chosen services:
+machine. For a fully local setup, start `pgvector` plus one embedding service.
+If you already have an external Postgres/pgvector database, skip `pgvector` and
+start only the embedding service you want to use. Then verify the chosen
+services:
 
 ```sh
 pci-doctor --embedding required
@@ -45,16 +45,41 @@ Text-only indexing is available as a fallback for bootstrap, debugging, or
 privacy-sensitive environments. In that case, choose the Postgres-only command
 and verify with `pci-doctor --embedding skip`.
 
-Then index a Git repository:
+Then index a Git repository. Use `.` when you mean the current directory:
 
 ```sh
 cd /path/to/repo-to-index
-pci-index --dry-run
-pci-index
+pci-index . --dry-run
+pci-index .
 pci-mcp-smoke
 ```
 
-For that fallback text-only mode, run `pci-index --no-embed`.
+You can also index one or more repositories without changing directories:
+
+```sh
+pci-index /path/to/repo-to-index
+pci-index /path/to/repo-a /path/to/repo-b
+```
+
+For advanced ingest options, put them after `--`:
+
+```sh
+pci-index /path/to/repo-to-index -- --limit-files 100
+```
+
+For that fallback text-only mode, run `pci-index . --no-embed`.
+
+To wipe and rebuild the code-intelligence tables in the configured database:
+
+```sh
+pci-index --reset-code-intel
+```
+
+This drops and recreates this project's `project_code_intel_*` tables. It does
+not drop the database or unrelated tables. The command prints the resolved
+database target, asks for confirmation before deleting anything, and exits
+without scanning. Run `pci-index` afterwards to rebuild the index. For
+non-interactive automation, add `--i-know-this-deletes-code-intel-db`.
 
 In a brand-new local repository, make an initial commit before scanning so the
 indexer has a Git `HEAD` snapshot.
@@ -64,18 +89,46 @@ indexer has a Git `HEAD` snapshot.
 For development:
 
 ```sh
+cd /path/to/project-code-intelligence
 uv sync --extra dev
+export PATH="$PWD/.venv/bin:$PATH"
 ```
 
-For use from another repository:
+For normal CLI use, install it once as a `uv` tool. This command can be run from
+any directory; it installs console scripts into your user tool path, usually
+`~/.local/bin`.
 
 ```sh
+uv tool install --editable /path/to/project-code-intelligence
+```
+
+After that, run `pci-index .` from any repository you want to scan:
+
+```sh
+cd /path/to/repo-to-index
+pci-index .
+```
+
+Make sure the tool path is on `PATH`:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+For use inside a specific repository virtualenv instead:
+
+```sh
+cd /path/to/repo-to-index
+uv venv
+. .venv/bin/activate
 uv pip install -e /path/to/project-code-intelligence
 ```
 
-Without `uv`:
+Without `uv`, create and activate a virtualenv first:
 
 ```sh
+python -m venv .venv
+. .venv/bin/activate
 python -m pip install -e /path/to/project-code-intelligence
 ```
 
@@ -102,8 +155,17 @@ Point Codex, Claude Desktop, or another MCP client at `pci-mcp`:
 }
 ```
 
-The default database settings match the local Docker Compose database. Set
-`PGVECTOR_*` only when using a different Postgres/pgvector instance.
+The default database settings match the local Docker Compose database. For a
+different Postgres/pgvector instance, prefer one database URL:
+
+```sh
+export PROJECT_CODE_INTELLIGENCE_DATABASE_URL='postgresql://user:password@host:5432/database?sslmode=prefer'
+```
+
+Percent-encode special characters in the username or password.
+
+The older split `PGVECTOR_*` variables remain supported, mostly for Docker
+Compose and compatibility.
 
 For agent-heavy workflows, copy
 [`docs/examples/AGENTS.md`](docs/examples/AGENTS.md) into the repository being
@@ -115,8 +177,13 @@ Embeddings are the expected path for normal use. They are what make the MCP
 index useful for semantic search instead of only exact text lookup.
 
 Common paths are CPU FastEmbed, AMD Ryzen AI NPU, AMD GPU, NVIDIA GPU, and
-remote OpenAI-compatible providers. `pci-doctor` prints the exact startup
+remote OpenAI-compatible providers. `pci-doctor` prints the exact service
 commands that are available on the current machine.
+
+Local CPU, NPU, and GPU embedding services all publish the same host endpoint by
+default: `http://127.0.0.1:18081/v1/embeddings`. Run only one local embedding
+service at a time. Runtime-specific models have profile defaults; set model
+environment variables only when overriding those defaults.
 
 Run `pci-doctor` to see which paths are available on the current machine:
 
@@ -133,15 +200,17 @@ local endpoint or a provider you trust, and set
 
 ## Docker Compose Profiles
 
-Profiles are runtime choices, not project modes:
+Profiles are runtime choices, not project modes. The local database is isolated
+from the embedding services so users with an external Postgres/pgvector database
+can start embeddings without also starting a local database.
 
-| Profile | Use when |
+| Profile or service | Use when |
 | --- | --- |
-| none | Postgres/pgvector only, for text search or an external embedding provider. |
-| `cpu` | Portable local semantic-search demo with FastEmbed. |
-| `npu` | Experimental AMD Ryzen AI/XDNA NPU embeddings. |
-| `amdgpu` | Experimental AMD ROCm llama.cpp embeddings. |
-| `nvidia` | Experimental NVIDIA CUDA llama.cpp embeddings. |
+| `pgvector` (`db`) | Local Postgres/pgvector database. Skip this when using an external database. |
+| `cpu` (`fastembed`) | Portable local semantic-search demo with FastEmbed. |
+| `npu` (`lemonade-npu`) | Experimental AMD Ryzen AI/XDNA NPU embeddings. |
+| `amdgpu` (`llama-rocm`) | Experimental AMD ROCm llama.cpp embeddings. |
+| `nvidia` (`llama-cuda`) | Experimental NVIDIA CUDA llama.cpp embeddings. |
 
 List the profiles with:
 
@@ -149,13 +218,30 @@ List the profiles with:
 docker compose config --profiles
 ```
 
+For a local database, start:
+
+```sh
+docker compose up -d pgvector
+```
+
+For embeddings only, start the specific service:
+
+```sh
+docker compose --profile cpu up -d --build fastembed
+docker compose --profile npu up -d lemonade-npu
+docker compose --profile amdgpu up -d --build llama-rocm
+docker compose --profile nvidia up -d --build llama-cuda
+```
+
 Most users should start with `cpu`, then let `pci-doctor` suggest hardware
 specific commands if local acceleration is available.
 
 ## Docker Lifecycle
 
-Use `up -d` to start the profile suggested by `pci-doctor`. Use `stop` when you
-want to pause containers but keep them around:
+Use the exact service commands suggested by `pci-doctor`. Start `pgvector` only
+when you want the local database; omit it when
+`PROJECT_CODE_INTELLIGENCE_DATABASE_URL` points at an external database. Use
+`stop` when you want to pause containers but keep them around:
 
 ```sh
 docker compose stop
@@ -206,7 +292,7 @@ Private profiles do not need to be registered in this package. Put them on
 `PYTHONPATH` and select them with a fully qualified profile path:
 
 ```sh
-PROJECT_CODE_INTELLIGENCE_PROFILE=my_project.code_profile:MyProjectProfile pci-index
+PROJECT_CODE_INTELLIGENCE_PROFILE=my_project.code_profile:MyProjectProfile pci-index .
 ```
 
 Profiles are ordinary Python code, so load them only from trusted local modules.

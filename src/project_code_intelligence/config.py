@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from project_code_intelligence.exceptions import ConfigError
 
@@ -24,10 +24,12 @@ DEFAULT_PGVECTOR_PASS = DEFAULT_PGVECTOR_USER
 DEFAULT_FASTEMBED_MODEL = "jinaai/jina-embeddings-v2-base-code"
 DEFAULT_FASTEMBED_HOST = "127.0.0.1"
 DEFAULT_FASTEMBED_PORT = 18081
-DEFAULT_FASTEMBED_EMBEDDING_ENDPOINT = f"http://{DEFAULT_FASTEMBED_HOST}:{DEFAULT_FASTEMBED_PORT}/v1/embeddings"
+DEFAULT_LOCAL_EMBEDDING_ENDPOINT = f"http://{DEFAULT_FASTEMBED_HOST}:{DEFAULT_FASTEMBED_PORT}/v1/embeddings"
+DEFAULT_FASTEMBED_EMBEDDING_ENDPOINT = DEFAULT_LOCAL_EMBEDDING_ENDPOINT
 DEFAULT_EMBEDDING_ENDPOINT_MODEL = "local"
-DEFAULT_LEMONADE_EMBEDDING_ENDPOINT = "http://127.0.0.1:13305/api/v1/embeddings"
+DEFAULT_LEMONADE_EMBEDDING_ENDPOINT = DEFAULT_LOCAL_EMBEDDING_ENDPOINT
 DEFAULT_LEMONADE_EMBEDDING_MODEL = "embed-gemma-300m-FLM"
+DEFAULT_LOCAL_EMBEDDING_ENDPOINT_MODEL = DEFAULT_LEMONADE_EMBEDDING_MODEL
 DEFAULT_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
 DEFAULT_VOYAGE_EMBEDDING_MODEL = "voyage-3.5"
 
@@ -113,8 +115,8 @@ def default_embedding_endpoint_model(env: Env | None = None, *, endpoint: str | 
         return configured
     if endpoint is None:
         endpoint = env_text("PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT", env=env)
-    if endpoint and endpoint.rstrip("/") == DEFAULT_LEMONADE_EMBEDDING_ENDPOINT:
-        return DEFAULT_LEMONADE_EMBEDDING_MODEL
+    if endpoint and endpoint.rstrip("/") == DEFAULT_LOCAL_EMBEDDING_ENDPOINT:
+        return DEFAULT_LOCAL_EMBEDDING_ENDPOINT_MODEL
     return DEFAULT_EMBEDDING_ENDPOINT_MODEL
 
 
@@ -122,6 +124,26 @@ def endpoint_hostname(endpoint: str | None) -> str | None:
     if not endpoint:
         return None
     return urlsplit(endpoint).hostname
+
+
+def mask_database_dsn(dsn: str) -> str:
+    parts = urlsplit(dsn)
+    if not parts.scheme or not parts.netloc:
+        return "database URL=<configured>"
+    user = f"{parts.username}@" if parts.username else ""
+    host = parts.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    try:
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        port = ""
+    query_parts: list[str] = []
+    for item in parts.query.split("&"):
+        key = item.split("=", 1)[0]
+        query_parts.append(f"{key}=<hidden>" if key.lower() == "password" else item)
+    query = "&".join(query_parts)
+    return urlunsplit((parts.scheme, f"{user}{host}{port}", parts.path, query, ""))
 
 
 def embedding_api_key(endpoint: str | None = None, *, env: Env | None = None) -> str | None:
@@ -139,6 +161,7 @@ def embedding_api_key(endpoint: str | None = None, *, env: Env | None = None) ->
 @dataclass(frozen=True)
 class DatabaseSettings:
     dsn: str | None = None
+    dsn_source: str = "PROJECT_CODE_INTELLIGENCE_DATABASE_URL"
     host: str = DEFAULT_PGVECTOR_HOST
     port: str = DEFAULT_PGVECTOR_PORT
     dbname: str | None = DEFAULT_PGVECTOR_DB
@@ -149,8 +172,12 @@ class DatabaseSettings:
 
     @classmethod
     def from_env(cls, env: Env | None = None) -> DatabaseSettings:
+        database_url = env_text("PROJECT_CODE_INTELLIGENCE_DATABASE_URL", env=env)
+        legacy_dsn = env_text("PGVECTOR_DSN", env=env)
+        dsn = database_url or legacy_dsn
         return cls(
-            dsn=env_text("PGVECTOR_DSN", env=env),
+            dsn=dsn,
+            dsn_source="PROJECT_CODE_INTELLIGENCE_DATABASE_URL" if database_url else "PGVECTOR_DSN",
             host=env_text("PGVECTOR_HOST", DEFAULT_PGVECTOR_HOST, env=env) or DEFAULT_PGVECTOR_HOST,
             port=env_text("PGVECTOR_PORT", DEFAULT_PGVECTOR_PORT, env=env) or DEFAULT_PGVECTOR_PORT,
             dbname=env_text("PGVECTOR_DB", DEFAULT_PGVECTOR_DB, env=env),
@@ -175,7 +202,7 @@ class DatabaseSettings:
 
     def connection_hint(self) -> str:
         if self.dsn:
-            return "PGVECTOR_DSN=<hidden>"
+            return f"{self.dsn_source}=<hidden>"
         return (
             f"PGVECTOR_HOST={self.host} "
             f"PGVECTOR_PORT={self.port} "
@@ -183,6 +210,15 @@ class DatabaseSettings:
             f"PGVECTOR_USER={self.user or '<unset>'} "
             f"PGVECTOR_PASS={'<set>' if self.password else '<unset>'}"
         )
+
+    def display_target(self) -> str:
+        if self.dsn:
+            return mask_database_dsn(self.dsn)
+        host = self.host
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        target = f"postgresql://{self.user or '<unset>'}@{host}:{self.port}/{self.dbname or '<unset>'}"
+        return f"{target} sslmode={self.sslmode}"
 
 
 @dataclass(frozen=True)
