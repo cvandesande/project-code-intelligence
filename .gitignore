@@ -41,7 +41,7 @@ postgres-data/
 # Static-analysis output generated from private or local source trees.
 *.sarif
 *.sarif.json
-sarif/
+/sarif/
 semgrep-results/
 codeql-results/
 reports/sarif/

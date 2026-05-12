@@ -5,18 +5,20 @@ import unittest
 from unittest.mock import patch
 
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError
-from project_code_intelligence.mcp_filters import (
+from project_code_intelligence.mcp.filters import (
     code_intel_clauses,
     json_argument,
     status_filters,
 )
-from project_code_intelligence.mcp_protocol import (
+from project_code_intelligence.mcp.protocol import (
     optional_bool,
     optional_int,
     optional_text,
     require_int,
     result_text,
 )
+from project_code_intelligence.mcp.tool_catalog import TOOL_DEFINITIONS, validate_tool_arguments
+from project_code_intelligence.mcp.transport import handle_tool_call
 from project_code_intelligence.server import vector_literal_dimensions
 
 
@@ -87,6 +89,34 @@ class McpContractTests(unittest.TestCase):
         self.assertEqual(vector_literal_dimensions("[]"), 0)
         self.assertEqual(vector_literal_dimensions("[0.1]"), 1)
         self.assertEqual(vector_literal_dimensions("[0.1,0.2,0.3]"), 3)
+
+    def test_tool_schema_validation_rejects_unknown_and_bad_arguments(self) -> None:
+        text_search = TOOL_DEFINITIONS["search_code_intel_text"]
+
+        validate_tool_arguments(text_search, {"query": "hello", "limit": 10})
+
+        with self.assertRaises(McpProtocolError):
+            validate_tool_arguments(text_search, {"query": "hello", "surprise": True})
+        with self.assertRaises(McpProtocolTypeError):
+            validate_tool_arguments(text_search, {"query": "hello", "limit": "10"})
+        with self.assertRaises(McpProtocolError):
+            validate_tool_arguments(text_search, {"query": "hello", "limit": 500})
+
+    def test_required_tool_arguments_are_enforced_before_handlers(self) -> None:
+        record_fetch = TOOL_DEFINITIONS["get_code_intel_record"]
+
+        with self.assertRaises(McpProtocolError):
+            validate_tool_arguments(record_fetch, {})
+        with self.assertRaises(McpProtocolTypeError):
+            validate_tool_arguments(record_fetch, {"id": True})
+        with self.assertRaises(McpProtocolError):
+            validate_tool_arguments(record_fetch, {"id": 0})
+
+    def test_tool_call_rejects_non_object_params_and_arguments(self) -> None:
+        with self.assertRaises(McpProtocolTypeError):
+            _ = handle_tool_call({"params": []}, None)
+        with self.assertRaises(McpProtocolTypeError):
+            _ = handle_tool_call({"params": {"name": "code_intel_status", "arguments": []}}, None)
 
 
 if __name__ == "__main__":

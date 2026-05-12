@@ -9,9 +9,10 @@ from project_code_intelligence.db import DatabaseConnectionError, conninfo, json
 
 class DatabaseContractTests(unittest.TestCase):
     def test_conninfo_uses_dsn_or_complete_parts(self) -> None:
-        self.assertEqual(
-            conninfo(DatabaseSettings(dsn="postgresql://example.invalid/db")), "postgresql://example.invalid/db"
-        )
+        dsn_text = conninfo(DatabaseSettings(dsn="postgresql://example.invalid/db"))
+        self.assertIn("host=example.invalid", dsn_text)
+        self.assertIn("dbname=db", dsn_text)
+        self.assertIn("connect_timeout=10", dsn_text)
         credential = "p"
 
         text = conninfo(DatabaseSettings(host="db", port="5432", dbname="codeintel", user="u", password=credential))
@@ -19,6 +20,8 @@ class DatabaseContractTests(unittest.TestCase):
         self.assertIn("host=db", text)
         self.assertIn("dbname=codeintel", text)
         self.assertIn("user=u", text)
+        self.assertIn("connect_timeout=10", text)
+        self.assertIn("keepalives=1", text)
 
     def test_conninfo_reports_missing_connection_parts(self) -> None:
         credential = "p"

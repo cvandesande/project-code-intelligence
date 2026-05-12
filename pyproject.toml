@@ -37,9 +37,9 @@ dependencies = [
 [project.scripts]
 pci-index = "project_code_intelligence.cli:index_main"
 pci-ingest-code = "project_code_intelligence.ingest_code_intel:cli_main"
-pci-llama-embed = "project_code_intelligence.llama_embed:main"
-pci-fastembed-server = "project_code_intelligence.fastembed_server:main"
-pci-embedding-bench = "project_code_intelligence.embedding_bench:main"
+pci-llama-embed = "project_code_intelligence.embedding.llama:main"
+pci-fastembed-server = "project_code_intelligence.embedding.fastembed_server:main"
+pci-embedding-bench = "project_code_intelligence.embedding.bench:main"
 pci-doctor = "project_code_intelligence.doctor:main"
 pci-mcp = "project_code_intelligence.server:main"
 pci-mcp-smoke = "project_code_intelligence.cli:mcp_smoke_main"
@@ -121,11 +121,11 @@ ignore = [
 # shape even when default/example implementations do not need instance state.
 "src/project_code_intelligence/code_profiles/*.py" = ["PLR6301"]
 "src/project_code_intelligence/http_client.py" = ["S310"]
-"src/project_code_intelligence/fastembed_server.py" = ["A002"]
+"src/project_code_intelligence/embedding/fastembed_server.py" = ["A002"]
 "src/project_code_intelligence/process.py" = ["S404", "S603"]
 # SARIF patterns may be absolute or relative and can use **; glob.glob handles
 # that mixed user-input shape more directly than Path.glob/Path.rglob.
-"src/project_code_intelligence/sarif.py" = ["PTH207"]
+"src/project_code_intelligence/sarif/discovery.py" = ["PTH207"]
 # Test doubles mimic third-party interfaces and may not need instance state.
 "tests/test_ingest_code_intel.py" = ["PLR6301"]
 "typings/**/*.pyi" = ["ANN401"]

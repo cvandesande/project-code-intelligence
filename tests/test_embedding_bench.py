@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from project_code_intelligence.embedding_bench import (
+from project_code_intelligence.embedding.bench import (
     BenchmarkResult,
     batch_for_run,
     generated_texts,
