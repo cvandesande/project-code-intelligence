@@ -17,8 +17,11 @@ python -m pip install -e '.[dev]'
 If you use `uv`, the equivalent is:
 
 ```sh
-uv sync --extra dev
+uv sync
 ```
+
+Dev tools (ruff, basedpyright, coverage, bandit) are in `[dependency-groups]`
+and included by `uv sync` automatically.
 
 Start the local database when you want to run the integration smoke:
 

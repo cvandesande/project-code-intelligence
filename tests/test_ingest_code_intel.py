@@ -12,8 +12,8 @@ from typing_extensions import override
 
 from project_code_intelligence.code_profiles import load_profile
 from project_code_intelligence.config import (
+    DEFAULT_EMBEDDING_ENDPOINT_MODEL,
     DEFAULT_LEMONADE_EMBEDDING_ENDPOINT,
-    DEFAULT_LEMONADE_EMBEDDING_MODEL,
     DatabaseSettings,
     IngestSettings,
     default_embedding_endpoint,
@@ -243,7 +243,7 @@ class CodeIntelParserTests(unittest.TestCase):
     def test_default_embedding_endpoint_model_uses_strict_local_runtime_default(self) -> None:
         self.assertEqual(
             default_embedding_endpoint_model(endpoint=DEFAULT_LEMONADE_EMBEDDING_ENDPOINT),
-            DEFAULT_LEMONADE_EMBEDDING_MODEL,
+            DEFAULT_EMBEDDING_ENDPOINT_MODEL,
         )
 
     def test_default_embedding_endpoint_model_prefers_configured_model(self) -> None:
@@ -267,7 +267,7 @@ class CodeIntelParserTests(unittest.TestCase):
             "PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT": DEFAULT_LEMONADE_EMBEDDING_ENDPOINT
         })
 
-        self.assertEqual(settings.embedding_endpoint_model, DEFAULT_LEMONADE_EMBEDDING_MODEL)
+        self.assertEqual(settings.embedding_endpoint_model, DEFAULT_EMBEDDING_ENDPOINT_MODEL)
 
     def test_embedding_endpoint_policy_defaults_to_loopback(self) -> None:
         validate_embedding_endpoint("http://127.0.0.1:18081/v1/embeddings", env={})

@@ -12,6 +12,7 @@ from project_code_intelligence.doctor.hardware import (
     GIB,
     GPU_QWEN3_DEFAULT_MODEL,
     GPU_QWEN3_LARGE_MODEL,
+    coremltools_available,
     has_gpu_vendor,
     has_ready_npu,
     max_gpu_memory_bytes,
@@ -99,14 +100,25 @@ def check_embedding_options(
             )
         )
     if has_gpu_vendor(gpus, "Apple"):
-        results.append(
-            result(
-                "option-gpu-apple",
-                "ok",
-                f"Apple GPU embeddings: host-native llama.cpp Metal default {GPU_QWEN3_DEFAULT_MODEL}.",
-                f"{gpu_model_detail} Docker is not used for Apple GPU embeddings.",
+        coreml = coremltools_available()
+        if coreml:
+            results.append(
+                result(
+                    "option-gpu-apple",
+                    "ok",
+                    f"Apple embeddings: Core ML (ANE + GPU + CPU) default {config.DEFAULT_COREML_MODEL}.",
+                    "Docker is not used. Run pci-coreml-server on the macOS host.",
+                )
             )
-        )
+        else:
+            results.append(
+                result(
+                    "option-gpu-apple",
+                    "ok",
+                    f"Apple GPU embeddings: host-native llama.cpp Metal default {GPU_QWEN3_DEFAULT_MODEL}.",
+                    f"{gpu_model_detail} Docker is not used for Apple GPU embeddings.",
+                )
+            )
     if not any(gpu.vendor in {"AMD", "NVIDIA", "Apple"} for gpu in gpus):
         results.append(
             result(
@@ -118,11 +130,7 @@ def check_embedding_options(
         )
 
     gpu_memory = max_gpu_memory_bytes(gpus)
-    if (
-        gpu_memory is not None
-        and gpu_memory >= 8 * GIB
-        and any(gpu.vendor in {"AMD", "NVIDIA", "Apple"} for gpu in gpus)
-    ):
+    if gpu_memory is not None and gpu_memory >= 8 * GIB and any(gpu.vendor in {"AMD", "NVIDIA"} for gpu in gpus):
         results.append(
             result(
                 "option-gpu-large-model",

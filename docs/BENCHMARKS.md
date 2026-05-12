@@ -10,6 +10,8 @@ The benchmark story is split in two:
   users.
 - Controlled hardware retest: a fairer CPU/NPU/GPU power and throughput run
   using a shared EmbeddingGemma setup where possible.
+- Apple Silicon retest: a Core ML throughput and wall-power run on a separate
+  Apple Silicon machine.
 
 ## Recommended Defaults
 
@@ -19,6 +21,7 @@ The benchmark story is split in two:
 | CPU fast option | `BAAI/bge-small-en-v1.5` | FastEmbed | Much faster CPU indexing when lower retrieval quality is acceptable. |
 | AMD NPU default | `embed-gemma-300m-FLM` | Lemonade FLM | EmbeddingGemma was the only NPU embedding model available at testing time. |
 | GPU default | `Qwen3-Embedding-0.6B-Q8_0.gguf` | llama.cpp | Strong local quality without the cost and size of larger GPU candidates. |
+| Apple Silicon default | `ewchampion/Qwen3-Embedding-0.6B-coreml-4bit.mlpackage` | Core ML (ANE + CPU) | Same Qwen3-Embedding-0.6B model, 4-bit Core ML format optimized for Apple Neural Engine. |
 
 The larger `Qwen3-Embedding-4B-Q8_0.gguf` candidate was tested, but it did not
 meaningfully improve this repository's small retrieval evaluation, so it is not
@@ -34,6 +37,7 @@ for the profiles that are actually available.
 | You want the safest local default | CPU default, `jinaai/jina-embeddings-v2-base-code` | Works on ordinary developer machines and nearly matched the NPU quality result in this local evaluation. |
 | You have a supported AMD NPU | NPU default, `embed-gemma-300m-FLM` | Highest measured retrieval score here with much lower whole-system power than CPU in the hardware retest. |
 | You have a supported AMD or NVIDIA GPU | GPU default, `Qwen3-Embedding-0.6B-Q8_0.gguf` | Best quality/performance tradeoff: competitive retrieval score and the strongest throughput/energy result in the hardware retest. |
+| You have an Apple Silicon Mac | Apple Silicon default, `ewchampion/Qwen3-Embedding-0.6B-coreml-4bit.mlpackage` | Highest throughput and lowest energy per character in the Apple Silicon retest. |
 | You need a quick CPU demo or first pass | CPU fast option, `BAAI/bge-small-en-v1.5` | Much faster CPU indexing, with lower retrieval quality. |
 | You do not want local model runtime | OpenAI-compatible hosted endpoint | Keeps local setup simple, but sends embedding text to the configured provider. |
 
@@ -132,12 +136,83 @@ xychart
     bar [2274, 2978, 48518]
 ```
 
-The NPU completed an additional 8000-character stress row at 3828 chars/s,
+The NPU completed an additional 8000-character stress row at 3,828 chars/s,
 59.8 W wall power, and 6.2 incremental J/kchar. That row is not included in the
 cross-backend comparison because the llama.cpp EmbeddingGemma path rejected one
 repository chunk at 2312 tokenizer-reported tokens with `n_ctx=2048`.
+## Apple Silicon Retest
 
-## Test Machine
+The Apple Silicon retest measures the Core ML embedding path on a MacBook Pro
+with Apple M4 Max. The model is `ewchampion/Qwen3-Embedding-0.6B-coreml-4bit.mlpackage`,
+a 4-bit quantized Core ML conversion of `Qwen3-Embedding-0.6B` loaded with
+`ComputeUnit.ALL` (ANE + GPU + CPU scheduling). The same Tasmota smart plug
+measured wall power.
+
+The model uses fixed 128-token input shapes. Inputs longer than 128 tokens are
+truncated by the tokenizer before reaching the model. This means the reported
+chars/s at longer chunk sizes reflects tokenizer throughput on the truncated
+portion, not full model inference on the entire input. Latency remains nearly
+constant across chunk sizes for this reason.
+
+Each row is the median of three repeats. Rows ran for at least 60 seconds, used
+batch size 16, and were measured with whole-system wall power from the Tasmota
+smart plug. Idle power was 32.2 W.
+
+| Input | Runtime | Input p50/p95 chars | Measured seconds | Chars/s | p50 latency | Wall W | Incremental W | Incremental J/kchar |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 600 chars | Core ML ANE+CPU | 566 / 593 | 60.5 | 16,571 | 0.527s | 72.3 | 40.1 | 2.4 |
+| 2000 chars | Core ML ANE+CPU | 1959 / 1995 | 60.2 | 50,846 | 0.534s | 73.0 | 40.8 | 0.8 |
+| 4000 chars | Core ML ANE+CPU | 3917 / 3992 | 60.5 | 88,201 | 0.540s | 72.2 | 40.0 | 0.5 |
+
+```mermaid
+xychart
+    title "Apple Silicon: Core ML throughput by chunk size (chars/s)"
+    x-axis ["600 chars", "2000 chars", "4000 chars"]
+    y-axis "chars/s" 0 --> 90000
+    bar [16571, 50846, 88201]
+```
+
+The near-constant latency across chunk sizes confirms the 128-token ceiling: the
+model processes the same number of tokens regardless of input length, so extra
+characters pass through the tokenizer but do not add inference work.
+
+### Cross-Machine Comparison (4000-char chunks)
+
+The following table compares the 4000-char row from both machines. The machines
+have different hardware and idle power baselines, so incremental power is the
+fairer efficiency comparison.
+
+| Runtime | Machine | Chars/s | p50 latency | Wall W | Incr W | Incr J/kchar |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| CPU llama.cpp Q8 | AMD Framework | 2,274 | 20.013s | 153.7 | 117.2 | 51.5 |
+| NPU Lemonade FLM | AMD Framework | 2,978 | 15.290s | 58.4 | 21.3 | 7.2 |
+| GPU llama.cpp Q8 | AMD Framework | 48,518 | 1.041s | 148.6 | 112.4 | 2.3 |
+| Core ML ANE+CPU | Apple M4 Max | 88,201 | 0.540s | 72.2 | 40.0 | 0.5 |
+
+```mermaid
+xychart
+    title "Cross-machine: 4000-char chunks (chars/s)"
+    x-axis ["CPU (AMD)", "NPU (AMD)", "GPU (AMD)", "Core ML (Apple)"]
+    y-axis "chars/s" 0 --> 90000
+    bar [2274, 2978, 48518, 88201]
+```
+
+```mermaid
+xychart
+    title "Cross-machine: 4000-char energy efficiency (incr J/kchar, lower is better)"
+    x-axis ["CPU (AMD)", "NPU (AMD)", "GPU (AMD)", "Core ML (Apple)"]
+    y-axis "J/kchar" 0 --> 55
+    bar [51.5, 7.2, 2.3, 0.5]
+```
+
+The Apple Core ML result benefits from the 128-token truncation. A fairer
+throughput comparison at short inputs (600-char row) shows 16,571 chars/s on
+the Mac versus 88,528 chars/s on the AMD GPU — where the GPU path processes
+the full input. The energy comparison is more balanced: 2.4 incremental J/kchar
+on the Mac versus 1.2 on the AMD GPU at 600-char inputs.
+## Test Machines
+
+### AMD Framework Desktop
 
 Date: 2026-05-11
 
@@ -155,7 +230,20 @@ Host:
 - Kernel: `7.0.4+deb13-amd64`
 - Docker Compose: `v5.1.3`
 
-Power measurement:
+### Apple Silicon MacBook Pro
+
+Date: 2026-05-12
+
+Host:
+
+- System: MacBook Pro (Apple M4 Max)
+- ANE: Apple Neural Engine, 16 cores
+- Memory: 36 GiB unified
+- OS: macOS 26.4.0 (Darwin 25.4.0)
+- Python: 3.12.12
+- coremltools: 9.0
+
+### Power Measurement (Both Machines)
 
 - Wall power: local Tasmota smart plug queried with the `STATUS 8` command
 - Tasmota firmware: `15.3.0(release-tasmota)`
@@ -179,15 +267,24 @@ was competitive in the quality evaluation, and in the controlled hardware retest
 GPU acceleration completed the workload far faster and had the lowest
 incremental energy per source character.
 
+Apple Silicon is the recommended path on Macs with Apple Neural Engine. The
+Core ML backend ran the same Qwen3-Embedding-0.6B model as the GPU default and
+achieved the highest throughput and lowest incremental energy per source
+character of any backend tested. The 128-token context window of the current
+Core ML conversion means longer inputs are truncated earlier than the GPU or
+CPU paths; a longer-context conversion would improve quality on long chunks at
+the cost of some throughput.
+
 The practical default sequence is therefore:
 
 1. Use FastEmbed CPU by default so the project works on ordinary developer
    machines.
 2. Use hosted OpenAI-compatible embedding providers when local runtime setup is
    not worth the operational cost.
-3. Use the AMD NPU profile when low local wall power matters and the hardware is
+3. Use the Apple Silicon Core ML profile on Macs with ANE.
+4. Use the AMD NPU profile when low local wall power matters and the hardware is
    supported.
-4. Use the GPU profile when indexing time matters most.
+5. Use the GPU profile when indexing time matters most.
 
 ## Caveats
 
@@ -212,5 +309,11 @@ The practical default sequence is therefore:
   https://developer.amd.com/playbooks/lemonade-getting-started/
 - Lemonade SDK repository:
   https://github.com/lemonade-sdk/lemonade
+- Qwen3-Embedding-0.6B-coreml-4bit.mlpackage (Core ML conversion):
+  https://huggingface.co/ewchampion/Qwen3-Embedding-0.6B-coreml-4bit.mlpackage
+- Qwen3-Embedding-0.6B (base model):
+  https://huggingface.co/Qwen/Qwen3-Embedding-0.6B
+- Apple Core ML documentation:
+  https://developer.apple.com/documentation/coreml
 - Mermaid XY chart syntax:
   https://mermaid.js.org/syntax/xyChart.html

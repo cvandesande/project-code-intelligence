@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from project_code_intelligence import config, db
 from project_code_intelligence.doctor.common import result, row_bool, row_text, table_exists
 from project_code_intelligence.models import SCHEMA_VERSION
-from project_code_intelligence.storage import schema_migration_versions
+from project_code_intelligence.storage import ensure_schema, schema_migration_versions
 
 if TYPE_CHECKING:
     from project_code_intelligence.doctor.types import CheckResult, Status
@@ -108,9 +108,25 @@ def check_database() -> list[CheckResult]:
                         "schema",
                         "warn",
                         "code-intelligence schema is not initialized.",
-                        "Run pci-index once to create the schema and ingest a repository.",
+                        "Run pci-doctor --init-db or pci-index to create the schema.",
                     )
                 )
     except db.DatabaseConnectionError as exc:
         results.append(result("database", "fail", "Could not connect to PostgreSQL/pgvector.", str(exc)))
     return results
+
+
+def init_database_schema() -> CheckResult:
+    """Initialize the code-intelligence schema, reusing the same ensure_schema logic as pci-index."""
+    try:
+        settings = config.DatabaseSettings.from_env()
+    except ValueError as exc:
+        return result("init-db", "fail", str(exc))
+
+    try:
+        with db.connect(readonly=False, settings=settings) as conn:
+            ensure_schema(conn)
+            conn.commit()
+        return result("init-db", "ok", "schema initialized successfully.")
+    except db.DatabaseConnectionError as exc:
+        return result("init-db", "fail", "Could not connect to PostgreSQL/pgvector.", str(exc))

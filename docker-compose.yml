@@ -1,7 +1,7 @@
 services:
   pgvector:
     profiles: ["db"]
-    image: pgvector/pgvector:pg17
+    image: pgvector/pgvector:pg18
     environment:
       POSTGRES_DB: ${PGVECTOR_DB:-codeintel}
       POSTGRES_USER: ${PGVECTOR_USER:-codeintel}
@@ -14,7 +14,8 @@ services:
       timeout: 5s
       retries: 20
     volumes:
-      - pgvector-data:/var/lib/postgresql/data
+      - pgvector-data:/var/lib/postgresql
+      - ./docker/pgvector/init-extensions.sql:/docker-entrypoint-initdb.d/init-extensions.sql:ro
 
   fastembed:
     profiles: ["cpu"]

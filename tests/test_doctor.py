@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import contextlib
+import io
+import sys
+import types
 import unittest
+from unittest.mock import patch
 
 from project_code_intelligence import config
 from project_code_intelligence.doctor import (
@@ -22,7 +27,10 @@ from project_code_intelligence.doctor import (
     version_at_least,
     version_tuple,
 )
+from project_code_intelligence.doctor.hardware import coremltools_available, detect_ane_cores
+from project_code_intelligence.embedding import coreml_server
 from project_code_intelligence.embedding.bench import EmbeddingRequestResult
+from project_code_intelligence.embedding.coreml_server import print_compute_plan
 
 
 def successful_requester(
@@ -80,7 +88,8 @@ class DoctorTests(unittest.TestCase):
 
         self.assertIn("option-cpu", names)
         self.assertIn("option-gpu-apple", names)
-        self.assertIn("option-gpu-large-model", names)
+        # GGUF large model is for AMD/NVIDIA llama.cpp, not Apple Core ML.
+        self.assertNotIn("option-gpu-large-model", names)
         self.assertIn("option-remote", names)
 
     def test_version_tuple_parses_kernel_and_firmware_versions(self) -> None:
@@ -142,7 +151,7 @@ class DoctorTests(unittest.TestCase):
                 CheckResult(
                     "embedding-config",
                     "ok",
-                    "endpoint=http://127.0.0.1:18081/v1/embeddings model=embed-gemma-300m-FLM",
+                    "endpoint=http://127.0.0.1:18081/v1/embeddings model=local",
                 ),
                 CheckResult(
                     "embedding-endpoint",
@@ -302,6 +311,232 @@ class DoctorEndpointTests(unittest.TestCase):
 
         self.assertEqual(results[-1].status, "ok")
         self.assertEqual(results[-1].name, "embedding-endpoint")
+
+
+class DoctorAppleTests(unittest.TestCase):
+    def test_embedding_options_prefer_coreml_when_available(self) -> None:
+        fake = types.ModuleType("coremltools")
+        sys.modules["coremltools"] = fake
+        try:
+            results = check_embedding_options(
+                env={},
+                gpus=[GpuInfo(name="Apple Silicon GPU", vendor="Apple", shared_bytes=16 * 1024 * 1024 * 1024)],
+                npu_results=[],
+            )
+            apple = next(r for r in results if r.name == "option-gpu-apple")
+
+            self.assertEqual(apple.status, "ok")
+            self.assertIn("Core ML", apple.message)
+            self.assertIn("ANE", apple.message)
+        finally:
+            del sys.modules["coremltools"]
+
+    def test_embedding_options_fallback_to_metal_without_coremltools(self) -> None:
+        with patch.dict(sys.modules, {"coremltools": None, "coremltools.models.compute_device": None}):
+            results = check_embedding_options(
+                env={},
+                gpus=[GpuInfo(name="Apple Silicon GPU", vendor="Apple", shared_bytes=16 * 1024 * 1024 * 1024)],
+                npu_results=[],
+            )
+            apple = next(r for r in results if r.name == "option-gpu-apple")
+
+        self.assertEqual(apple.status, "ok")
+        self.assertIn("Metal", apple.message)
+        self.assertNotIn("Core ML", apple.message)
+
+    def test_format_summary_shows_apple_coreml_startup_command(self) -> None:
+        output = format_summary(
+            [
+                CheckResult("platform", "ok", "Python 3.13 on Darwin 25.4.0 (arm64)"),
+                CheckResult("apple-coreml", "ok", "coremltools is available."),
+                CheckResult("apple-coreml-model", "ok", "Core ML embedding model: test."),
+                CheckResult("npu", "ok", "Apple Neural Engine is available via Core ML."),
+                CheckResult("database", "ok", "connected to codeintel as codeintel"),
+                CheckResult("embedding", "skip", "embedding check skipped"),
+                CheckResult("option-cpu", "ok", "CPU embeddings: FastEmbed default demo."),
+                CheckResult("option-gpu-apple", "ok", "Apple embeddings: Core ML default demo."),
+            ],
+            color=False,
+        )
+
+        self.assertIn("apple: pci-coreml-server", output)
+        self.assertNotIn("pci-embedding-server", output)
+
+    def test_format_summary_shows_apple_metal_startup_command(self) -> None:
+        output = format_summary(
+            [
+                CheckResult("platform", "ok", "Python 3.13 on Darwin 25.4.0 (arm64)"),
+                CheckResult("npu", "skip", "Apple Neural Engine requires coremltools."),
+                CheckResult("database", "ok", "connected to codeintel as codeintel"),
+                CheckResult("embedding", "skip", "embedding check skipped"),
+                CheckResult("option-cpu", "ok", "CPU embeddings: FastEmbed default demo."),
+                CheckResult(
+                    "option-gpu-apple", "ok", "Apple GPU embeddings: host-native llama.cpp Metal default demo.gguf."
+                ),
+            ],
+            color=False,
+        )
+
+        self.assertIn("apple:", output)
+        self.assertIn("pci-embedding-server", output)
+        self.assertNotIn("pci-coreml-server", output)
+
+    def test_coremltools_available_returns_false_when_not_installed(self) -> None:
+        with patch.dict(sys.modules, {"coremltools": None}):
+            self.assertFalse(coremltools_available())
+
+    def test_coremltools_available_returns_true_when_installed(self) -> None:
+        fake = types.ModuleType("coremltools")
+        sys.modules["coremltools"] = fake
+        try:
+            self.assertTrue(coremltools_available())
+        finally:
+            del sys.modules["coremltools"]
+
+    def test_detect_ane_cores_returns_none_without_coremltools(self) -> None:
+        with patch.dict(sys.modules, {"coremltools.models.compute_device": None}):
+            self.assertIsNone(detect_ane_cores())
+
+    def test_detect_ane_cores_returns_core_count(self) -> None:
+        class FakeANE:
+            total_core_count = 16
+
+        class FakeCPU:
+            pass
+
+        class FakeDeviceMod:
+            MLComputeDevice = type(
+                "MLComputeDevice", (), {"get_all_compute_devices": staticmethod(lambda: [FakeCPU(), FakeANE()])}
+            )
+            MLNeuralEngineComputeDevice = FakeANE
+
+        fake_mod = types.ModuleType("coremltools.models.compute_device")
+        for attr in ("MLComputeDevice", "MLNeuralEngineComputeDevice"):
+            setattr(fake_mod, attr, getattr(FakeDeviceMod, attr))
+        sys.modules["coremltools.models.compute_device"] = fake_mod
+        try:
+            self.assertEqual(detect_ane_cores(), 16)
+        finally:
+            del sys.modules["coremltools.models.compute_device"]
+
+    def test_detect_ane_cores_returns_none_when_no_ane_device(self) -> None:
+        class FakeCPU:
+            pass
+
+        class FakeDeviceMod:
+            MLComputeDevice = type(
+                "MLComputeDevice", (), {"get_all_compute_devices": staticmethod(lambda: [FakeCPU()])}
+            )
+            MLNeuralEngineComputeDevice = type("ANE", (), {})
+
+        fake_mod = types.ModuleType("coremltools.models.compute_device")
+        for attr in ("MLComputeDevice", "MLNeuralEngineComputeDevice"):
+            setattr(fake_mod, attr, getattr(FakeDeviceMod, attr))
+        sys.modules["coremltools.models.compute_device"] = fake_mod
+        try:
+            self.assertIsNone(detect_ane_cores())
+        finally:
+            del sys.modules["coremltools.models.compute_device"]
+
+
+class _FakeANE:
+    pass
+
+
+class _FakeGPU:
+    pass
+
+
+class _FakeCPU:
+    pass
+
+
+def _build_fake_compute_plan_modules() -> tuple[dict[str, types.ModuleType], types.SimpleNamespace]:
+    """Build mocked coremltools modules with a 3-operation compute plan (1 ANE, 1 GPU, 1 CPU)."""
+    op1, op2, op3 = object(), object(), object()
+    usage_map = {
+        id(op1): types.SimpleNamespace(preferred_compute_device=_FakeANE()),
+        id(op2): types.SimpleNamespace(preferred_compute_device=_FakeGPU()),
+        id(op3): types.SimpleNamespace(preferred_compute_device=_FakeCPU()),
+    }
+    fake_plan = types.SimpleNamespace(
+        model_structure=types.SimpleNamespace(
+            program=types.SimpleNamespace(
+                functions={"main": types.SimpleNamespace(block=types.SimpleNamespace(operations=[op1, op2, op3]))}
+            )
+        ),
+        get_compute_device_usage_for_mlprogram_operation=lambda op: usage_map[id(op)],  # type: ignore[reportUnknownLambdaType]
+        get_estimated_cost_for_mlprogram_operation=None,
+    )
+
+    class FakeMLComputePlan:
+        @staticmethod
+        def load_from_path(_path: str, **_kwargs: object) -> object:
+            return fake_plan
+
+    plan_mod = types.ModuleType("coremltools.models.compute_plan")
+    plan_mod.MLComputePlan = FakeMLComputePlan  # type: ignore[attr-defined]
+    device_mod = types.ModuleType("coremltools.models.compute_device")
+    device_mod.MLNeuralEngineComputeDevice = _FakeANE  # type: ignore[attr-defined]
+    device_mod.MLGPUComputeDevice = _FakeGPU  # type: ignore[attr-defined]
+    device_mod.MLCPUComputeDevice = _FakeCPU  # type: ignore[attr-defined]
+    ct_mod = types.ModuleType("coremltools")
+    ct_mod.ComputeUnit = types.SimpleNamespace(ALL="all")  # type: ignore[attr-defined]
+    modules = {
+        "coremltools": ct_mod,
+        "coremltools.models.compute_plan": plan_mod,
+        "coremltools.models.compute_device": device_mod,
+    }
+    return modules, fake_plan
+
+
+class CoreMLDiagnoseTests(unittest.TestCase):
+    """Tests for the pci-coreml-server --diagnose compute plan inspection."""
+
+    def test_print_compute_plan_shows_ane_operations(self) -> None:
+        modules, plan_result = _build_fake_compute_plan_modules()
+
+        with (
+            patch.dict(sys.modules, modules),
+            patch(
+                "project_code_intelligence.embedding.coreml_server._compile_for_plan",
+                return_value="/fake/model.mlmodelc",
+            ),
+        ):
+            captured = io.StringIO()
+            with contextlib.redirect_stderr(captured):
+                print_compute_plan("/fake/model.mlpackage")
+        output = captured.getvalue()
+
+        _ = plan_result  # kept for potential future assertion on plan details
+        self.assertIn("ANE: 1 ops", output)
+        self.assertIn("GPU: 1 ops", output)
+        self.assertIn("CPU: 1 ops", output)
+        self.assertIn("Neural Engine will handle 1/3 operations", output)
+
+    def test_print_compute_plan_graceful_without_module(self) -> None:
+        with patch.dict(
+            sys.modules,
+            {
+                "coremltools.models.compute_plan": None,
+            },
+        ):
+            captured = io.StringIO()
+            with contextlib.redirect_stderr(captured):
+                print_compute_plan("/fake/model.mlpackage")
+        output = captured.getvalue()
+
+        self.assertIn("coremltools 8.0+", output)
+
+    def test_main_diagnose_flag(self) -> None:
+        with (
+            patch.object(coreml_server, "diagnose", return_value=0) as mock_diag,
+            patch("sys.argv", ["pci-coreml-server", "--diagnose"]),
+        ):
+            result = coreml_server.main()
+
+        self.assertEqual(result, 0)
+        mock_diag.assert_called_once()
 
 
 if __name__ == "__main__":

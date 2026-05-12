@@ -124,9 +124,10 @@ def check_label(name: str) -> str:
     if gpu_match:
         return f"GPU {gpu_match.group(1)}"
     return {
+        "apple-coreml": "Apple Core ML",
+        "apple-coreml-model": "Apple Core ML model",
         "apple-metal": "Apple Metal",
         "apple-metal-model": "Apple embedding model",
-        "apple-neural-engine": "Apple Neural Engine",
         "configuration": "Configuration",
         "database": "Database",
         "database-config": "Database configuration",
@@ -209,9 +210,10 @@ def active_embedding_profile(by_name: Mapping[str, CheckResult]) -> tuple[str, s
             ("qwen" in model or ".gguf" in model) and ok_result(by_name, "option-gpu-nvidia"),
         ),
         (
-            "apple-gpu",
-            "Apple GPU",
-            ("qwen" in model or ".gguf" in model) and ok_result(by_name, "option-gpu-apple"),
+            "apple",
+            "Apple",
+            ok_result(by_name, "option-gpu-apple")
+            and (ok_result(by_name, "apple-coreml") or "qwen" in model or ".gguf" in model),
         ),
         ("gpu", "GPU", "qwen" in model or ".gguf" in model),
     ]
@@ -225,26 +227,34 @@ def active_embedding_lines(by_name: Mapping[str, CheckResult], *, color: bool = 
     endpoint = by_name.get("embedding-endpoint")
     if endpoint is None or endpoint.status != "ok":
         return []
-    _, label = active_embedding_profile(by_name)
+    profile, label = active_embedding_profile(by_name)
     message = endpoint.message
     if config_item := by_name.get("embedding-config"):
         message = f"{message}; {config_item.message}"
-    return [
+    lines = [
         "",
         heading_text("Active embedding path", color=color),
         f"  {label_text(label, color=color)}: {status_text('ok', color=color)} {message}",
     ]
+    if profile == "apple" and ok_result(by_name, "apple-coreml"):
+        hint = "Run pci-coreml-server --diagnose to inspect ANE/GPU/CPU scheduling."
+        lines.append(f"  {color_text(hint, ANSI_DIM, enabled=color)}")
+    return lines
 
 
 def summary_option_names(by_name: Mapping[str, CheckResult]) -> list[str]:
-    option_names = [
-        "option-cpu",
+    has_apple = ok_result(by_name, "option-gpu-apple")
+    option_names: list[str] = []
+    # Skip CPU option when a better accelerated path is available.
+    if not has_apple:
+        option_names.append("option-cpu")
+    option_names.extend([
         "option-npu",
         "option-gpu-amd",
         "option-gpu-nvidia",
         "option-gpu-apple",
         "option-gpu-large-model",
-    ]
+    ])
     if remote_embedding_validated(by_name):
         option_names.append("option-remote")
     return option_names
@@ -252,7 +262,8 @@ def summary_option_names(by_name: Mapping[str, CheckResult]) -> list[str]:
 
 def local_embedding_startup_commands(by_name: Mapping[str, CheckResult]) -> list[tuple[str, str]]:
     commands: list[tuple[str, str]] = []
-    if ok_result(by_name, "option-cpu"):
+    # Skip CPU option when a better accelerated path is available.
+    if ok_result(by_name, "option-cpu") and not ok_result(by_name, "option-gpu-apple"):
         commands.append(("cpu", "docker compose --profile cpu up -d --build fastembed"))
     if ok_result(by_name, "option-npu"):
         commands.append(("npu", "docker compose --profile npu up -d lemonade-npu"))
@@ -261,17 +272,21 @@ def local_embedding_startup_commands(by_name: Mapping[str, CheckResult]) -> list
     if ok_result(by_name, "option-gpu-nvidia") and ok_result(by_name, "gpu-runtime-nvidia"):
         commands.append(("nvidia", "docker compose --profile nvidia up -d --build llama-cuda"))
     if ok_result(by_name, "option-gpu-apple"):
-        commands.append((
-            "apple-gpu",
-            "export PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL=/path/to/Qwen3-Embedding-0.6B-Q8_0.gguf; "
-            "pci-embedding-server",
-        ))
+        if ok_result(by_name, "apple-coreml"):
+            commands.append(("apple", "pci-coreml-server"))
+        else:
+            commands.append((
+                "apple",
+                "export PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL=/path/to/Qwen3-Embedding-0.6B-Q8_0.gguf; "
+                "pci-embedding-server",
+            ))
     return commands
 
 
 def startup_command_lines(by_name: Mapping[str, CheckResult], *, color: bool = False) -> list[str]:
-    lines = ["", heading_text("Available startup commands", color=color)]
-    lines.append(format_startup_command("pgvector", "docker compose up -d pgvector", color=color))
+    lines = ["", heading_text("Startup commands", color=color)]
+    if not ok_result(by_name, "database"):
+        lines.append(format_startup_command("database", "docker compose up -d pgvector", color=color))
     for profile, command in local_embedding_startup_commands(by_name):
         lines.append(format_startup_command(profile, command, color=color))
     if remote_embedding_validated(by_name):
@@ -285,6 +300,10 @@ def startup_command_lines(by_name: Mapping[str, CheckResult], *, color: bool = F
     return lines
 
 
+DOCKER_COMPOSE_SERVICES = ("fastembed", "lemonade-npu", "llama-rocm", "llama-cuda")
+HOST_EMBEDDING_PROCESSES = ("pci-coreml-server", "pci-embedding-server")
+
+
 def switch_embedding_lines(by_name: Mapping[str, CheckResult], *, color: bool = False) -> list[str]:
     active_profile, _ = active_embedding_profile(by_name)
     commands = [
@@ -295,9 +314,7 @@ def switch_embedding_lines(by_name: Mapping[str, CheckResult], *, color: bool = 
     if not commands:
         return []
     lines = ["", heading_text("Switch embedding runtime", color=color)]
-    lines.append(
-        "  Stop current local embedding service first: docker compose stop fastembed lemonade-npu llama-rocm llama-cuda"
-    )
+    lines.append("  Stop current local embedding service first: pci-doctor --stop-embedding")
     lines.extend(format_startup_command(profile, command, color=color) for profile, command in commands)
     return lines
 
@@ -315,6 +332,22 @@ def embedding_summary_lines(by_name: Mapping[str, CheckResult], *, color: bool =
         *(format_option(item, color=color) for item in options),
         *startup_command_lines(by_name, color=color),
     ]
+
+
+def _stop_hints(by_name: Mapping[str, CheckResult], *, color: bool = False) -> list[str]:
+    """Return contextual stop command hints based on running services."""
+    db_running = ok_result(by_name, "database")
+    embedding_running = ok_result(by_name, "embedding-endpoint")
+    if not db_running and not embedding_running:
+        return []
+    lines: list[str] = []
+    if db_running and embedding_running:
+        lines.append(color_text("Stop all services: pci-doctor --stop", ANSI_DIM, enabled=color))
+    if embedding_running:
+        lines.append(color_text("Stop embedding server: pci-doctor --stop-embedding", ANSI_DIM, enabled=color))
+    if db_running:
+        lines.append(color_text("Stop database: pci-doctor --stop-database", ANSI_DIM, enabled=color))
+    return lines
 
 
 def format_summary(results: Sequence[CheckResult], *, color: bool = False) -> str:
@@ -363,6 +396,10 @@ def format_summary(results: Sequence[CheckResult], *, color: bool = False) -> st
             lines.append(f"  {label_text(label, color=color)}: {status_text(item.status, color=color)} {item.message}")
             if item.detail:
                 lines.append(f"    {color_text(item.detail, ANSI_DIM, enabled=color)}")
+
+    stop_hints = _stop_hints(by_name, color=color)
+    if stop_hints:
+        lines.extend(["", *stop_hints])
 
     footer = color_text("Use --verbose for all checks, or --json for machine-readable output.", ANSI_DIM, enabled=color)
     lines.extend(["", footer])
