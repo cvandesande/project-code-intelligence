@@ -13,7 +13,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence import config, http_client, power
-from project_code_intelligence.embeddings import http_error_detail, validate_embedding_endpoint
+from project_code_intelligence.embeddings import (
+    http_error_detail,
+    resolve_embedding_endpoint_model,
+    validate_embedding_endpoint,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -212,7 +216,8 @@ def default_endpoint() -> str:
 
 
 def default_model() -> str:
-    return config.default_embedding_endpoint_model(endpoint=default_endpoint())
+    endpoint = default_endpoint()
+    return resolve_embedding_endpoint_model(endpoint, config.default_embedding_endpoint_model(endpoint=endpoint))
 
 
 def sample_text(index: int, target_chars: int) -> str:
