@@ -46,8 +46,15 @@ def connection_hint(settings: DatabaseSettings | None = None) -> str:
 
 def conninfo(settings: DatabaseSettings | None = None) -> str:
     settings = settings or DatabaseSettings.from_env()
+    connection_options: dict[str, str] = {
+        "connect_timeout": str(settings.connect_timeout_seconds),
+        "keepalives": "1",
+        "keepalives_idle": str(settings.keepalives_idle_seconds),
+        "keepalives_interval": str(settings.keepalives_interval_seconds),
+        "keepalives_count": str(settings.keepalives_count),
+    }
     if settings.dsn:
-        return settings.dsn
+        return make_conninfo(settings.dsn, **connection_options)
 
     missing = settings.missing_connection_names()
     if missing:
@@ -66,6 +73,7 @@ def conninfo(settings: DatabaseSettings | None = None) -> str:
         user=settings.user,
         password=settings.password,
         sslmode=settings.sslmode,
+        **connection_options,
     )
 
 

@@ -20,11 +20,11 @@ from project_code_intelligence.config import (
     default_embedding_endpoint_model,
     env_bool,
 )
+from project_code_intelligence.embedding.fastembed_server import embedding_response, normalize_input
 from project_code_intelligence.embeddings import validate_embedding_endpoint
 from project_code_intelligence.exceptions import ConfigError, ProfileLoadError
-from project_code_intelligence.fastembed_server import embedding_response, normalize_input
 from project_code_intelligence.ingest_code_intel import CliArgs, confirm_reset_code_intel, validate_args
-from project_code_intelligence.mcp_filters import (
+from project_code_intelligence.mcp.filters import (
     code_intel_clauses,
     scoped_snapshot_clauses,
     snapshot_scope_response,
@@ -293,10 +293,10 @@ class CodeIntelParserTests(unittest.TestCase):
                 },
             ),
             patch(
-                "project_code_intelligence.server.embeddings.embed_with_endpoint",
+                "project_code_intelligence.mcp.tools.embeddings.embed_with_endpoint",
                 return_value=["[0.1,0.2,0.3]"],
             ) as embed_with_endpoint,
-            patch("project_code_intelligence.server.llama_embed.embed_text") as llama_embed_text,
+            patch("project_code_intelligence.mcp.tools.llama.embed_text") as llama_embed_text,
         ):
             vector, dimensions = query_embedding("hello")
 

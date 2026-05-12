@@ -21,6 +21,10 @@ DEFAULT_PGVECTOR_PORT = "5433"
 DEFAULT_PGVECTOR_DB = "codeintel"
 DEFAULT_PGVECTOR_USER = "codeintel"
 DEFAULT_PGVECTOR_PASS = DEFAULT_PGVECTOR_USER
+DEFAULT_DB_CONNECT_TIMEOUT_SECONDS = 10
+DEFAULT_DB_KEEPALIVES_IDLE_SECONDS = 30
+DEFAULT_DB_KEEPALIVES_INTERVAL_SECONDS = 10
+DEFAULT_DB_KEEPALIVES_COUNT = 3
 DEFAULT_FASTEMBED_MODEL = "jinaai/jina-embeddings-v2-base-code"
 DEFAULT_FASTEMBED_HOST = "127.0.0.1"
 DEFAULT_FASTEMBED_PORT = 18081
@@ -168,6 +172,10 @@ class DatabaseSettings:
     user: str | None = DEFAULT_PGVECTOR_USER
     password: str | None = DEFAULT_PGVECTOR_PASS
     sslmode: str = "prefer"
+    connect_timeout_seconds: int = DEFAULT_DB_CONNECT_TIMEOUT_SECONDS
+    keepalives_idle_seconds: int = DEFAULT_DB_KEEPALIVES_IDLE_SECONDS
+    keepalives_interval_seconds: int = DEFAULT_DB_KEEPALIVES_INTERVAL_SECONDS
+    keepalives_count: int = DEFAULT_DB_KEEPALIVES_COUNT
     allow_writes: bool = False
 
     @classmethod
@@ -184,6 +192,30 @@ class DatabaseSettings:
             user=env_text("PGVECTOR_USER", DEFAULT_PGVECTOR_USER, env=env),
             password=env_text("PGVECTOR_PASS", DEFAULT_PGVECTOR_PASS, env=env),
             sslmode=env_text("PGVECTOR_SSLMODE", "prefer", env=env) or "prefer",
+            connect_timeout_seconds=env_int(
+                "PROJECT_CODE_INTELLIGENCE_DB_CONNECT_TIMEOUT_SECONDS",
+                DEFAULT_DB_CONNECT_TIMEOUT_SECONDS,
+                env=env,
+                minimum=1,
+            ),
+            keepalives_idle_seconds=env_int(
+                "PROJECT_CODE_INTELLIGENCE_DB_KEEPALIVES_IDLE_SECONDS",
+                DEFAULT_DB_KEEPALIVES_IDLE_SECONDS,
+                env=env,
+                minimum=1,
+            ),
+            keepalives_interval_seconds=env_int(
+                "PROJECT_CODE_INTELLIGENCE_DB_KEEPALIVES_INTERVAL_SECONDS",
+                DEFAULT_DB_KEEPALIVES_INTERVAL_SECONDS,
+                env=env,
+                minimum=1,
+            ),
+            keepalives_count=env_int(
+                "PROJECT_CODE_INTELLIGENCE_DB_KEEPALIVES_COUNT",
+                DEFAULT_DB_KEEPALIVES_COUNT,
+                env=env,
+                minimum=1,
+            ),
             allow_writes=env_bool("PROJECT_CODE_INTELLIGENCE_ALLOW_WRITES", default=False, env=env),
         )
 

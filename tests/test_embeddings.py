@@ -11,11 +11,17 @@ from project_code_intelligence.embeddings import (
     EmbeddingEndpointUnavailableError,
     EmbeddingRunConfig,
     embed_items_with_retry,
+    embed_with_endpoint,
+    embedding_contract,
+    embedding_contract_from_metadata,
     embedding_input_text,
+    embedding_metadata,
     endpoint_host_is_loopback,
     parse_embedding_items,
+    require_compatible_embedding_contract,
     smaller_embedding_max_chars,
     validate_embedding_endpoint,
+    vector_literal_dimensions,
     vector_literals_from_items,
 )
 
@@ -37,7 +43,7 @@ class EmbeddingContractTests(unittest.TestCase):
         self.assertIn("[embedding input truncated from 120 chars", truncated)
 
     def test_smaller_embedding_max_chars_respects_retry_floor(self) -> None:
-        with patch("project_code_intelligence.embeddings.embedding_retry_min_chars", return_value=800):
+        with patch("project_code_intelligence.embedding.core.embedding_retry_min_chars", return_value=800):
             self.assertEqual(smaller_embedding_max_chars(3000), 1500)
             self.assertEqual(smaller_embedding_max_chars(1000), 800)
             self.assertIsNone(smaller_embedding_max_chars(800))
@@ -91,6 +97,88 @@ class EmbeddingContractTests(unittest.TestCase):
         with self.assertRaises(EmbeddingEndpointUnavailableError):
             _ = vector_literals_from_items(endpoint, [{"index": 0}])
 
+    def test_vector_literal_dimensions_counts_pgvector_items(self) -> None:
+        self.assertEqual(vector_literal_dimensions("[0.1,0.2,0.3]"), 3)
+
+        with self.assertRaises(ValueError):
+            _ = vector_literal_dimensions("0.1,0.2")
+
+    def test_embedding_metadata_records_model_and_dimensions(self) -> None:
+        run_config = EmbeddingRunConfig(
+            backend=EmbeddingBackend(
+                endpoint="http://127.0.0.1:18081/v1/embeddings", endpoint_model="demo", use_llama_cli=False
+            ),
+            max_chars=800,
+        )
+
+        self.assertEqual(
+            embedding_metadata(run_config, "[0.1,0.2]"),
+            {
+                "embedding_backend": "endpoint",
+                "embedding_model": "demo",
+                "embedding_dimensions": 2,
+            },
+        )
+        self.assertEqual(
+            embedding_contract(run_config, "[0.1,0.2]"),
+            {"version": 1, "backend": "endpoint", "model": "demo", "dimensions": 2},
+        )
+
+    def test_snapshot_embedding_contract_requires_same_model_and_dimensions(self) -> None:
+        existing = {"version": 1, "backend": "endpoint", "model": "embed-gemma-300m-FLM", "dimensions": 768}
+        compatible = {"version": 1, "backend": "endpoint", "model": "embed-gemma-300m-FLM", "dimensions": 768}
+        incompatible_model = {
+            "version": 1,
+            "backend": "endpoint",
+            "model": "Qwen3-Embedding-0.6B-Q8_0.gguf",
+            "dimensions": 768,
+        }
+        incompatible_dimensions = {
+            "version": 1,
+            "backend": "endpoint",
+            "model": "embed-gemma-300m-FLM",
+            "dimensions": 4096,
+        }
+
+        require_compatible_embedding_contract(existing, compatible)
+        with self.assertRaises(ValueError):
+            require_compatible_embedding_contract(existing, incompatible_model)
+        with self.assertRaises(ValueError):
+            require_compatible_embedding_contract(existing, incompatible_dimensions)
+
+    def test_snapshot_embedding_contract_parses_snapshot_metadata(self) -> None:
+        metadata = {"embedding_contract": {"version": 1, "backend": "endpoint", "model": "demo", "dimensions": 3}}
+
+        self.assertEqual(
+            embedding_contract_from_metadata(metadata),
+            {"version": 1, "backend": "endpoint", "model": "demo", "dimensions": 3},
+        )
+        self.assertIsNone(embedding_contract_from_metadata({}))
+
+        with self.assertRaises(ValueError):
+            _ = embedding_contract_from_metadata({"embedding_contract": "demo"})
+
+    def test_embed_with_endpoint_retries_transient_endpoint_errors(self) -> None:
+        raw_response = json.dumps({"data": [{"index": 0, "embedding": [0.1, 0.2]}]})
+
+        with (
+            patch(
+                "project_code_intelligence.embedding.endpoint.read_embedding_response",
+                side_effect=[EmbeddingEndpointUnavailableError("temporary endpoint failure"), raw_response],
+            ) as read_response,
+            patch("project_code_intelligence.embedding.endpoint.embedding_request_retries", return_value=1),
+            patch("time.sleep"),
+        ):
+            vectors = embed_with_endpoint(
+                "http://127.0.0.1:18081/v1/embeddings",
+                ["hello"],
+                "demo",
+                track_metrics=False,
+            )
+
+        self.assertEqual(vectors, ["[0.1,0.2]"])
+        self.assertEqual(read_response.call_count, 2)
+
     def test_embed_items_with_retry_splits_recoverable_batch_errors(self) -> None:
         run_config = EmbeddingRunConfig(
             backend=EmbeddingBackend(endpoint=None, endpoint_model="local", use_llama_cli=True),
@@ -102,7 +190,7 @@ class EmbeddingContractTests(unittest.TestCase):
             skipped.append((item, str(reason), max_chars))
 
         with patch(
-            "project_code_intelligence.embeddings.embed_texts_once",
+            "project_code_intelligence.embedding.core.embed_texts_once",
             side_effect=[
                 EmbeddingEndpointUnavailableError("batch too large", recoverable_batch=True),
                 [db.vector_literal([1.0])],
@@ -132,7 +220,7 @@ class EmbeddingContractTests(unittest.TestCase):
             skipped.append((item, str(reason), max_chars))
 
         with patch(
-            "project_code_intelligence.embeddings.embed_texts_once",
+            "project_code_intelligence.embedding.core.embed_texts_once",
             side_effect=EmbeddingEndpointUnavailableError("context exceeded", recoverable_batch=True),
         ):
             embedded, skipped_count = embed_items_with_retry(

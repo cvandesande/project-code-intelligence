@@ -148,6 +148,44 @@ def call_mcp_tool(tool_name: str, arguments: dict[str, object], *, cwd: Path, en
     return parse_mcp_tool_response(proc.stdout, tool_name)
 
 
+def call_mcp_request(input_text: str, *, cwd: Path, env: dict[str, str]) -> dict[str, object]:
+    proc = run(
+        [sys.executable, "-m", "project_code_intelligence.server"],
+        cwd=cwd,
+        env=env,
+        input_text=input_text,
+        timeout=30,
+    )
+    try:
+        response_value = cast("object", json.loads(proc.stdout))
+    except json.JSONDecodeError as exc:
+        fail(f"unexpected non-JSON MCP response: {exc}")
+    if not isinstance(response_value, dict):
+        fail("MCP response was not an object")
+    response = cast("dict[object, object]", response_value)
+    return {str(key): value for key, value in response.items()}
+
+
+def assert_mcp_error(response: dict[str, object], expected_text: str) -> None:
+    error_value = response.get("error")
+    if not isinstance(error_value, dict):
+        fail("MCP response did not contain an error")
+    error = cast("dict[object, object]", error_value)
+    message = error.get("message")
+    if not isinstance(message, str) or expected_text not in message:
+        fail(f"unexpected MCP error message: {message!r}")
+
+
+def mcp_tool_request(tool_name: str, arguments: dict[str, object]) -> str:
+    request: dict[str, object] = {
+        "jsonrpc": "2.0",
+        "id": tool_name,
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": arguments},
+    }
+    return json.dumps(request) + "\n"
+
+
 def result_mentions(results: object, text: str) -> bool:
     if not isinstance(results, list):
         return False
@@ -173,19 +211,19 @@ def remove_tree(path: Path) -> None:
 
 def run_ingest_checks(fixture_dir: Path, env: dict[str, str]) -> None:
     dry_run = run(
-        [sys.executable, "-m", "project_code_intelligence.cli", "--no-embed", "--dry-run"],
+        [sys.executable, "-m", "project_code_intelligence.cli", ".", "--no-embed", "--dry-run"],
         cwd=fixture_dir,
         env=env,
     )
     if '"files"' not in dry_run.stdout:
         fail("dry-run output did not look like an ingest report")
-    ingest = run([sys.executable, "-m", "project_code_intelligence.cli", "--no-embed"], cwd=fixture_dir, env=env)
+    ingest = run([sys.executable, "-m", "project_code_intelligence.cli", ".", "--no-embed"], cwd=fixture_dir, env=env)
     if '"snapshot_ids"' not in ingest.stdout:
         fail("ingest output did not include snapshot IDs")
     incremental_env = dict(env)
     incremental_env["PROJECT_CODE_INTELLIGENCE_MODE"] = "incremental"
     incremental = run(
-        [sys.executable, "-m", "project_code_intelligence.cli", "--no-embed"],
+        [sys.executable, "-m", "project_code_intelligence.cli", ".", "--no-embed"],
         cwd=fixture_dir,
         env=incremental_env,
     )
@@ -208,6 +246,24 @@ def run_mcp_checks(fixture_dir: Path, env: dict[str, str]) -> tuple[int, int]:
     search_results_list = cast("list[object]", search_results)
     if not result_mentions(search_results_list, "Greeter"):
         fail("MCP text search did not return the fixture symbol")
+    unknown_arg = call_mcp_request(
+        mcp_tool_request("search_code_intel_text", {"query": "Greeter", "unknown": True}),
+        cwd=fixture_dir,
+        env=env,
+    )
+    assert_mcp_error(unknown_arg, "unknown argument")
+    semantic_boundary = call_mcp_request(
+        mcp_tool_request("search_code_intel_semantic", {}),
+        cwd=fixture_dir,
+        env=env,
+    )
+    assert_mcp_error(semantic_boundary, "missing required argument")
+    malformed = call_mcp_request("{not-json}\n", cwd=fixture_dir, env=env)
+    assert_mcp_error(malformed, "Expecting property name")
+    small_request_env = dict(env)
+    small_request_env["PROJECT_CODE_INTELLIGENCE_MCP_MAX_REQUEST_BYTES"] = "1024"
+    oversized = call_mcp_request("x" * 2048 + "\n", cwd=fixture_dir, env=small_request_env)
+    assert_mcp_error(oversized, "MCP_MAX_REQUEST_BYTES")
     return len(cast("list[object]", snapshots)), len(search_results_list)
 
 

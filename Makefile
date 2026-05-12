@@ -72,14 +72,14 @@ security-audit:
 doctor:
 	./pci-doctor
 
-integration-smoke:
+integration-smoke: compose-up
 	PYTHONPATH=$(PYTHONPATH) $(PYTHON) scripts/integration_smoke.py
 
 scan:
-	./pci-index
+	./pci-index .
 
 scan-dry-run:
-	./pci-index --dry-run
+	./pci-index . --dry-run
 
 mcp-smoke:
 	./pci-mcp-smoke

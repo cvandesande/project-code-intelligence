@@ -22,7 +22,7 @@ from project_code_intelligence.doctor import (
     version_at_least,
     version_tuple,
 )
-from project_code_intelligence.embedding_bench import EmbeddingRequestResult
+from project_code_intelligence.embedding.bench import EmbeddingRequestResult
 
 
 def successful_requester(

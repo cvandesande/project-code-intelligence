@@ -57,6 +57,7 @@ class RuntimeMetrics:
     active_phase_started: float | None = None
     scan_seconds: float = 0.0
     db_upload_seconds: float = 0.0
+    db_retries: int = 0
     embedding_seconds: float = 0.0
     embedding_db_update_seconds: float = 0.0
     embedding_preflight_seconds: float = 0.0
@@ -88,6 +89,7 @@ class RuntimeMetrics:
     embedding_batches: int = 0
     embedding_batch_errors: int = 0
     embedding_context_errors: int = 0
+    embedding_endpoint_retries: int = 0
     embedding_retried_smaller: int = 0
     embedding_input_chars: int = 0
     embedding_input_tokens_estimated: int = 0
@@ -219,6 +221,7 @@ class RuntimeMetrics:
                 "copied_records": self.copied_records,
                 "copied_edges": self.copied_edges,
                 "copied_parser_failures": self.copied_parser_failures,
+                "db_retries": self.db_retries,
                 "preembedding_records_selected": self.preembedding_records_selected,
                 "preembedded_records": self.preembedded_records,
                 "embedding_records_selected": self.embedding_records_selected,
@@ -228,6 +231,7 @@ class RuntimeMetrics:
                 "embedding_batches": self.embedding_batches,
                 "embedding_batch_errors": self.embedding_batch_errors,
                 "embedding_context_errors": self.embedding_context_errors,
+                "embedding_endpoint_retries": self.embedding_endpoint_retries,
                 "embedding_retried_smaller": self.embedding_retried_smaller,
             }
             token_use: JsonObject = {
