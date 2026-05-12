@@ -250,6 +250,7 @@ def query_embedding(query: str) -> tuple[str, int]:
     endpoint = config.default_embedding_endpoint(local_default=True)
     if endpoint:
         model = config.default_embedding_endpoint_model(endpoint=endpoint)
+        model = embeddings.resolve_embedding_endpoint_model(endpoint, model)
         vectors = embeddings.embed_with_endpoint(endpoint, [query], model, track_metrics=False)
         if not vectors:
             raise McpProtocolError("embedding endpoint returned no query vector")

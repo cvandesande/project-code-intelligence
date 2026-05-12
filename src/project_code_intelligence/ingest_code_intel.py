@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,6 +25,7 @@ from project_code_intelligence.embeddings import (
     embed_db_records,
     insert_records_with_preembedding,
     preflight_embedding_endpoint,
+    resolve_embedding_endpoint_model,
     start_record_preembedding,
 )
 from project_code_intelligence.git_utils import workspace_root
@@ -957,9 +958,20 @@ def print_ingest_result(plan: IngestPlan, summary: DbUploadSummary, embedded_rec
     )
 
 
+def resolve_plan_embedding_model(plan: IngestPlan) -> IngestPlan:
+    args = plan.args
+    if not plan.embedding_requested or args.dry_run or not args.embedding_endpoint:
+        return plan
+    resolved_model = resolve_embedding_endpoint_model(args.embedding_endpoint, args.embedding_endpoint_model)
+    if resolved_model == args.embedding_endpoint_model:
+        return plan
+    return replace(plan, args=replace(args, embedding_endpoint_model=resolved_model))
+
+
 def run_ingest_plan(plan: IngestPlan) -> int:
     emit_sarif_discovery(plan)
     configure_ingest_progress(plan)
+    plan = resolve_plan_embedding_model(plan)
     prepare_writable_database(plan.args, embedding_requested=plan.embedding_requested)
     if plan.args.embed_only:
         return run_embed_only(plan)

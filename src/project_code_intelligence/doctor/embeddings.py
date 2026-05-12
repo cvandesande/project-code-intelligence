@@ -26,7 +26,11 @@ from project_code_intelligence.doctor.types import (
     Status,
 )
 from project_code_intelligence.embedding.bench import request_embeddings
-from project_code_intelligence.embeddings import endpoint_host_is_loopback, validate_embedding_endpoint
+from project_code_intelligence.embeddings import (
+    endpoint_host_is_loopback,
+    resolve_embedding_endpoint_model,
+    validate_embedding_endpoint,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -280,6 +284,7 @@ def check_embedding_endpoint(
     if endpoint is None:
         return [result("embedding", "skip", "no embedding endpoint configured")]
     model = config.default_embedding_endpoint_model(env=env, endpoint=endpoint)
+    model = resolve_embedding_endpoint_model(endpoint, model, env=env, timeout=timeout)
     results = [result("embedding-config", "ok", f"endpoint={endpoint} model={model}")]
     return check_embedding_endpoint_health(
         EmbeddingEndpointCheck(

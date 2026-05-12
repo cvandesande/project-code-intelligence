@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import cast
 
 from project_code_intelligence import config, ingest_code_intel, process
+from project_code_intelligence.embeddings import resolve_embedding_endpoint_model
 
 DEFAULT_EMBED_RECORD_TYPES = (
     "code_chunk,package_definition,config_symbol,patch_hunk,dts_node,"
@@ -140,7 +141,14 @@ def index_embedding_args(*, embed_only: bool) -> list[str]:
         os.environ["PROJECT_CODE_INTELLIGENCE_EMBED_RECORD_TYPES"],
     ]
     endpoint = config.default_embedding_endpoint(local_default=True)
-    embedding_args.extend(["--embedding-endpoint", endpoint] if endpoint else ["--llama-embed"])
+    if endpoint:
+        model = resolve_embedding_endpoint_model(
+            endpoint,
+            config.default_embedding_endpoint_model(endpoint=endpoint),
+        )
+        embedding_args.extend(["--embedding-endpoint", endpoint, "--embedding-endpoint-model", model])
+    else:
+        embedding_args.append("--llama-embed")
     if embed_only:
         embedding_args.append("--embed-only")
     else:

@@ -312,6 +312,22 @@ class DoctorEndpointTests(unittest.TestCase):
         self.assertEqual(results[-1].status, "ok")
         self.assertEqual(results[-1].name, "embedding-endpoint")
 
+    def test_local_endpoint_resolves_runtime_model_before_preflight(self) -> None:
+        with patch(
+            "project_code_intelligence.doctor.embeddings.resolve_embedding_endpoint_model",
+            return_value="embed-gemma-300m-FLM",
+        ):
+            results = check_embedding_endpoint(
+                env={},
+                mode="auto",
+                timeout=1.0,
+                requester=successful_requester,
+            )
+
+        config_result = next(item for item in results if item.name == "embedding-config")
+        self.assertIn("model=embed-gemma-300m-FLM", config_result.message)
+        self.assertEqual(results[-1].status, "ok")
+
 
 class DoctorAppleTests(unittest.TestCase):
     def test_embedding_options_prefer_coreml_when_available(self) -> None:

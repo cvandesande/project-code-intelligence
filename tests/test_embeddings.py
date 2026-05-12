@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import unittest
-from typing import TYPE_CHECKING
+import urllib.error
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 from project_code_intelligence import db
@@ -19,6 +20,7 @@ from project_code_intelligence.embeddings import (
     endpoint_host_is_loopback,
     parse_embedding_items,
     require_compatible_embedding_contract,
+    resolve_embedding_endpoint_model,
     smaller_embedding_max_chars,
     validate_embedding_endpoint,
     vector_literal_dimensions,
@@ -63,6 +65,84 @@ class EmbeddingContractTests(unittest.TestCase):
             "https://embedding.example.invalid/v1/embeddings",
             env={"PROJECT_CODE_INTELLIGENCE_ALLOW_REMOTE_EMBEDDING": "1"},
         )
+
+    def test_resolve_embedding_endpoint_model_uses_local_health_model(self) -> None:
+        with patch(
+            "project_code_intelligence.embedding.endpoint.http_client.read_text",
+            return_value=json.dumps({"model": "jinaai/jina-embeddings-v2-base-code"}),
+        ):
+            model = resolve_embedding_endpoint_model(
+                "http://127.0.0.1:18082/v1/embeddings",
+                "local",
+                env={},
+            )
+
+        self.assertEqual(model, "jinaai/jina-embeddings-v2-base-code")
+
+    def test_resolve_embedding_endpoint_model_probes_lemonade_when_healthz_is_not_json(self) -> None:
+        def read_text(request_or_url: object, *, timeout: float) -> str:
+            _ = timeout
+            if isinstance(request_or_url, str):
+                if request_or_url.endswith("/v1/models"):
+                    return json.dumps({"data": []})
+                return "<html>Lemonade</html>"
+            data = getattr(request_or_url, "data", b"")
+            payload_value = cast("object", json.loads(data.decode("utf-8")))
+            if not isinstance(payload_value, dict):
+                raise TypeError("expected object payload")
+            payload = cast("JsonObject", payload_value)
+            if payload["model"] == "embed-gemma-300m-FLM":
+                return json.dumps({
+                    "model": "embed-gemma-300m-FLM",
+                    "data": [{"index": 0, "embedding": [0.1, 0.2]}],
+                })
+            raise urllib.error.URLError("not found")
+
+        with patch("project_code_intelligence.embedding.endpoint.http_client.read_text", side_effect=read_text):
+            model = resolve_embedding_endpoint_model(
+                "http://127.0.0.1:18084/v1/embeddings",
+                "local",
+                env={},
+            )
+
+        self.assertEqual(model, "embed-gemma-300m-FLM")
+
+    def test_resolve_embedding_endpoint_model_prefers_single_listed_model(self) -> None:
+        def read_text(request_or_url: object, *, timeout: float) -> str:
+            _ = timeout
+            if isinstance(request_or_url, str) and request_or_url.endswith("/v1/models"):
+                return json.dumps({
+                    "data": [
+                        {
+                            "id": "Qwen3-Embedding-0.6B-Q8_0.gguf",
+                            "object": "model",
+                            "owned_by": "llamacpp",
+                        }
+                    ]
+                })
+            if isinstance(request_or_url, str):
+                return json.dumps({"error": {"message": "File Not Found"}})
+            raise AssertionError("listed model should avoid embedding probes")
+
+        with patch("project_code_intelligence.embedding.endpoint.http_client.read_text", side_effect=read_text):
+            model = resolve_embedding_endpoint_model(
+                "http://127.0.0.1:18085/v1/embeddings",
+                "local",
+                env={},
+            )
+
+        self.assertEqual(model, "Qwen3-Embedding-0.6B-Q8_0.gguf")
+
+    def test_resolve_embedding_endpoint_model_respects_explicit_model(self) -> None:
+        with patch("project_code_intelligence.embedding.endpoint.http_client.read_text") as read_text:
+            model = resolve_embedding_endpoint_model(
+                "http://127.0.0.1:18083/v1/embeddings",
+                "local",
+                env={"PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL": "local"},
+            )
+
+        self.assertEqual(model, "local")
+        read_text.assert_not_called()
 
     def test_parse_embedding_items_requires_openai_compatible_response_shape(self) -> None:
         raw_response = json.dumps({
