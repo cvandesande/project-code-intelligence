@@ -2,5 +2,8 @@
 export PYTHONDONTWRITEBYTECODE=1
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 export PYTHONPATH="$SCRIPT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+if [ -z "${PYTHON:-}" ] && [ -x "$SCRIPT_DIR/.venv/bin/python" ]; then
+	PYTHON="$SCRIPT_DIR/.venv/bin/python"
+fi
 : "${PYTHON:=python3}"
 exec "$PYTHON" -m project_code_intelligence.cli "$@"

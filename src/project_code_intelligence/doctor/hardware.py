@@ -7,7 +7,7 @@ import platform
 import re
 import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence import config, process
 from project_code_intelligence.doctor.common import (
@@ -21,7 +21,7 @@ from project_code_intelligence.doctor.common import (
 from project_code_intelligence.doctor.types import CheckResult, GpuInfo, Status
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
 AMD_NPU_MIN_KERNEL = (7, 0)
 AMD_NPU_MIN_FIRMWARE = (1, 1, 0, 0)
@@ -231,21 +231,36 @@ def amd_npu_firmware_versions() -> list[str]:
     return sorted(versions, key=version_tuple)
 
 
+def _check_darwin_npu() -> list[CheckResult]:
+    """Check Apple Neural Engine availability on macOS arm64."""
+    if platform.machine().lower() != "arm64":
+        return [result("npu", "skip", "No supported Apple Neural Engine backend is available on this Mac.")]
+    if not coremltools_available():
+        return [
+            result(
+                "npu",
+                "skip",
+                "Apple Neural Engine requires coremltools; using Metal GPU path.",
+                "pip install coremltools transformers to enable the Core ML backend (ANE + GPU + CPU).",
+            )
+        ]
+    cores = detect_ane_cores()
+    detail = (
+        "Core ML with compute_units=ALL distributes work across ANE, GPU, and CPU. "
+        "Run pci-coreml-server --diagnose for per-operation device assignments."
+    )
+    if cores is not None and cores > 0:
+        message = f"Apple Neural Engine detected: {cores} cores, available via Core ML."
+    else:
+        message = "Apple Neural Engine is available via Core ML (coremltools installed)."
+    return [result("npu", "ok", message, detail)]
+
+
 def check_npu_support(env: config.Env) -> list[CheckResult]:
     required = npu_embedding_required(env)
     system = platform.system()
-    machine = platform.machine().lower()
     if system == "Darwin":
-        if machine == "arm64":
-            return [
-                result(
-                    "npu",
-                    "skip",
-                    "Apple Neural Engine is not supported by the current embedding backends.",
-                    "Use host-native llama.cpp Metal for Apple GPU embeddings; ANE needs a future Core ML backend.",
-                )
-            ]
-        return [result("npu", "skip", "No supported Apple Neural Engine backend is available on this Mac.")]
+        return _check_darwin_npu()
     if system != "Linux":
         return [result("npu", "skip", f"NPU checks are not implemented for {system}.")]
 
@@ -464,17 +479,97 @@ def check_platform(env: config.Env) -> list[CheckResult]:
     )
     if platform.system() != "Darwin" or endpoint:
         return results
-    if not llama_configured:
+
+    apple_backend = (config.env_text("PROJECT_CODE_INTELLIGENCE_APPLE_BACKEND", env=env) or "").strip().lower()
+    coreml_available = coremltools_available()
+    if apple_backend == "coreml" or (apple_backend != "metal" and coreml_available):
+        results.extend(_check_coreml(env))
+    elif llama_configured:
+        results.extend(_check_apple_metal(env, llama_model=llama_model))
+    elif coreml_available:
+        results.extend(_check_coreml(env))
+    else:
         results.append(
             result(
                 "apple-metal",
                 "skip",
                 "Apple Metal llama.cpp is not configured.",
-                "Set PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL to check a host-native Apple GPU setup.",
+                "Set PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL for Metal, "
+                "or pip install coremltools transformers for Core ML (ANE + GPU).",
             )
         )
-        return results
+    return results
 
+
+def coremltools_available() -> bool:
+    try:
+        __import__("coremltools")
+    except ImportError:
+        return False
+    return True
+
+
+def detect_ane_cores() -> int | None:
+    """Return the Neural Engine core count via coremltools, or None if unavailable."""
+    try:
+        compute_device = cast("object", __import__("coremltools.models.compute_device", fromlist=["MLComputeDevice"]))
+    except (ImportError, Exception):  # noqa: BLE001 - coremltools native lib may fail
+        return None
+    device_cls = cast("object | None", getattr(compute_device, "MLComputeDevice", None))
+    get_all: Callable[[], list[object]] | None = (
+        cast("Callable[[], list[object]] | None", getattr(device_cls, "get_all_compute_devices", None))
+        if device_cls is not None
+        else None
+    )
+    ane_cls = cast("type[object] | None", getattr(compute_device, "MLNeuralEngineComputeDevice", None))
+    if get_all is None or ane_cls is None:
+        return None
+    try:
+        devices = get_all()
+    except Exception:  # noqa: BLE001 - native framework may fail
+        return None
+    for device in devices:
+        if isinstance(device, ane_cls):
+            core_count = cast("object | None", getattr(device, "total_core_count", None))
+            return core_count if isinstance(core_count, int) else 0
+    return None
+
+
+def _check_coreml(env: config.Env) -> list[CheckResult]:
+    results: list[CheckResult] = []
+    cores = detect_ane_cores()
+    if cores is not None and cores > 0:
+        results.append(
+            result(
+                "apple-coreml",
+                "ok",
+                f"coremltools is available; Neural Engine has {cores} cores; Core ML backend uses ANE + GPU + CPU.",
+                "Run pci-coreml-server --diagnose for per-operation device assignments.",
+            )
+        )
+    else:
+        results.append(
+            result(
+                "apple-coreml",
+                "ok",
+                "coremltools is available; Core ML backend uses ANE + GPU + CPU.",
+                "Run pci-coreml-server --diagnose for per-operation device assignments.",
+            )
+        )
+    model_name = config.env_text("PROJECT_CODE_INTELLIGENCE_COREML_MODEL", config.DEFAULT_COREML_MODEL, env=env)
+    results.append(
+        result(
+            "apple-coreml-model",
+            "ok",
+            f"Core ML embedding model: {model_name}.",
+            "Set PROJECT_CODE_INTELLIGENCE_COREML_MODEL to override.",
+        )
+    )
+    return results
+
+
+def _check_apple_metal(env: config.Env, *, llama_model: str | None) -> list[CheckResult]:
+    results: list[CheckResult] = []
     llama_server = config.env_text("PROJECT_CODE_INTELLIGENCE_LLAMA_SERVER", "llama-server", env=env) or "llama-server"
     resolved_llama_server = shutil.which(llama_server) if Path(llama_server).name == llama_server else llama_server
     if resolved_llama_server and Path(resolved_llama_server).exists():
@@ -485,7 +580,8 @@ def check_platform(env: config.Env) -> list[CheckResult]:
                 "apple-metal",
                 "warn",
                 "llama-server was not found; install llama.cpp on the macOS host for Apple GPU embeddings.",
-                "Recommended install path: brew install llama.cpp. MacPorts and Nix are also supported by llama.cpp.",
+                "Recommended install path: brew install llama.cpp. "
+                "Or pip install coremltools transformers for Core ML (ANE + GPU).",
             )
         )
 
@@ -507,13 +603,4 @@ def check_platform(env: config.Env) -> list[CheckResult]:
                 "Set it to a GGUF embedding model such as Qwen3-Embedding-0.6B-Q8_0.gguf.",
             )
         )
-
-    results.append(
-        result(
-            "apple-neural-engine",
-            "skip",
-            "Apple Neural Engine is not a configured backend.",
-            "GGUF llama.cpp uses Metal on the Apple GPU. ANE support needs a Core ML or Apple-native backend.",
-        )
-    )
     return results

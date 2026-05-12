@@ -23,13 +23,15 @@ as the public example.
 
 ## Quick Start
 
-Install the CLI once, then pass the repository path you want to index.
+Install the CLI tools once, then use them from any repository:
 
 ```sh
-cd /path/to/project-code-intelligence
-uv tool install --editable .
+uv tool install --editable /path/to/project-code-intelligence
 pci-doctor --skip-db --embedding skip
 ```
+
+On macOS Apple Silicon this automatically installs Core ML dependencies.
+`pci-doctor` detects the Apple Neural Engine and available acceleration paths.
 
 The first `pci-doctor` run prints startup commands that fit the current
 machine. For a fully local setup, start `pgvector` plus one embedding service.
@@ -91,28 +93,17 @@ indexer has a Git `HEAD` snapshot.
 
 ## Installation
 
-For development:
-
-```sh
-cd /path/to/project-code-intelligence
-uv sync --extra dev
-export PATH="$PWD/.venv/bin:$PATH"
-```
-
-For normal CLI use, install it once as a `uv` tool. This command can be run from
-any directory; it installs console scripts into your user tool path, usually
-`~/.local/bin`.
+Install the CLI tools system-wide with `uv`:
 
 ```sh
 uv tool install --editable /path/to/project-code-intelligence
 ```
 
-After that, run `pci-index .` from any repository you want to scan:
-
-```sh
-cd /path/to/repo-to-index
-pci-index .
-```
+This places `pci-doctor`, `pci-index`, `pci-mcp`, and the other console scripts
+on your PATH (usually `~/.local/bin`). On macOS Apple Silicon, Core ML
+dependencies (coremltools, transformers, numpy, huggingface_hub) are installed
+automatically via platform-conditional dependencies. No extra install step is
+needed.
 
 Make sure the tool path is on `PATH`:
 
@@ -120,22 +111,41 @@ Make sure the tool path is on `PATH`:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-For use inside a specific repository virtualenv instead:
+After that, run commands from any repository:
 
 ```sh
 cd /path/to/repo-to-index
-uv venv
-. .venv/bin/activate
-uv pip install -e /path/to/project-code-intelligence
+pci-index .
 ```
 
 Without `uv`, create and activate a virtualenv first:
 
 ```sh
+cd /path/to/project-code-intelligence
 python -m venv .venv
 . .venv/bin/activate
-python -m pip install -e /path/to/project-code-intelligence
+python -m pip install -e .
 ```
+
+### Development setup
+
+For contributing, use `uv sync` which creates a `.venv` in the project
+directory with dev tools (ruff, basedpyright, coverage, bandit) included
+automatically:
+
+```sh
+cd /path/to/project-code-intelligence
+uv sync
+```
+
+The shell wrapper scripts in the repository root (`./pci-doctor`, `./pci-index`,
+etc.) auto-detect `.venv/bin/python`, so `make` commands and direct
+`./pci-doctor` invocations work without activating the virtualenv.
+
+Do not mix `uv tool install` and `uv sync` for the same package. If you
+previously ran `uv tool install`, remove it first with
+`uv tool uninstall project-code-intelligence` before switching to `uv sync` for
+development.
 
 The installed console scripts are:
 
@@ -143,6 +153,7 @@ The installed console scripts are:
 - `pci-doctor`
 - `pci-mcp`
 - `pci-mcp-smoke`
+- `pci-coreml-server`
 - `pci-embedding-bench`
 - `pci-fastembed-server`
 - `pci-llama-embed`
@@ -189,9 +200,10 @@ indexed so coding assistants know when to use the MCP index.
 Embeddings are the expected path for normal use. They are what make the MCP
 index useful for semantic search instead of only exact text lookup.
 
-Common paths are CPU FastEmbed, AMD Ryzen AI NPU, AMD GPU, NVIDIA GPU, and
-remote OpenAI-compatible providers. `pci-doctor` prints the exact service
-commands that are available on the current machine.
+Common paths are CPU FastEmbed, Apple Core ML (Neural Engine + GPU + CPU), AMD
+Ryzen AI NPU, AMD GPU, NVIDIA GPU, and remote OpenAI-compatible providers.
+`pci-doctor` prints the exact service commands that are available on the current
+machine.
 
 Local CPU, NPU, and GPU embedding services all publish the same host endpoint by
 default: `http://127.0.0.1:18081/v1/embeddings`. Run only one local embedding
@@ -279,7 +291,18 @@ runtime caches. It does not delete the bind-mounted `./models` directory used by
 the GPU profiles.
 
 On Apple Silicon, Docker Compose is still useful for Postgres/pgvector. Local
-Apple GPU embeddings should run on the macOS host, not inside Docker.
+Apple embeddings run on the macOS host, not inside Docker.
+
+With coremltools installed (automatic on macOS arm64), `pci-doctor` detects the
+Apple Neural Engine and recommends `pci-coreml-server`, which uses Core ML to
+distribute inference across the ANE, GPU, and CPU. Without coremltools, it falls
+back to host-native llama.cpp with Metal GPU acceleration.
+
+To inspect per-operation device assignments:
+
+```sh
+pci-coreml-server --diagnose
+```
 
 ## What the MCP Server Provides
 

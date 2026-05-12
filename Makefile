@@ -1,4 +1,4 @@
-PYTHON ?= python3
+PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 PYTHONPATH := src
 RUFF ?= $(if $(wildcard .venv/bin/ruff),.venv/bin/ruff,ruff)
 COVERAGE ?= $(if $(wildcard .venv/bin/coverage),.venv/bin/coverage,coverage)
@@ -19,7 +19,7 @@ SHELL_FILES := \
 	docker/llamacpp-cuda/entrypoint.sh \
 	docker/llamacpp-rocm/entrypoint.sh
 
-.PHONY: check lint format-check format shellcheck shell-format-check shell-format test coverage typecheck security security-audit doctor integration-smoke scan scan-dry-run mcp-smoke embedding-bench amd-rocm-bundle compose-check compose-up compose-cpu compose-npu compose-amdgpu compose-nvidia compose-down
+.PHONY: check lint format-check format shellcheck shell-format-check shell-format test coverage typecheck security security-audit doctor integration-smoke scan scan-dry-run mcp-smoke embedding-bench amd-rocm-bundle compose-check compose-up compose-cpu compose-npu compose-amdgpu compose-nvidia compose-down tool-install
 
 check: format-check shell-format-check lint shellcheck test typecheck security compose-check
 
@@ -114,3 +114,6 @@ compose-nvidia:
 
 compose-down:
 	docker compose down
+
+tool-install:
+	uv tool install . --reinstall
