@@ -5,8 +5,9 @@
 `project-code-intelligence` indexes a Git repository into Postgres/pgvector and
 serves the result through a small stdio MCP server.
 
-The goal is simple: give coding agents and developers a searchable map of a
-codebase without baking one project's assumptions into the tool.
+The goal is higher-quality agent results: reuse a local code index instead of
+re-reading the same repository over and over, reducing token and embedding cost
+while making codebase navigation faster.
 
 It can store:
 
