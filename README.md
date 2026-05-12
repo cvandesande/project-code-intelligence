@@ -67,6 +67,11 @@ For advanced ingest options, put them after `--`:
 pci-index /path/to/repo-to-index -- --limit-files 100
 ```
 
+If indexing is interrupted, rerun the same command. `pci-index .` reuses the
+same snapshot when the Git tree is unchanged, keeps compatible existing
+embeddings, and fills in records that are still missing embeddings. In normal
+incremental mode it only reparses changed files.
+
 For that fallback text-only mode, run `pci-index . --no-embed`.
 
 To wipe and rebuild the code-intelligence tables in the configured database:
@@ -78,7 +83,7 @@ pci-index --reset-code-intel
 This drops and recreates this project's `project_code_intel_*` tables. It does
 not drop the database or unrelated tables. The command prints the resolved
 database target, asks for confirmation before deleting anything, and exits
-without scanning. Run `pci-index` afterwards to rebuild the index. For
+without scanning. Run `pci-index .` afterwards to rebuild the index. For
 non-interactive automation, add `--i-know-this-deletes-code-intel-db`.
 
 In a brand-new local repository, make an initial commit before scanning so the
@@ -139,7 +144,8 @@ The installed console scripts are:
 - `pci-mcp`
 - `pci-mcp-smoke`
 - `pci-embedding-bench`
-- `pci-embedding-server`
+- `pci-fastembed-server`
+- `pci-llama-embed`
 
 ## MCP Setup
 
@@ -166,6 +172,13 @@ Percent-encode special characters in the username or password.
 
 The older split `PGVECTOR_*` variables remain supported, mostly for Docker
 Compose and compatibility.
+
+The MCP server is read-only by default and applies per-request database safety
+limits. Expensive queries are bounded by `PROJECT_CODE_INTELLIGENCE_MCP_STATEMENT_TIMEOUT_MS`,
+lock waits by `PROJECT_CODE_INTELLIGENCE_MCP_LOCK_TIMEOUT_MS`, and oversized
+requests by `PROJECT_CODE_INTELLIGENCE_MCP_MAX_REQUEST_BYTES`. `get_code_intel_record`
+returns concise metadata by default; pass `include_content: true` when an agent
+needs the indexed text, capped by `PROJECT_CODE_INTELLIGENCE_MCP_MAX_RECORD_CONTENT_CHARS`.
 
 For agent-heavy workflows, copy
 [`docs/examples/AGENTS.md`](docs/examples/AGENTS.md) into the repository being
@@ -305,16 +318,17 @@ Run the local quality gate:
 make check
 ```
 
-Run the integration smoke against a running Compose database:
+Run the integration smoke. This starts the local Compose `pgvector` service if
+needed:
 
 ```sh
-docker compose up -d pgvector
 make integration-smoke
 ```
 
 Useful docs:
 
 - [CONTRIBUTING.md](CONTRIBUTING.md): contributor workflow and guardrails
+- [docs/PUBLIC_API.md](docs/PUBLIC_API.md): supported CLI, MCP, config, and Python import surfaces
 - [docs/BENCHMARKS.md](docs/BENCHMARKS.md): local CPU/NPU/GPU benchmark notes
 - [.env.example](.env.example): available environment variables
 - [AGENTS.md](AGENTS.md): instructions for assistants working on this repo
