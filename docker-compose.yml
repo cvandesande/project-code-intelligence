@@ -1,5 +1,6 @@
 services:
   pgvector:
+    profiles: ["db"]
     image: pgvector/pgvector:pg17
     environment:
       POSTGRES_DB: ${PGVECTOR_DB:-codeintel}
@@ -49,7 +50,7 @@ services:
       HF_TOKEN: ${HF_TOKEN:-}
       PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL: ${PROJECT_CODE_INTELLIGENCE_LEMONADE_EMBEDDING_MODEL:-embed-gemma-300m-FLM}
     ports:
-      - "${PROJECT_CODE_INTELLIGENCE_BIND_HOST:-127.0.0.1}:${PROJECT_CODE_INTELLIGENCE_LEMONADE_PORT:-13305}:13305"
+      - "${PROJECT_CODE_INTELLIGENCE_BIND_HOST:-127.0.0.1}:${PROJECT_CODE_INTELLIGENCE_EMBEDDING_PORT:-18081}:13305"
     devices:
       - /dev/accel/accel0:/dev/accel/accel0
     ulimits:

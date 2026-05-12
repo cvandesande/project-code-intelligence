@@ -101,6 +101,7 @@ class CliArgs:
     dry_run: bool
     reset_code_intel: bool
     i_know_this_deletes_code_intel_db: bool
+    reset_only: bool
     sarif: list[str]
     no_profile_sarif: bool
     sarif_max_bytes: int
@@ -189,6 +190,7 @@ class CliNamespace(argparse.Namespace):
     dry_run: bool
     reset_code_intel: bool
     i_know_this_deletes_code_intel_db: bool
+    reset_only: bool
     sarif: list[str]
     no_profile_sarif: bool
     sarif_max_bytes: int
@@ -312,12 +314,17 @@ def build_parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "--reset-code-intel",
         action="store_true",
-        help="Drop and recreate code-intelligence tables before ingesting. Requires confirmation flag.",
+        help="Drop and recreate code-intelligence tables before ingesting. Prompts unless confirmation flag is set.",
     )
     _ = parser.add_argument(
         "--i-know-this-deletes-code-intel-db",
         action="store_true",
-        help="Required with --reset-code-intel.",
+        help="Skip interactive confirmation for --reset-code-intel.",
+    )
+    _ = parser.add_argument(
+        "--reset-only",
+        action="store_true",
+        help="Reset code-intelligence tables and exit without scanning or indexing.",
     )
     _ = parser.add_argument(
         "--sarif",
@@ -396,6 +403,7 @@ def parse_cli_args(argv: list[str] | None = None) -> CliArgs:
         dry_run=parsed.dry_run,
         reset_code_intel=parsed.reset_code_intel,
         i_know_this_deletes_code_intel_db=parsed.i_know_this_deletes_code_intel_db,
+        reset_only=parsed.reset_only,
         sarif=parsed.sarif,
         no_profile_sarif=parsed.no_profile_sarif,
         sarif_max_bytes=parsed.sarif_max_bytes,
@@ -436,8 +444,8 @@ def validate_args(args: CliArgs, *, embedding_requested: bool) -> None:
         raise ValueError("--embedding-batch-size must be greater than 0")
     if embedding_requested and args.embedding_max_chars <= 0:
         raise ValueError("--embedding-max-chars must be greater than 0; omit --embed to disable embeddings")
-    if args.reset_code_intel and not args.i_know_this_deletes_code_intel_db:
-        raise ValueError("--reset-code-intel requires --i-know-this-deletes-code-intel-db")
+    if args.reset_only and not args.reset_code_intel:
+        raise ValueError("--reset-only requires --reset-code-intel")
     if args.reset_code_intel and args.embed_only:
         raise ValueError("--reset-code-intel cannot be combined with --embed-only")
 
@@ -502,16 +510,37 @@ def emit_sarif_discovery(plan: IngestPlan) -> None:
         )
 
 
+def confirm_reset_code_intel(args: CliArgs, settings: config.DatabaseSettings) -> None:
+    if not args.reset_code_intel:
+        return
+    write_stderr("About to reset project-code-intelligence tables.")
+    write_stderr(f"Database target: {settings.display_target()}")
+    write_stderr("Tables: project_code_intel_*")
+    write_stderr("This permanently deletes indexed records, findings, metadata, and embeddings in that database.")
+    if args.i_know_this_deletes_code_intel_db:
+        write_stderr("Reset confirmed by --i-know-this-deletes-code-intel-db.")
+        return
+    if not sys.stdin.isatty():
+        raise ValueError("--reset-code-intel requires --i-know-this-deletes-code-intel-db in non-interactive mode")
+    _ = sys.stderr.write("Type yes to continue: ")
+    _ = sys.stderr.flush()
+    answer = sys.stdin.readline().strip().lower()
+    if answer != "yes":
+        raise ValueError("reset cancelled")
+
+
 def prepare_writable_database(args: CliArgs, *, embedding_requested: bool) -> None:
     if args.dry_run:
         return
-    if not db.allow_writes():
+    settings = config.DatabaseSettings.from_env()
+    if not db.allow_writes(settings):
         raise PermissionError("set PROJECT_CODE_INTELLIGENCE_ALLOW_WRITES=1 to ingest")
+    confirm_reset_code_intel(args, settings)
     if embedding_requested and not args.embedding_endpoint and not args.llama_embed:
         raise ValueError("set --embedding-endpoint or --llama-embed when --embed is used")
     if embedding_requested and args.embedding_endpoint:
         preflight_embedding_endpoint(args.embedding_endpoint, args.embedding_endpoint_model)
-    with db.connect(readonly=False) as conn:
+    with db.connect(readonly=False, settings=settings) as conn:
         if args.reset_code_intel:
             progress_event("code_intel_reset_started")
             reset_code_intel_schema(conn)
@@ -519,6 +548,28 @@ def prepare_writable_database(args: CliArgs, *, embedding_requested: bool) -> No
         conn.commit()
         if args.reset_code_intel:
             progress_event("code_intel_reset_completed")
+
+
+def print_reset_only_report(args: CliArgs, settings: config.DatabaseSettings) -> None:
+    write_stdout(
+        json.dumps(
+            {
+                "mode": "reset-only",
+                "dry_run": args.dry_run,
+                "reset": args.reset_code_intel and not args.dry_run,
+                "database": settings.display_target(),
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def run_reset_only(args: CliArgs) -> int:
+    validate_args(args, embedding_requested=False)
+    settings = config.DatabaseSettings.from_env()
+    prepare_writable_database(args, embedding_requested=False)
+    print_reset_only_report(args, settings)
+    return 0
 
 
 def latest_snapshot_ids(collection: str, repos: list[str]) -> list[int]:
@@ -923,7 +974,10 @@ def run_ingest_plan(plan: IngestPlan) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    return run_ingest_plan(build_ingest_plan(parse_cli_args(argv)))
+    args = parse_cli_args(argv)
+    if args.reset_only:
+        return run_reset_only(args)
+    return run_ingest_plan(build_ingest_plan(args))
 
 
 def cli_main(argv: list[str] | None = None) -> int:

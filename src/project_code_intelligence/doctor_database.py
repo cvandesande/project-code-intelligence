@@ -27,11 +27,13 @@ def check_database() -> list[CheckResult]:
                 "database-config",
                 "fail",
                 "Missing PostgreSQL connection settings: " + ", ".join(missing),
-                "Set PGVECTOR_DSN, or set PGVECTOR_HOST/PGVECTOR_PORT/PGVECTOR_DB/PGVECTOR_USER/PGVECTOR_PASS.",
+                "Set PROJECT_CODE_INTELLIGENCE_DATABASE_URL, or set "
+                "PGVECTOR_HOST/PGVECTOR_PORT/PGVECTOR_DB/PGVECTOR_USER/PGVECTOR_PASS.",
             )
         ]
 
-    results.append(result("database-config", "ok", settings.connection_hint()))
+    database_target = settings.display_target()
+    results.append(result("database-config", "ok", database_target, settings.connection_hint()))
     try:
         with db.connect(settings=settings) as conn:
             info_row = conn.execute(
@@ -44,7 +46,8 @@ def check_database() -> list[CheckResult]:
                 result(
                     "database",
                     "ok",
-                    f"connected to {row_text(info_row, 'database_name')} as {row_text(info_row, 'user_name')}",
+                    f"connected to {row_text(info_row, 'database_name')} as "
+                    f"{row_text(info_row, 'user_name')} at {database_target}",
                     row_text(info_row, "version"),
                 )
             )

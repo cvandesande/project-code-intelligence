@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import tempfile
@@ -7,9 +8,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from typing_extensions import override
+
 from project_code_intelligence.code_profiles import load_profile
 from project_code_intelligence.config import (
-    DEFAULT_EMBEDDING_ENDPOINT_MODEL,
     DEFAULT_LEMONADE_EMBEDDING_ENDPOINT,
     DEFAULT_LEMONADE_EMBEDDING_MODEL,
     DatabaseSettings,
@@ -21,7 +23,7 @@ from project_code_intelligence.config import (
 from project_code_intelligence.embeddings import validate_embedding_endpoint
 from project_code_intelligence.exceptions import ConfigError, ProfileLoadError
 from project_code_intelligence.fastembed_server import embedding_response, normalize_input
-from project_code_intelligence.ingest_code_intel import CliArgs, validate_args
+from project_code_intelligence.ingest_code_intel import CliArgs, confirm_reset_code_intel, validate_args
 from project_code_intelligence.mcp_filters import (
     code_intel_clauses,
     scoped_snapshot_clauses,
@@ -45,6 +47,12 @@ from project_code_intelligence.server import query_embedding
 class FakeFastEmbedModel:
     def embed(self, documents: list[str]) -> list[list[float]]:
         return [[float(index), float(len(text))] for index, text in enumerate(documents)]
+
+
+class TtyStringIO(io.StringIO):
+    @override
+    def isatty(self) -> bool:
+        return True
 
 
 def fixture_file(path: str, language: str) -> IntelFile:
@@ -82,8 +90,43 @@ def require_list(value: JsonValue) -> list[JsonValue]:
     return value
 
 
-class CodeIntelParserTests(unittest.TestCase):
-    def test_database_settings_default_to_local_compose_pgvector(self) -> None:
+def cli_args(**overrides: object) -> CliArgs:
+    values: dict[str, object] = {
+        "root": Path(),
+        "collection": None,
+        "profile": "generic",
+        "repos": None,
+        "max_file_bytes": 0,
+        "chunk_chars": 2400,
+        "overlap_lines": 0,
+        "limit_files": None,
+        "progress_every": 0,
+        "dry_run": False,
+        "reset_code_intel": False,
+        "i_know_this_deletes_code_intel_db": False,
+        "reset_only": False,
+        "sarif": [],
+        "no_profile_sarif": False,
+        "sarif_max_bytes": 1024 * 1024,
+        "embed_only": False,
+        "mode": "incremental",
+        "full": False,
+        "no_replace": False,
+        "embed": False,
+        "embed_record_types": "code_chunk",
+        "embedding_batch_size": 1,
+        "embedding_max_chars": 3000,
+        "embedding_endpoint": None,
+        "embedding_endpoint_model": "local",
+        "llama_embed": False,
+        "no_preembed": False,
+    }
+    values.update(overrides)
+    return CliArgs(**values)  # type: ignore[arg-type]
+
+
+class DatabaseSettingsTests(unittest.TestCase):
+    def test_default_to_local_compose_pgvector(self) -> None:
         settings = DatabaseSettings.from_env({})
 
         self.assertEqual(settings.missing_connection_names(), [])
@@ -95,17 +138,74 @@ class CodeIntelParserTests(unittest.TestCase):
         self.assertIn("PGVECTOR_DB=codeintel", settings.connection_hint())
         self.assertIn("PGVECTOR_PASS=<set>", settings.connection_hint())
 
-    def test_database_settings_report_missing_connection_parts(self) -> None:
+    def test_report_missing_connection_parts(self) -> None:
         settings = DatabaseSettings(dbname="codeintel", user="reader", password=None)
 
         self.assertEqual(settings.missing_connection_names(), ["PGVECTOR_PASS"])
 
-    def test_database_settings_accept_dsn_without_individual_parts(self) -> None:
+    def test_accept_database_url_without_individual_parts(self) -> None:
+        settings = DatabaseSettings.from_env({
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://example.invalid/db"
+        })
+
+        self.assertEqual(settings.missing_connection_names(), [])
+        self.assertEqual(settings.connection_hint(), "PROJECT_CODE_INTELLIGENCE_DATABASE_URL=<hidden>")
+        self.assertEqual(settings.display_target(), "postgresql://example.invalid/db")
+
+    def test_accept_legacy_pgvector_dsn_without_individual_parts(self) -> None:
         settings = DatabaseSettings.from_env({"PGVECTOR_DSN": "postgresql://example.invalid/db"})
 
         self.assertEqual(settings.missing_connection_names(), [])
         self.assertEqual(settings.connection_hint(), "PGVECTOR_DSN=<hidden>")
+        self.assertEqual(settings.display_target(), "postgresql://example.invalid/db")
 
+    def test_database_url_takes_precedence_over_legacy_dsn(self) -> None:
+        settings = DatabaseSettings.from_env({
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://primary.example.invalid/db",
+            "PGVECTOR_DSN": "postgresql://legacy.example.invalid/db",
+        })
+
+        self.assertEqual(settings.connection_hint(), "PROJECT_CODE_INTELLIGENCE_DATABASE_URL=<hidden>")
+        self.assertEqual(settings.display_target(), "postgresql://primary.example.invalid/db")
+
+    def test_display_target_hides_passwords(self) -> None:
+        settings = DatabaseSettings.from_env({
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": (
+                "postgresql://user:secret@example.invalid:5432/db?sslmode=require&password=secret"
+            )
+        })
+
+        self.assertEqual(
+            settings.display_target(), "postgresql://user@example.invalid:5432/db?sslmode=require&password=<hidden>"
+        )
+
+
+class ResetConfirmationTests(unittest.TestCase):
+    def test_reset_confirmation_prints_target_and_accepts_yes(self) -> None:
+        credential = "secret"
+        stderr = io.StringIO()
+
+        with patch("sys.stdin", TtyStringIO("yes\n")), patch("sys.stderr", stderr):
+            confirm_reset_code_intel(
+                cli_args(reset_code_intel=True),
+                DatabaseSettings(host="db", port="5432", dbname="codeintel", user="app", password=credential),
+            )
+
+        output = stderr.getvalue()
+        self.assertIn("Database target: postgresql://app@db:5432/codeintel sslmode=prefer", output)
+        self.assertIn("Tables: project_code_intel_*", output)
+        self.assertNotIn("secret", output)
+
+    def test_reset_confirmation_requires_flag_in_noninteractive_mode(self) -> None:
+        with (
+            patch("sys.stdin", io.StringIO("yes\n")),
+            patch("sys.stderr", io.StringIO()),
+            self.assertRaises(ValueError),
+        ):
+            confirm_reset_code_intel(cli_args(reset_code_intel=True), DatabaseSettings())
+
+
+class CodeIntelParserTests(unittest.TestCase):
     def test_env_bool_rejects_ambiguous_values(self) -> None:
         with self.assertRaises(ConfigError):
             _ = env_bool("PROJECT_CODE_INTELLIGENCE_PREEMBED", env={"PROJECT_CODE_INTELLIGENCE_PREEMBED": "maybe"})
@@ -140,16 +240,10 @@ class CodeIntelParserTests(unittest.TestCase):
             "http://127.0.0.1:18081/v1/embeddings",
         )
 
-    def test_default_embedding_endpoint_model_uses_lemonade_default_for_lemonade_endpoint(self) -> None:
+    def test_default_embedding_endpoint_model_uses_strict_local_runtime_default(self) -> None:
         self.assertEqual(
             default_embedding_endpoint_model(endpoint=DEFAULT_LEMONADE_EMBEDDING_ENDPOINT),
             DEFAULT_LEMONADE_EMBEDDING_MODEL,
-        )
-
-    def test_default_embedding_endpoint_model_keeps_local_default_for_fastembed(self) -> None:
-        self.assertEqual(
-            default_embedding_endpoint_model(endpoint="http://127.0.0.1:18081/v1/embeddings"),
-            DEFAULT_EMBEDDING_ENDPOINT_MODEL,
         )
 
     def test_default_embedding_endpoint_model_prefers_configured_model(self) -> None:
@@ -168,7 +262,7 @@ class CodeIntelParserTests(unittest.TestCase):
 
         self.assertEqual(settings.embedding_endpoint, DEFAULT_LEMONADE_EMBEDDING_ENDPOINT)
 
-    def test_ingest_settings_default_lemonade_model_when_endpoint_is_configured(self) -> None:
+    def test_ingest_settings_uses_strict_local_runtime_model_for_shared_endpoint(self) -> None:
         settings = IngestSettings.from_env({
             "PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT": DEFAULT_LEMONADE_EMBEDDING_ENDPOINT
         })
@@ -297,38 +391,14 @@ class ParserAndRuntimeTests(unittest.TestCase):
             _ = line_window_records(fixture_file("small.txt", "text"), "hello", 20, 0)
 
     def test_cli_bounds_are_validated(self) -> None:
-        args = CliArgs(
-            root=Path(),
-            collection=None,
-            profile="generic",
-            repos=None,
-            max_file_bytes=0,
-            chunk_chars=99,
-            overlap_lines=0,
-            limit_files=None,
-            progress_every=0,
-            dry_run=False,
-            reset_code_intel=False,
-            i_know_this_deletes_code_intel_db=False,
-            sarif=[],
-            no_profile_sarif=False,
-            sarif_max_bytes=1024 * 1024,
-            embed_only=False,
-            mode="incremental",
-            full=False,
-            no_replace=False,
-            embed=False,
-            embed_record_types="code_chunk",
-            embedding_batch_size=1,
-            embedding_max_chars=3000,
-            embedding_endpoint=None,
-            embedding_endpoint_model="local",
-            llama_embed=False,
-            no_preembed=False,
-        )
+        args = cli_args(chunk_chars=99)
 
         with self.assertRaises(ValueError):
             validate_args(args, embedding_requested=False)
+
+    def test_reset_only_requires_reset_flag(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_args(cli_args(reset_only=True), embedding_requested=False)
 
     def test_runtime_progress_percent(self) -> None:
         metrics = RuntimeMetrics()

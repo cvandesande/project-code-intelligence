@@ -32,9 +32,8 @@ GPU_QWEN3_LARGE_MODEL = "Qwen3-Embedding-4B-Q8_0.gguf"
 
 
 def npu_embedding_required(env: config.Env) -> bool:
-    endpoint = config.default_embedding_endpoint(env=env)
-    model = config.default_embedding_endpoint_model(env=env, endpoint=endpoint).strip().lower()
-    return model.endswith("-flm") or endpoint == config.DEFAULT_LEMONADE_EMBEDDING_ENDPOINT
+    model = config.default_embedding_endpoint_model(env=env).strip().lower()
+    return model.endswith("-flm")
 
 
 def cpuinfo_text(path: Path | None = None) -> str:

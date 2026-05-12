@@ -227,8 +227,8 @@ def embedding_endpoint_hint(endpoint: str, exc: BaseException) -> str:
     return (
         f"Embedding endpoint is not reachable or is not serving embeddings: {endpoint}\n"
         "\n"
-        "For the local CPU demo, start FastEmbed from the project-code-intelligence checkout:\n"
-        "  docker compose --profile cpu up -d --build\n"
+        "For the portable local embedding demo, start FastEmbed from the project-code-intelligence checkout:\n"
+        "  docker compose --profile cpu up -d --build fastembed\n"
         "\n"
         "The FastEmbed service listens on:\n"
         "  http://127.0.0.1:18081/v1/embeddings\n"
