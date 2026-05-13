@@ -23,6 +23,7 @@ def index_parser() -> argparse.ArgumentParser:
     _ = parser.add_argument("--dry-run", action="store_true", help="Show what would be ingested without writing.")
     _ = parser.add_argument(
         "--reset-code-intel",
+        "--reset",
         action="store_true",
         help="Drop and recreate code-intelligence tables, then exit. Prompts unless confirmation flag is set.",
     )
@@ -78,8 +79,9 @@ def split_index_argv(argv: list[str] | None) -> tuple[list[str], list[str]]:
 def repo_paths_to_ingest_args(repo_paths: list[str]) -> list[str]:
     absolute_paths = [Path(path).expanduser().resolve(strict=False) for path in repo_paths]
     if len(absolute_paths) == 1:
-        root = absolute_paths[0]
-        repos = "."
+        repo_path = absolute_paths[0]
+        root = repo_path.parent
+        repos = repo_path.name or "."
     else:
         root = Path(os.path.commonpath([str(path) for path in absolute_paths]))
         repos = ",".join(path.relative_to(root).as_posix() or "." for path in absolute_paths)
