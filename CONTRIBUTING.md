@@ -23,10 +23,20 @@ uv sync
 Dev tools (ruff, basedpyright, coverage, bandit) are in `[dependency-groups]`
 and included by `uv sync` automatically.
 
+If you need to test the installed CLI commands from other repositories while
+editing this checkout, install the tool in editable mode:
+
+```sh
+uv tool install --editable /path/to/project-code-intelligence
+```
+
+Editable tool installs are for development. Reinstall or uninstall the tool when
+you want to test the packaged, non-editable install path.
+
 Start the local database when you want to run the integration smoke:
 
 ```sh
-docker compose up -d pgvector
+docker compose up -d --wait --wait-timeout 60 pgvector
 ```
 
 ## Checks
