@@ -29,7 +29,7 @@ class CliWrapperTests(unittest.TestCase):
         self.assertIn("--embedding-endpoint", forwarded)
         self.assertIn("--root", forwarded)
         self.assertIn("--repos", forwarded)
-        self.assertEqual(forwarded[forwarded.index("--repos") + 1], ".")
+        self.assertEqual(forwarded[forwarded.index("--repos") + 1], Path.cwd().name)
         self.assertIn("--dry-run", forwarded)
 
     def test_pci_index_requires_repo_path_for_indexing(self) -> None:
@@ -55,6 +55,16 @@ class CliWrapperTests(unittest.TestCase):
             args = cli.repo_paths_to_ingest_args([str(repo_a), str(repo_b)])
 
         self.assertEqual(args, ["--root", str(root.resolve()), "--repos", "repo-a,repo-b"])
+
+    def test_single_repo_path_maps_to_parent_root_and_repo_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "openwrt"
+            repo.mkdir()
+
+            args = cli.repo_paths_to_ingest_args([str(repo)])
+
+        self.assertEqual(args, ["--root", str(root.resolve()), "--repos", "openwrt"])
 
     def test_pci_index_no_embed_is_explicit_text_only_mode(self) -> None:
         forwarded: list[str] = []
@@ -93,8 +103,26 @@ class CliWrapperTests(unittest.TestCase):
 
         self.assertEqual(status, 0)
         self.assertIn("--reset-code-intel", cli.index_parser().format_help())
+        self.assertIn("--reset", cli.index_parser().format_help())
         self.assertIn("--reset-code-intel", forwarded)
         self.assertIn("--reset-only", forwarded)
         self.assertIn("--i-know-this-deletes-code-intel-db", forwarded)
         self.assertNotIn("--embed", forwarded)
         self.assertNotIn("--embedding-endpoint", forwarded)
+
+    def test_pci_index_reset_alias_forwards_reset_flags(self) -> None:
+        forwarded: list[str] = []
+
+        def fake_ingest_main(args: list[str]) -> int:
+            forwarded.extend(args)
+            return 0
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("project_code_intelligence.cli.ingest_code_intel.cli_main", side_effect=fake_ingest_main),
+        ):
+            status = cli.index_main(["--reset", "--i-know-this-deletes-code-intel-db"])
+
+        self.assertEqual(status, 0)
+        self.assertIn("--reset-code-intel", forwarded)
+        self.assertIn("--reset-only", forwarded)
