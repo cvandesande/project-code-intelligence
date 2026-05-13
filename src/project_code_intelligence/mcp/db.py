@@ -10,9 +10,10 @@ from project_code_intelligence import config, db
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-DEFAULT_MCP_STATEMENT_TIMEOUT_MS = 60_000
+DEFAULT_MCP_STATEMENT_TIMEOUT_MS = 15_000
 DEFAULT_MCP_LOCK_TIMEOUT_MS = 5_000
 DEFAULT_MCP_IDLE_IN_TRANSACTION_TIMEOUT_MS = 30_000
+DEFAULT_MCP_MAX_STATUS_ROWS = 1_000
 
 
 def mcp_statement_timeout_ms() -> int:
@@ -39,6 +40,14 @@ def mcp_idle_in_transaction_timeout_ms() -> int:
     )
 
 
+def mcp_max_status_rows() -> int:
+    return config.env_int(
+        "PROJECT_CODE_INTELLIGENCE_MCP_MAX_STATUS_ROWS",
+        DEFAULT_MCP_MAX_STATUS_ROWS,
+        minimum=1,
+    )
+
+
 def configure_session(conn: db.DbConnection) -> None:
     _ = conn.execute(
         """
@@ -57,7 +66,7 @@ def configure_session(conn: db.DbConnection) -> None:
 
 @contextmanager
 def connect() -> Generator[db.DbConnection]:
-    with db.connect() as conn:
+    with db.connect(settings=config.DatabaseSettings.from_env(role="mcp"), readonly=True) as conn:
         configure_session(conn)
         yield conn
 
