@@ -28,7 +28,9 @@ from project_code_intelligence.exceptions import ConfigError, ProfileLoadError
 from project_code_intelligence.ingest_code_intel import (
     CliArgs,
     IngestPlan,
+    build_ingest_plan,
     confirm_reset_code_intel,
+    discover_plan_sarif_files,
     validate_args,
     warning_for_sarif_mtime,
 )
@@ -562,10 +564,37 @@ class SarifTests(unittest.TestCase):
                 _ = ignored_sarif.write_text('{"version":"2.1.0","runs":[]}', encoding="utf-8")
 
                 discovered = discover_sarif_files(root, ["repo-a"], [], include_profile=True)
+                explicit_discovered = discover_sarif_files(
+                    root,
+                    ["repo-a"],
+                    [str(fixture_sarif)],
+                    include_profile=True,
+                )
 
             self.assertEqual(discovered, [selected_sarif.resolve()])
+            self.assertEqual(set(explicit_discovered), {selected_sarif.resolve(), fixture_sarif.resolve()})
         finally:
             profile_context.set_active_profile(previous_profile)
+
+    def test_build_plan_defers_sarif_discovery_until_scan_phase(self) -> None:
+        args = cli_args(root=Path(), repos="repo-a")
+
+        with (
+            patch(
+                "project_code_intelligence.ingest_code_intel.discover_sarif_files",
+                return_value=[Path("repo-a/results.sarif")],
+            ) as mocked_discover,
+            patch("project_code_intelligence.ingest_code_intel.progress_event") as mocked_progress,
+        ):
+            plan = build_ingest_plan(args)
+            self.assertEqual(plan.sarif_files, [])
+            mocked_discover.assert_not_called()
+
+            discovered = discover_plan_sarif_files(plan)
+
+        self.assertEqual(discovered, [Path("repo-a/results.sarif")])
+        mocked_discover.assert_called_once()
+        mocked_progress.assert_called_once_with("code_intel_sarif_discovering", repos=["repo-a"])
 
     def test_sarif_mtime_warning_is_soft_when_report_is_older_than_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

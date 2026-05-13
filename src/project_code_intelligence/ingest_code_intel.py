@@ -471,8 +471,6 @@ def build_ingest_plan(args: CliArgs) -> IngestPlan:
     collection = args.collection or default_collection(root)
     repos = parse_repos(args.repos or ",".join(profile.default_repos))
     embed_types = {item.strip() for item in args.embed_record_types.split(",") if item.strip()}
-    sarif_patterns = explicit_sarif_patterns(args.sarif)
-    sarif_files = discover_sarif_files(root, repos, sarif_patterns, include_profile=not args.no_profile_sarif)
     embedding_requested = args.embed or args.embed_only
     preembedding_requested = args.embed and not args.no_preembed and code_preembedding_enabled()
     mode = "full" if args.full else args.mode
@@ -486,7 +484,7 @@ def build_ingest_plan(args: CliArgs) -> IngestPlan:
         collection=collection,
         repos=repos,
         embed_types=embed_types,
-        sarif_files=sarif_files,
+        sarif_files=[],
         embedding_requested=embedding_requested,
         preembedding_requested=preembedding_requested,
         mode=mode,
@@ -516,11 +514,26 @@ def configure_ingest_progress(plan: IngestPlan) -> None:
         runtime_state.active_metrics.configure_progress({"scan": 0.65, "db_upload": 0.35})
 
 
-def emit_sarif_discovery(plan: IngestPlan) -> None:
-    if plan.sarif_files:
+def discover_plan_sarif_files(plan: IngestPlan) -> list[Path]:
+    if not plan.sarif_files:
+        progress_event("code_intel_sarif_discovering", repos=plan.repos)
+        sarif_patterns = explicit_sarif_patterns(plan.args.sarif)
+        plan.sarif_files.extend(
+            discover_sarif_files(
+                plan.root,
+                plan.repos,
+                sarif_patterns,
+                include_profile=not plan.args.no_profile_sarif,
+            )
+        )
+    return plan.sarif_files
+
+
+def emit_sarif_discovery(plan: IngestPlan, sarif_files: list[Path]) -> None:
+    if sarif_files:
         progress_event(
             "code_intel_sarif_discovered",
-            files=[relative_to_or_none(path, plan.root) or str(path) for path in plan.sarif_files],
+            files=[relative_to_or_none(path, plan.root) or str(path) for path in sarif_files],
         )
 
 
@@ -749,9 +762,11 @@ def merge_sarif_into_ingests(plan: IngestPlan, ingests: list[RepoIngest], sarif_
 
 def scan_sarif(plan: IngestPlan, ingests: list[RepoIngest]) -> SarifIngest:
     sarif_ingest = SarifIngest(runs=[], records_by_repo={}, failures=[])
-    if not plan.sarif_files:
+    sarif_files = discover_plan_sarif_files(plan)
+    emit_sarif_discovery(plan, sarif_files)
+    if not sarif_files:
         return sarif_ingest
-    runtime_state.active_metrics.add_phase_total(len(plan.sarif_files))
+    runtime_state.active_metrics.add_phase_total(len(sarif_files))
     file_by_source_path = {file.source_path: file for ingest in ingests for file in ingest.files}
     sarif_ingest = ingest_sarif(
         SarifIngestContext(
@@ -761,15 +776,15 @@ def scan_sarif(plan: IngestPlan, ingests: list[RepoIngest]) -> SarifIngest:
             file_by_source_path=file_by_source_path,
             max_bytes=plan.args.sarif_max_bytes,
         ),
-        plan.sarif_files,
+        sarif_files,
     )
-    runtime_state.active_metrics.add_phase_done(len(plan.sarif_files))
+    runtime_state.active_metrics.add_phase_done(len(sarif_files))
     merge_sarif_into_ingests(plan, ingests, sarif_ingest)
     sarif_ingest.warnings.extend(sarif_freshness_warnings(plan, ingests, sarif_ingest))
     attach_sarif_warnings_to_runs(sarif_ingest)
     progress_event(
         "code_intel_sarif_parsed",
-        files=len(plan.sarif_files),
+        files=len(sarif_files),
         runs=len(sarif_ingest.runs),
         findings=sum(len(run.findings) for run in sarif_ingest.runs),
         records=sum(len(records) for records in sarif_ingest.records_by_repo.values()),
@@ -1149,7 +1164,6 @@ def run_ingest_plan(plan: IngestPlan) -> int:
         repos=plan.repos,
         database=config.DatabaseSettings.from_env().display_target(),
     )
-    emit_sarif_discovery(plan)
     configure_ingest_progress(plan)
     plan = resolve_plan_embedding_model(plan)
     prepare_writable_database(plan.args, embedding_requested=plan.embedding_requested)
