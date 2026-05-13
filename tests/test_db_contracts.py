@@ -23,6 +23,22 @@ class DatabaseContractTests(unittest.TestCase):
         self.assertIn("connect_timeout=10", text)
         self.assertIn("keepalives=1", text)
 
+    def test_conninfo_can_add_credentials_to_database_url(self) -> None:
+        credential = "secret"
+        text = conninfo(
+            DatabaseSettings(
+                dsn="postgresql://db.example.invalid/codeintel?sslmode=prefer",
+                dsn_user="app",
+                dsn_password=credential,
+            )
+        )
+
+        self.assertIn("host=db.example.invalid", text)
+        self.assertIn("dbname=codeintel", text)
+        self.assertIn("user=app", text)
+        self.assertIn(f"password={credential}", text)
+        self.assertIn("sslmode=prefer", text)
+
     def test_conninfo_reports_missing_connection_parts(self) -> None:
         credential = "p"
         with self.assertRaises(DatabaseConnectionError):

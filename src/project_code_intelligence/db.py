@@ -54,6 +54,10 @@ def conninfo(settings: DatabaseSettings | None = None) -> str:
         "keepalives_count": str(settings.keepalives_count),
     }
     if settings.dsn:
+        if settings.dsn_user:
+            connection_options["user"] = settings.dsn_user
+        if settings.dsn_password:
+            connection_options["password"] = settings.dsn_password
         return make_conninfo(settings.dsn, **connection_options)
 
     missing = settings.missing_connection_names()

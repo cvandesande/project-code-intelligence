@@ -169,6 +169,8 @@ def embedding_api_key(endpoint: str | None = None, *, env: Env | None = None) ->
 class DatabaseSettings:
     dsn: str | None = None
     dsn_source: str = "PROJECT_CODE_INTELLIGENCE_DATABASE_URL"
+    dsn_user: str | None = None
+    dsn_password: str | None = None
     host: str = DEFAULT_PGVECTOR_HOST
     port: str = DEFAULT_PGVECTOR_PORT
     dbname: str | None = DEFAULT_PGVECTOR_DB
@@ -189,6 +191,8 @@ class DatabaseSettings:
         return cls(
             dsn=dsn,
             dsn_source="PROJECT_CODE_INTELLIGENCE_DATABASE_URL" if database_url else "PGVECTOR_DSN",
+            dsn_user=env_text("PROJECT_CODE_INTELLIGENCE_DATABASE_USER", env=env),
+            dsn_password=env_text("PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD", env=env),
             host=env_text("PGVECTOR_HOST", DEFAULT_PGVECTOR_HOST, env=env) or DEFAULT_PGVECTOR_HOST,
             port=env_text("PGVECTOR_PORT", DEFAULT_PGVECTOR_PORT, env=env) or DEFAULT_PGVECTOR_PORT,
             dbname=env_text("PGVECTOR_DB", DEFAULT_PGVECTOR_DB, env=env),
@@ -237,7 +241,13 @@ class DatabaseSettings:
 
     def connection_hint(self) -> str:
         if self.dsn:
-            return f"{self.dsn_source}=<hidden>"
+            extras: list[str] = []
+            if self.dsn_user:
+                extras.append("PROJECT_CODE_INTELLIGENCE_DATABASE_USER=<set>")
+            if self.dsn_password:
+                extras.append("PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD=<set>")
+            suffix = " " + " ".join(extras) if extras else ""
+            return f"{self.dsn_source}=<hidden>{suffix}"
         return (
             f"PGVECTOR_HOST={self.host} "
             f"PGVECTOR_PORT={self.port} "
