@@ -23,31 +23,22 @@ as the public example.
 
 ## Quick Start
 
-Install the CLI tools once, then use them from any repository:
+Install the CLI tools once, then let `pci-doctor` inspect the machine:
 
 ```sh
-uv tool install --editable /path/to/project-code-intelligence
-pci-doctor --skip-db --embedding skip
+uv tool install /path/to/project-code-intelligence
+pci-doctor
 ```
 
-On macOS Apple Silicon this automatically installs Core ML dependencies.
-`pci-doctor` detects the Apple Neural Engine and available acceleration paths.
+`pci-doctor` checks Postgres/pgvector, embeddings, and available local
+acceleration. It prints the startup commands that fit the current machine. For
+a fully local setup, start the suggested `pgvector` command and one embedding
+service. If you already have an external Postgres/pgvector database, set
+`PROJECT_CODE_INTELLIGENCE_DATABASE_URL` and start only the embedding service
+you want to use.
 
-The first `pci-doctor` run prints startup commands that fit the current
-machine. For a fully local setup, start `pgvector` plus one embedding service.
-If you already have an external Postgres/pgvector database, skip `pgvector` and
-start only the embedding service you want to use. Then verify the chosen
-services:
-
-```sh
-pci-doctor --embedding required
-```
-
-Text-only indexing is available as a fallback for bootstrap, debugging, or
-privacy-sensitive environments. In that case, choose the Postgres-only command
-and verify with `pci-doctor --embedding skip`.
-
-Then index a Git repository. Use `.` when you mean the current directory:
+Run `pci-doctor` again after starting services. When it reports `Status: ok
+ready`, index a Git repository:
 
 ```sh
 cd /path/to/repo-to-index
@@ -56,12 +47,29 @@ pci-index .
 pci-mcp-smoke
 ```
 
-You can also index one or more repositories without changing directories:
+After indexing, configure your assistant to run `pci-mcp`. See MCP Setup below.
+
+## Indexing
+
+Use `.` when you mean the current directory. You can also index one or more
+repositories without changing directories:
 
 ```sh
 pci-index /path/to/repo-to-index
 pci-index /path/to/repo-a /path/to/repo-b
 ```
+
+For a workspace with related repositories, use one collection for the workspace
+and stable repo names under that collection:
+
+```sh
+cd /path/to/workspace
+PROJECT_CODE_INTELLIGENCE_COLLECTION=workspace-name pci-index openwrt ask-cmm fci
+```
+
+MCP repo filters then use those repo names, such as `openwrt`, not absolute
+filesystem paths. Run `code_intel_status` without a repo filter to see the
+available collection and repo keys.
 
 For advanced ingest options, put them after `--`:
 
@@ -74,12 +82,21 @@ same snapshot when the Git tree is unchanged, keeps compatible existing
 embeddings, and fills in records that are still missing embeddings. In normal
 incremental mode it only reparses changed files.
 
-For that fallback text-only mode, run `pci-index . --no-embed`.
+Text-only indexing is available as a fallback for bootstrap, debugging, or
+privacy-sensitive environments:
+
+```sh
+pci-index . --no-embed
+```
+
+For that mode, choose the Postgres-only command from `pci-doctor` and verify
+that the database is reachable. `pci-doctor` may still warn about the missing
+embedding endpoint, which is expected for a deliberate text-only run.
 
 To wipe and rebuild the code-intelligence tables in the configured database:
 
 ```sh
-pci-index --reset-code-intel
+pci-index --reset
 ```
 
 This drops and recreates this project's `project_code_intel_*` tables. It does
@@ -91,19 +108,31 @@ non-interactive automation, add `--i-know-this-deletes-code-intel-db`.
 In a brand-new local repository, make an initial commit before scanning so the
 indexer has a Git `HEAD` snapshot.
 
+## Supported Hardware
+
+`pci-doctor` is the source of truth for the current machine. It detects usable
+local runtimes and prints the exact startup command for each available path.
+
+| Path | Runtime | Notes |
+| --- | --- | --- |
+| CPU | FastEmbed | Portable default for local testing and machines without accelerator support. |
+| Apple Silicon | Core ML or llama.cpp Metal | Core ML can use ANE, GPU, and CPU; Docker is still useful for Postgres. |
+| AMD Ryzen AI NPU | Lemonade FLM | Experimental; requires supported XDNA hardware, driver, and firmware. |
+| AMD GPU | llama.cpp ROCm | Experimental; uses the `amdgpu` Compose profile. |
+| NVIDIA GPU | llama.cpp CUDA | Experimental; requires the NVIDIA driver and NVIDIA Container Toolkit. |
+| Remote provider | OpenAI-compatible embeddings endpoint | Useful when local embeddings are not desired; source-derived text leaves the machine. |
+
 ## Installation
 
-Install the CLI tools system-wide with `uv`:
+Install the CLI tools for your user with `uv`:
 
 ```sh
-uv tool install --editable /path/to/project-code-intelligence
+uv tool install /path/to/project-code-intelligence
 ```
 
 This places `pci-doctor`, `pci-index`, `pci-mcp`, and the other console scripts
-on your PATH (usually `~/.local/bin`). On macOS Apple Silicon, Core ML
-dependencies (coremltools, transformers, numpy, huggingface_hub) are installed
-automatically via platform-conditional dependencies. No extra install step is
-needed.
+on your PATH (usually `~/.local/bin`). Platform-specific optional dependencies
+are selected by the package metadata where supported.
 
 Make sure the tool path is on `PATH`:
 
@@ -142,11 +171,6 @@ The shell wrapper scripts in the repository root (`./pci-doctor`, `./pci-index`,
 etc.) auto-detect `.venv/bin/python`, so `make` commands and direct
 `./pci-doctor` invocations work without activating the virtualenv.
 
-Do not mix `uv tool install` and `uv sync` for the same package. If you
-previously ran `uv tool install`, remove it first with
-`uv tool uninstall project-code-intelligence` before switching to `uv sync` for
-development.
-
 The installed console scripts are:
 
 - `pci-index`
@@ -160,60 +184,27 @@ The installed console scripts are:
 
 ## MCP Setup
 
-Point Codex, Claude Desktop, or another MCP client at `pci-mcp`:
+Point Codex, Claude Code, OpenCode, or another MCP client at the installed
+`pci-mcp` command. Use `command -v pci-mcp` to find the absolute path if your
+client does not inherit your shell `PATH`.
 
-```json
-{
-  "mcpServers": {
-    "project-code-intelligence": {
-      "command": "/path/to/project-code-intelligence/pci-mcp"
-    }
-  }
-}
-```
-
-The default database settings match the local Docker Compose database. For a
-different Postgres/pgvector instance, prefer one database URL:
-
-```sh
-export PROJECT_CODE_INTELLIGENCE_DATABASE_URL='postgresql://user:password@host:5432/database?sslmode=prefer'
-```
-
-Percent-encode special characters in the username or password.
-
-The older split `PGVECTOR_*` variables remain supported, mostly for Docker
-Compose and compatibility.
-
-The MCP server is read-only by default and applies per-request database safety
-limits. Expensive queries are bounded by `PROJECT_CODE_INTELLIGENCE_MCP_STATEMENT_TIMEOUT_MS`,
-lock waits by `PROJECT_CODE_INTELLIGENCE_MCP_LOCK_TIMEOUT_MS`, and oversized
-requests by `PROJECT_CODE_INTELLIGENCE_MCP_MAX_REQUEST_BYTES`. `get_code_intel_record`
-returns concise metadata by default; pass `include_content: true` when an agent
-needs the indexed text, capped by `PROJECT_CODE_INTELLIGENCE_MCP_MAX_RECORD_CONTENT_CHARS`.
-
-For agent-heavy workflows, copy
-[`docs/examples/AGENTS.md`](docs/examples/AGENTS.md) into the repository being
-indexed so coding assistants know when to use the MCP index.
+For setup examples, database configuration, and collection/repo filter guidance,
+see [docs/MCP_SETUP.md](docs/MCP_SETUP.md).
 
 ## Embeddings
 
 Embeddings are the expected path for normal use. They are what make the MCP
 index useful for semantic search instead of only exact text lookup.
 
-Common paths are CPU FastEmbed, Apple Core ML (Neural Engine + GPU + CPU), AMD
-Ryzen AI NPU, AMD GPU, NVIDIA GPU, and remote OpenAI-compatible providers.
-`pci-doctor` prints the exact service commands that are available on the current
-machine.
-
 Local CPU, NPU, and GPU embedding services all publish the same host endpoint by
 default: `http://127.0.0.1:18081/v1/embeddings`. Run only one local embedding
-service at a time. Runtime-specific models have profile defaults; set model
-environment variables only when overriding those defaults.
+service at a time. Runtime-specific models have profile defaults.
 
-Run `pci-doctor` to see which paths are available on the current machine:
+Run `pci-doctor` to see which embedding paths and models are available on the
+current machine:
 
 ```sh
-pci-doctor --embedding required
+pci-doctor
 ```
 
 `pci-index` itself does not download models. The Docker Compose embedding
@@ -258,8 +249,8 @@ docker compose --profile amdgpu up -d --build llama-rocm
 docker compose --profile nvidia up -d --build llama-cuda
 ```
 
-Most users should start with `cpu`, then let `pci-doctor` suggest hardware
-specific commands if local acceleration is available.
+When unsure, use the commands from `pci-doctor`. The `cpu` profile is the
+portable local fallback.
 
 ## Docker Lifecycle
 
@@ -291,18 +282,8 @@ runtime caches. It does not delete the bind-mounted `./models` directory used by
 the GPU profiles.
 
 On Apple Silicon, Docker Compose is still useful for Postgres/pgvector. Local
-Apple embeddings run on the macOS host, not inside Docker.
-
-With coremltools installed (automatic on macOS arm64), `pci-doctor` detects the
-Apple Neural Engine and recommends `pci-coreml-server`, which uses Core ML to
-distribute inference across the ANE, GPU, and CPU. Without coremltools, it falls
-back to host-native llama.cpp with Metal GPU acceleration.
-
-To inspect per-operation device assignments:
-
-```sh
-pci-coreml-server --diagnose
-```
+Apple embeddings run on the macOS host, not inside Docker. See Supported
+Hardware for the available acceleration paths.
 
 ## What the MCP Server Provides
 
@@ -352,6 +333,7 @@ Useful docs:
 
 - [CONTRIBUTING.md](CONTRIBUTING.md): contributor workflow and guardrails
 - [docs/PUBLIC_API.md](docs/PUBLIC_API.md): supported CLI, MCP, config, and Python import surfaces
+- [docs/MCP_SETUP.md](docs/MCP_SETUP.md): MCP setup examples for Codex, Claude Code, and OpenCode
 - [docs/BENCHMARKS.md](docs/BENCHMARKS.md): local CPU/NPU/GPU benchmark notes
 - [.env.example](.env.example): available environment variables
 - [AGENTS.md](AGENTS.md): instructions for assistants working on this repo
