@@ -152,6 +152,22 @@ class DatabaseSettingsTests(unittest.TestCase):
         self.assertEqual(settings.connection_hint(), "PROJECT_CODE_INTELLIGENCE_DATABASE_URL=<hidden>")
         self.assertEqual(settings.display_target(), "postgresql://example.invalid/db")
 
+    def test_accept_database_url_with_separate_credentials(self) -> None:
+        settings = DatabaseSettings.from_env({
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://example.invalid/db",
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_USER": "app",
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD": "secret",
+        })
+
+        self.assertEqual(settings.dsn_user, "app")
+        self.assertEqual(settings.dsn_password, "secret")
+        self.assertEqual(
+            settings.connection_hint(),
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_URL=<hidden> "
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_USER=<set> "
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD=<set>",
+        )
+
     def test_accept_legacy_pgvector_dsn_without_individual_parts(self) -> None:
         settings = DatabaseSettings.from_env({"PGVECTOR_DSN": "postgresql://example.invalid/db"})
 

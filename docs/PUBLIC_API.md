@@ -39,14 +39,17 @@ Stable configuration groups:
 
 | Group | Public variables |
 | --- | --- |
-| Database | `PROJECT_CODE_INTELLIGENCE_DATABASE_URL`, `PGVECTOR_*`, `PROJECT_CODE_INTELLIGENCE_DB_*` |
+| Database | `PROJECT_CODE_INTELLIGENCE_DATABASE_URL`, `PROJECT_CODE_INTELLIGENCE_DATABASE_USER`, `PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD`, `PGVECTOR_*`, `PROJECT_CODE_INTELLIGENCE_DB_*` |
 | Ingest | `PROJECT_CODE_INTELLIGENCE_COLLECTION`, `PROJECT_CODE_INTELLIGENCE_PROFILE`, `PROJECT_CODE_INTELLIGENCE_REPOS`, `PROJECT_CODE_INTELLIGENCE_MODE` |
 | Embeddings | `PROJECT_CODE_INTELLIGENCE_EMBEDDING_*`, `PROJECT_CODE_INTELLIGENCE_ALLOW_REMOTE_EMBEDDING`, `PROJECT_CODE_INTELLIGENCE_PREEMBED` |
 | MCP safety | `PROJECT_CODE_INTELLIGENCE_MCP_*` |
 | Docker Compose | variables documented in `.env.example` |
 
-`PROJECT_CODE_INTELLIGENCE_DATABASE_URL` is preferred for host tools. The split
-`PGVECTOR_*` variables remain supported for Docker Compose and compatibility.
+`PROJECT_CODE_INTELLIGENCE_DATABASE_URL` is preferred for host tools.
+Credentials may be embedded in the URL or supplied with
+`PROJECT_CODE_INTELLIGENCE_DATABASE_USER` and
+`PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD`. The split `PGVECTOR_*` variables
+remain supported for Docker Compose and compatibility.
 
 ## MCP Tools
 
