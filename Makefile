@@ -98,7 +98,7 @@ compose-check:
 	fi
 
 compose-up:
-	docker compose up -d pgvector
+	docker compose up -d --wait --wait-timeout 60 pgvector
 
 compose-cpu:
 	docker compose --profile cpu up -d --build
