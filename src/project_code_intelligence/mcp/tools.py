@@ -100,10 +100,11 @@ def tool_code_intel_status(args: Json) -> Json:
                     filters.snapshots.clauses,
                     """
             ORDER BY s.created_at DESC, s.collection, s.repo
+            LIMIT %s
             """,
                 )
             ),
-            filters.snapshots.params,
+            [*filters.snapshots.params, mcp_db.mcp_max_status_rows()],
         ).fetchall()
         counts = conn.execute(
             db.query_sql(

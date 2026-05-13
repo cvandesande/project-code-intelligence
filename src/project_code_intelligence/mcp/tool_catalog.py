@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
+
+from pydantic import ValidationError
 
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError
+from project_code_intelligence.mcp.tool_inputs import TOOL_INPUT_MODELS
 
 if TYPE_CHECKING:
     from project_code_intelligence.mcp.protocol import Json
@@ -154,76 +157,48 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
 }
 
 
-def schema_properties(definition: ToolDefinition) -> dict[str, object]:
-    properties_value = definition.input_schema.get("properties", {})
-    if not isinstance(properties_value, dict):
-        return {}
-    properties = cast("dict[object, object]", properties_value)
-    return {str(name): schema for name, schema in properties.items()}
+_PRETTY_TYPES: dict[str, str] = {
+    "int_type": "an integer",
+    "string_type": "a string",
+    "bool_type": "a boolean",
+    "dict_type": "an object",
+    "list_type": "an array",
+}
 
 
-def schema_required(definition: ToolDefinition) -> set[str]:
-    required_value = definition.input_schema.get("required", [])
-    if not isinstance(required_value, list):
-        return set()
-    required = cast("list[object]", required_value)
-    return {name for name in required if isinstance(name, str)}
+def _format_loc(loc: tuple[int | str, ...]) -> str:
+    return ".".join(str(p) for p in loc) if loc else "<root>"
 
 
-def property_schema_type(schema: object) -> str | None:
-    if not isinstance(schema, dict):
-        return None
-    schema_object = cast("dict[object, object]", schema)
-    value = schema_object.get("type")
-    return value if isinstance(value, str) else None
+def _translate_validation_error(exc: ValidationError) -> Exception:
+    # pydantic_core.ErrorDetails is a TypedDict with type, loc, msg, input fields.
+    first = exc.errors()[0]
+    err_type = first["type"]
+    loc = _format_loc(first["loc"])
+    msg = first["msg"]
+    if err_type == "extra_forbidden":
+        return McpProtocolError(f"unknown argument: {loc}")
+    if err_type == "missing":
+        return McpProtocolError(f"missing required argument: {loc}")
+    if err_type in _PRETTY_TYPES:
+        return McpProtocolTypeError(f"{loc} must be {_PRETTY_TYPES[err_type]}")
+    return McpProtocolError(f"{loc}: {msg}")
 
 
-def schema_int_bound(schema: object, name: str) -> int | None:
-    if not isinstance(schema, dict):
-        return None
-    schema_object = cast("dict[object, object]", schema)
-    value = schema_object.get(name)
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
-def validate_integer_bounds(name: str, value: int, schema: object) -> None:
-    minimum = schema_int_bound(schema, "minimum")
-    maximum = schema_int_bound(schema, "maximum")
-    if minimum is not None and value < minimum:
-        raise McpProtocolError(f"{name} must be greater than or equal to {minimum}")
-    if maximum is not None and value > maximum:
-        raise McpProtocolError(f"{name} must be less than or equal to {maximum}")
-
-
-def validate_schema_type(name: str, value: object, schema: object) -> None:
-    expected = property_schema_type(schema)
-    if expected is None:
-        return
-    if expected == "string":
-        if not isinstance(value, str):
-            raise McpProtocolTypeError(f"{name} must be a string")
-        return
-    if expected == "integer":
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise McpProtocolTypeError(f"{name} must be an integer")
-        validate_integer_bounds(name, value, schema)
-        return
-    if expected == "boolean":
-        if not isinstance(value, bool):
-            raise McpProtocolTypeError(f"{name} must be a boolean")
-        return
-    if expected == "object" and not isinstance(value, dict):
-        raise McpProtocolTypeError(f"{name} must be an object")
+# ToolDefinition holds a dict (input_schema), so it isn't hashable. Use id() as
+# the reverse-lookup key — definitions are module-level singletons that live for
+# the process lifetime.
+_DEFINITION_NAMES: dict[int, str] = {id(definition): name for name, definition in TOOL_DEFINITIONS.items()}
 
 
 def validate_tool_arguments(definition: ToolDefinition, arguments: Json) -> None:
-    properties = schema_properties(definition)
-    if definition.input_schema.get("additionalProperties") is False:
-        unknown = sorted(name for name in arguments if name not in properties)
-        if unknown:
-            raise McpProtocolError("unknown argument(s): " + ", ".join(unknown))
-    missing = sorted(name for name in schema_required(definition) if name not in arguments)
-    if missing:
-        raise McpProtocolError("missing required argument(s): " + ", ".join(missing))
-    for name, value in arguments.items():
-        validate_schema_type(name, value, properties.get(name))
+    name = _DEFINITION_NAMES.get(id(definition))
+    if name is None:
+        raise McpProtocolError("unknown tool definition")
+    model = TOOL_INPUT_MODELS.get(name)
+    if model is None:
+        raise McpProtocolError(f"no validator registered for tool {name!r}")
+    try:
+        _ = model.model_validate(arguments)
+    except ValidationError as exc:
+        raise _translate_validation_error(exc) from exc

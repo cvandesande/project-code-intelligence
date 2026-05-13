@@ -184,20 +184,37 @@ class DatabaseSettings:
     allow_writes: bool = False
 
     @classmethod
-    def from_env(cls, env: Env | None = None) -> DatabaseSettings:
-        database_url = env_text("PROJECT_CODE_INTELLIGENCE_DATABASE_URL", env=env)
+    def from_env(cls, env: Env | None = None, *, role: str = "writer") -> DatabaseSettings:
+        # MCP role: prefer MCP-specific env vars (separate read-only credentials);
+        # fall back to the writer's settings so existing single-role deployments keep working.
+        mcp = role == "mcp"
+        database_url = (env_text("PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL", env=env) if mcp else None) or env_text(
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_URL", env=env
+        )
         legacy_dsn = env_text("PGVECTOR_DSN", env=env)
         dsn = database_url or legacy_dsn
+        dsn_user = (env_text("PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER", env=env) if mcp else None) or env_text(
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_USER", env=env
+        )
+        dsn_password = (
+            env_text("PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD", env=env) if mcp else None
+        ) or env_text("PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD", env=env)
+        user = (env_text("PROJECT_CODE_INTELLIGENCE_MCP_PGVECTOR_USER", env=env) if mcp else None) or env_text(
+            "PGVECTOR_USER", DEFAULT_PGVECTOR_USER, env=env
+        )
+        password = (env_text("PROJECT_CODE_INTELLIGENCE_MCP_PGVECTOR_PASS", env=env) if mcp else None) or env_text(
+            "PGVECTOR_PASS", DEFAULT_PGVECTOR_PASS, env=env
+        )
         return cls(
             dsn=dsn,
             dsn_source="PROJECT_CODE_INTELLIGENCE_DATABASE_URL" if database_url else "PGVECTOR_DSN",
-            dsn_user=env_text("PROJECT_CODE_INTELLIGENCE_DATABASE_USER", env=env),
-            dsn_password=env_text("PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD", env=env),
+            dsn_user=dsn_user,
+            dsn_password=dsn_password,
             host=env_text("PGVECTOR_HOST", DEFAULT_PGVECTOR_HOST, env=env) or DEFAULT_PGVECTOR_HOST,
             port=env_text("PGVECTOR_PORT", DEFAULT_PGVECTOR_PORT, env=env) or DEFAULT_PGVECTOR_PORT,
             dbname=env_text("PGVECTOR_DB", DEFAULT_PGVECTOR_DB, env=env),
-            user=env_text("PGVECTOR_USER", DEFAULT_PGVECTOR_USER, env=env),
-            password=env_text("PGVECTOR_PASS", DEFAULT_PGVECTOR_PASS, env=env),
+            user=user,
+            password=password,
             sslmode=env_text("PGVECTOR_SSLMODE", "prefer", env=env) or "prefer",
             connect_timeout_seconds=env_int(
                 "PROJECT_CODE_INTELLIGENCE_DB_CONNECT_TIMEOUT_SECONDS",

@@ -414,21 +414,27 @@ def nvidia_container_toolkit_remediation(reason: str) -> str:
 
 
 def docker_has_nvidia_runtime() -> tuple[bool, str | None]:
-    docker = shutil.which("docker")
-    if not docker:
-        return False, "Docker was not found."
+    engine_path = process.container_engine_path()
+    if not engine_path:
+        return False, "No container engine (docker or podman) was found."
+    engine_label = process.container_engine_name().capitalize()
+    # podman wires NVIDIA via the Container Device Interface (CDI), not a
+    # docker-style named runtime. Skip the runtime probe and assume the host
+    # is configured correctly; users still see NVIDIA detection elsewhere.
+    if process.container_engine_name() == "podman":
+        return True, None
     ready = False
     detail: str | None = None
     try:
         proc = process.run(
-            [docker, "info", "--format", "{{json .Runtimes}}"],
+            [engine_path, "info", "--format", "{{json .Runtimes}}"],
             process.RunOptions(capture_output=True, timeout=5, check=False),
         )
     except (OSError, process.SubprocessError) as exc:
-        return False, f"Docker runtime check failed: {exc}"
+        return False, f"{engine_label} runtime check failed: {exc}"
     if proc.returncode != 0:
         output = (proc.stderr or proc.stdout).strip()
-        detail = f"Docker runtime check failed: {output}" if output else "Docker runtime check failed."
+        detail = f"{engine_label} runtime check failed: {output}" if output else f"{engine_label} runtime check failed."
     else:
         try:
             runtimes = cast("object", json.loads(proc.stdout))
@@ -437,7 +443,7 @@ def docker_has_nvidia_runtime() -> tuple[bool, str | None]:
         else:
             ready = isinstance(runtimes, dict) and "nvidia" in runtimes
         if not ready:
-            detail = "Docker did not report an nvidia runtime."
+            detail = f"{engine_label} did not report an nvidia runtime."
     return ready, detail
 
 
@@ -481,17 +487,18 @@ def check_gpu_support(gpus: Sequence[GpuInfo]) -> list[CheckResult]:
         nvidia_device_present = Path("/dev/nvidiactl").exists() or any(Path("/dev").glob("nvidia[0-9]*"))
         docker_runtime_ready, docker_runtime_detail = docker_has_nvidia_runtime()
         nvidia_ready = bool(nvidia_smi and nvidia_device_present and nvidia_ctk and docker_runtime_ready)
+        engine_label = process.container_engine_name().capitalize()
         if nvidia_ready:
-            message = "NVIDIA driver, devices, and Docker runtime are ready."
+            message = f"NVIDIA driver, devices, and {engine_label} runtime are ready."
             detail = None
         elif not (nvidia_smi and nvidia_device_present):
             message = "NVIDIA GPU detected, but nvidia-smi or /dev/nvidia* was not found."
             detail = "Install the NVIDIA driver before using the nvidia Compose profile."
         elif not nvidia_ctk:
             message = "NVIDIA GPU detected, but nvidia-ctk / NVIDIA Container Toolkit was not found."
-            detail = nvidia_container_toolkit_remediation("Docker cannot pass NVIDIA GPUs to containers yet.")
+            detail = nvidia_container_toolkit_remediation(f"{engine_label} cannot pass NVIDIA GPUs to containers yet.")
         else:
-            message = "NVIDIA GPU detected, but Docker is not configured with the NVIDIA runtime."
+            message = f"NVIDIA GPU detected, but {engine_label} is not configured with the NVIDIA runtime."
             reason = f"{docker_runtime_detail} " if docker_runtime_detail else ""
             detail = nvidia_container_toolkit_remediation(reason)
         results.append(
