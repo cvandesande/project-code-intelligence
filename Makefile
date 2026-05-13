@@ -4,6 +4,7 @@ RUFF ?= $(if $(wildcard .venv/bin/ruff),.venv/bin/ruff,ruff)
 COVERAGE ?= $(if $(wildcard .venv/bin/coverage),.venv/bin/coverage,coverage)
 BANDIT ?= $(if $(wildcard .venv/bin/bandit),.venv/bin/bandit,bandit)
 PIP_AUDIT ?= $(if $(wildcard .venv/bin/pip-audit),.venv/bin/pip-audit,pip-audit)
+UV_CACHE_DIR ?= .uv-cache
 # Container engine: docker preferred, podman as drop-in replacement.
 # Override with `make ... DOCKER=podman` or by setting DOCKER in the environment.
 DOCKER ?= $(shell command -v docker 2>/dev/null || command -v podman 2>/dev/null)
@@ -75,11 +76,14 @@ security-audit:
 	$(BANDIT) -c pyproject.toml -r src tests scripts --severity-level all --confidence-level all --ignore-nosec
 
 deps-audit:
-	@if ! command -v uv >/dev/null 2>&1; then \
+	@set -eu; \
+	if ! command -v uv >/dev/null 2>&1; then \
 		echo "warning: uv not found; skipping dependency audit" >&2; \
 	elif [ -x "$(PIP_AUDIT)" ] || command -v $(PIP_AUDIT) >/dev/null 2>&1; then \
-		uv export --frozen --no-emit-project --no-emit-workspace --format requirements-txt --quiet \
-			| $(PIP_AUDIT) -r /dev/stdin --require-hashes --disable-pip --strict; \
+		tmpfile=$$(mktemp); \
+		trap 'rm -f "$$tmpfile"' EXIT INT TERM; \
+		UV_CACHE_DIR="$(UV_CACHE_DIR)" uv export --frozen --no-emit-project --no-emit-workspace --format requirements-txt --quiet > "$$tmpfile"; \
+		$(PIP_AUDIT) -r "$$tmpfile" --require-hashes --disable-pip --strict; \
 	else \
 		echo "warning: pip-audit not found; skipping dependency audit" >&2; \
 	fi

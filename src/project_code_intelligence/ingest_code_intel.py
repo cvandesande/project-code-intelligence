@@ -58,6 +58,7 @@ from project_code_intelligence.storage import (
     RecordInsertContext,
     copy_unchanged_parser_failures,
     copy_unchanged_records_and_edges,
+    delete_all_code_intel_data,
     delete_repo_data,
     ensure_schema,
     file_signature,
@@ -100,6 +101,7 @@ class CliArgs:
     progress_every: int
     dry_run: bool
     reset_code_intel: bool
+    reset_all_code_intel: bool
     i_know_this_deletes_code_intel_db: bool
     reset_only: bool
     sarif: list[str]
@@ -189,6 +191,7 @@ class CliNamespace(argparse.Namespace):
     progress_every: int
     dry_run: bool
     reset_code_intel: bool
+    reset_all_code_intel: bool
     i_know_this_deletes_code_intel_db: bool
     reset_only: bool
     sarif: list[str]
@@ -314,7 +317,12 @@ def build_parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "--reset-code-intel",
         action="store_true",
-        help="Drop and recreate code-intelligence tables before ingesting. Prompts unless confirmation flag is set.",
+        help="Delete code-intelligence data for selected repos. Prompts unless confirmation flag is set.",
+    )
+    _ = parser.add_argument(
+        "--reset-all-code-intel",
+        action="store_true",
+        help="Delete all code-intelligence data in the configured database. Prompts unless confirmation flag is set.",
     )
     _ = parser.add_argument(
         "--i-know-this-deletes-code-intel-db",
@@ -402,6 +410,7 @@ def parse_cli_args(argv: list[str] | None = None) -> CliArgs:
         progress_every=parsed.progress_every,
         dry_run=parsed.dry_run,
         reset_code_intel=parsed.reset_code_intel,
+        reset_all_code_intel=parsed.reset_all_code_intel,
         i_know_this_deletes_code_intel_db=parsed.i_know_this_deletes_code_intel_db,
         reset_only=parsed.reset_only,
         sarif=parsed.sarif,
@@ -448,6 +457,8 @@ def validate_args(args: CliArgs, *, embedding_requested: bool) -> None:
         raise ValueError("--reset-only requires --reset-code-intel")
     if args.reset_code_intel and args.embed_only:
         raise ValueError("--reset-code-intel cannot be combined with --embed-only")
+    if args.reset_all_code_intel and not args.reset_code_intel:
+        raise ValueError("--reset-all-code-intel requires --reset-code-intel")
 
 
 def build_ingest_plan(args: CliArgs) -> IngestPlan:
@@ -515,12 +526,19 @@ def confirm_reset_code_intel(
 ) -> None:
     if not args.reset_code_intel:
         return
-    repo_list = ", ".join(repos)
-    write_stderr(f"About to delete project-code-intelligence data for repo(s): {repo_list}")
-    write_stderr(f"Collection: {collection}")
+    if args.reset_all_code_intel:
+        write_stderr("About to delete all project-code-intelligence data in the configured database.")
+        write_stderr("Collections/repos: all")
+        write_stderr("This permanently deletes all snapshots, records, edges, embeddings, and findings.")
+    else:
+        repo_list = ", ".join(repos)
+        write_stderr(f"About to delete project-code-intelligence data for repo(s): {repo_list}")
+        write_stderr(f"Collection: {collection}")
+        write_stderr("This permanently deletes snapshots, records, edges, embeddings, and findings for those repos.")
     write_stderr(f"Database target: {settings.display_target()}")
-    write_stderr("This permanently deletes snapshots, records, edges, embeddings, and findings for those repos.")
-    write_stderr("The schema and other repos are untouched.")
+    write_stderr("The schema is untouched.")
+    if not args.reset_all_code_intel:
+        write_stderr("Other repos are untouched.")
     if args.i_know_this_deletes_code_intel_db:
         write_stderr("Reset confirmed by --i-know-this-deletes-code-intel-db.")
         return
@@ -580,11 +598,14 @@ def run_reset_only(args: CliArgs) -> int:
     collection, repos = resolve_reset_targets(args)
     confirm_reset_code_intel(args, settings, collection, repos)
     prepare_writable_database(args, embedding_requested=False)
-    deleted: dict[str, int] = dict.fromkeys(repos, 0)
+    deleted: dict[str, int] = {"all": 0} if args.reset_all_code_intel else dict.fromkeys(repos, 0)
     if not args.dry_run:
         with db.connect(readonly=False, settings=settings) as conn:
             progress_event("code_intel_reset_started", collection=collection, repos=repos)
-            deleted = delete_repo_data(conn, collection, repos)
+            if args.reset_all_code_intel:
+                deleted = {"all": delete_all_code_intel_data(conn)}
+            else:
+                deleted = delete_repo_data(conn, collection, repos)
             conn.commit()
             progress_event("code_intel_reset_completed", collection=collection, deleted=deleted)
     print_reset_only_report(args, settings, collection, repos, deleted)

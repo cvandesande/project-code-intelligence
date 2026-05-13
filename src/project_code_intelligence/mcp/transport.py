@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import traceback
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence import db, progress
+from project_code_intelligence.common import default_collection
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError, McpWritePermissionError
 from project_code_intelligence.mcp.protocol import (
     Json,
@@ -25,6 +28,10 @@ if TYPE_CHECKING:
     from project_code_intelligence.models import JsonObject, JsonValue
 
 PROTOCOL_VERSION = "2024-11-05"
+
+
+def set_mcp_environment_defaults() -> None:
+    _ = os.environ.setdefault("PROJECT_CODE_INTELLIGENCE_COLLECTION", default_collection(Path.cwd().resolve()))
 
 
 def result_response(request_id: JsonValue, result: Json) -> Json:
@@ -154,6 +161,7 @@ def error_message(exc: BaseException) -> str:
 
 
 def main() -> int:
+    set_mcp_environment_defaults()
     # MCP is a stdio JSON-RPC service: any progress_event firing inside a tool
     # handler (e.g. embedding endpoint retries during semantic search) should
     # be emitted as JSON on stderr, never as a Rich Live display, regardless

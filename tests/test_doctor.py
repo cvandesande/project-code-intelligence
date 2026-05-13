@@ -266,7 +266,7 @@ class DoctorTests(unittest.TestCase):
             )
 
         self.assertIn("\033[1m", output)
-        self.assertIn("\033[32m", output)
+        self.assertIn("\033[2m", output)
         self.assertIn("System", output)
         self.assertIn("Start CPU embeddings", output)
         self.assertIn("docker compose --profile cpu up -d --build fastembed", output)

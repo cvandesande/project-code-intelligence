@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import cast
 
 from project_code_intelligence import config, console_ui, ingest_code_intel, mcp_smoke_render, process, progress
+from project_code_intelligence.common import default_collection
 from project_code_intelligence.embeddings import resolve_embedding_endpoint_model
 
 DEFAULT_EMBED_RECORD_TYPES = (
@@ -27,10 +28,23 @@ def index_parser() -> argparse.ArgumentParser:
     )
     _ = parser.add_argument("--dry-run", action="store_true", help="Show what would be ingested without writing.")
     _ = parser.add_argument(
+        "--collection",
+        help=(
+            "Collection/workspace name. Defaults to the repo name for one path, "
+            "or the common parent directory name for multiple paths."
+        ),
+    )
+    _ = parser.add_argument(
         "--reset-code-intel",
         "--reset",
         action="store_true",
-        help="Drop and recreate code-intelligence tables, then exit. Prompts unless confirmation flag is set.",
+        help="Delete code-intelligence data for the given repository path(s), then exit.",
+    )
+    _ = parser.add_argument(
+        "--reset-all-code-intel",
+        "--reset-all",
+        action="store_true",
+        help="Delete all code-intelligence data in the configured database, then exit.",
     )
     _ = parser.add_argument(
         "--i-know-this-deletes-code-intel-db",
@@ -62,7 +76,9 @@ def index_parser() -> argparse.ArgumentParser:
 class IndexNamespace(argparse.Namespace):
     json: bool
     dry_run: bool
+    collection: str | None
     reset_code_intel: bool
+    reset_all_code_intel: bool
     i_know_this_deletes_code_intel_db: bool
     embed: bool | None
     repo_paths: list[str]
@@ -94,17 +110,30 @@ def repo_paths_to_ingest_args(repo_paths: list[str]) -> list[str]:
     return ["--root", str(root), "--repos", repos]
 
 
+def inferred_collection_for_repo_paths(repo_paths: list[str]) -> str:
+    absolute_paths = [Path(path).expanduser().resolve(strict=False) for path in repo_paths]
+    if len(absolute_paths) == 1:
+        return default_collection(absolute_paths[0])
+    root = Path(os.path.commonpath([str(path) for path in absolute_paths]))
+    return default_collection(root)
+
+
 def parse_index_args(argv: list[str] | None = None) -> tuple[IndexNamespace, list[str]]:
     public_argv, passthrough = split_index_argv(argv)
     parser = index_parser()
     parsed = parser.parse_args(public_argv, namespace=IndexNamespace())
-    if not parsed.repo_paths:
+    if parsed.reset_code_intel and parsed.reset_all_code_intel:
+        parser.error("--reset and --reset-all cannot be combined")
+    if parsed.reset_all_code_intel and parsed.repo_paths:
+        parser.error("--reset-all does not accept repository paths")
+    if parsed.reset_all_code_intel and parsed.collection:
+        parser.error("--reset-all does not accept --collection")
+    if not parsed.reset_all_code_intel and not parsed.repo_paths:
         parser.error("one or more repository paths are required; use . for the current directory")
     return parsed, normalized_passthrough(passthrough)
 
 
 def set_index_environment_defaults() -> None:
-    _ = os.environ.setdefault("PROJECT_CODE_INTELLIGENCE_COLLECTION", "default")
     _ = os.environ.setdefault("PROJECT_CODE_INTELLIGENCE_PROFILE", "generic")
     _ = os.environ.setdefault("PROJECT_CODE_INTELLIGENCE_MODE", "incremental")
     _ = os.environ.setdefault("PROJECT_CODE_INTELLIGENCE_EMBED", "1")
@@ -126,8 +155,14 @@ def forwarded_index_args(parsed: IndexNamespace, passthrough: list[str]) -> list
     forwarded = passthrough
     if parsed.repo_paths:
         forwarded = [*repo_paths_to_ingest_args(parsed.repo_paths), *forwarded]
+        if parsed.collection:
+            forwarded = ["--collection", parsed.collection, *forwarded]
+        elif not config.env_text("PROJECT_CODE_INTELLIGENCE_COLLECTION"):
+            forwarded = ["--collection", inferred_collection_for_repo_paths(parsed.repo_paths), *forwarded]
     if parsed.reset_code_intel:
         forwarded = ["--reset-code-intel", "--reset-only", *forwarded]
+    if parsed.reset_all_code_intel:
+        forwarded = ["--reset-all-code-intel", "--reset-code-intel", "--reset-only", *forwarded]
     if parsed.i_know_this_deletes_code_intel_db:
         forwarded = ["--i-know-this-deletes-code-intel-db", *forwarded]
     if parsed.dry_run:
