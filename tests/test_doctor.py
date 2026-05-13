@@ -226,6 +226,30 @@ class DoctorTests(unittest.TestCase):
         self.assertNotIn("nvidia: docker compose --profile nvidia", output)
         self.assertNotIn("card=card0", output)
 
+    def test_format_summary_keeps_gpu_memory_summary_compact(self) -> None:
+        output = format_summary(
+            [
+                CheckResult("platform", "ok", "Python 3.13.5 on Linux 7.0.4+deb13-amd64 (x86_64)"),
+                CheckResult("gpu-0", "ok", "AMD GPU 0x1002:0x1586: VRAM=512.0 MiB; shared/unified=62.5 GiB"),
+                CheckResult("npu", "ok", "AMD NPU device detected: /dev/accel/accel0"),
+                CheckResult(
+                    "database",
+                    "ok",
+                    "connected to code-intel as app at postgresql://app@db.example.invalid:30432/code-intel",
+                ),
+                CheckResult(
+                    "embedding-endpoint",
+                    "ok",
+                    "response model=Qwen3-Embedding-0.6B-Q8_0; dimensions=1024; latency=0.014s",
+                ),
+            ],
+            color=False,
+        )
+
+        self.assertIn("AMD 0x1002:0x1586 · VRAM 512 MiB · shared 62.5 GiB", output)
+        self.assertNotIn("shared/unified=62.5", output)
+        self.assertNotIn("\n│               GiB", output)
+
     def test_format_summary_lists_remote_only_after_endpoint_validation(self) -> None:
         output = format_summary(
             [

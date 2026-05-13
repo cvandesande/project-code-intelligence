@@ -7,6 +7,7 @@ import os
 import sys
 import time
 from typing import TYPE_CHECKING, Literal, Protocol, cast
+from urllib.parse import urlsplit
 
 from rich.console import Group
 from rich.live import Live
@@ -124,6 +125,7 @@ SHORT_EVENT_LABELS: dict[str, str] = {
     "code_intel_preembedding_disabled": "Pre-embedding disabled.",
 }
 INDEXING_EVENTS: frozenset[str] = frozenset({
+    "code_intel_plan",
     "code_intel_discovered",
     "code_intel_parsed",
     "code_intel_inserted",
@@ -136,15 +138,40 @@ INDEXING_EVENTS: frozenset[str] = frozenset({
 })
 
 
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items = cast("list[object]", value)
+    return [item for item in items if isinstance(item, str) and item]
+
+
+def _append_unique(values: list[str], value: str) -> None:
+    if value not in values:
+        values.append(value)
+
+
+def compact_database_target(target: str) -> str:
+    """Shorten a masked Postgres URL for progress panels."""
+    dsn = target.split(maxsplit=1)[0]
+    parts = urlsplit(dsn)
+    if not parts.scheme or not parts.hostname:
+        return target
+    database = parts.path.lstrip("/") or "<unset>"
+    port = f":{parts.port}" if parts.port is not None else ""
+    return f"{database} @ {parts.hostname}{port}"
+
+
 class RichEmitter:
     """Render progress as a Rich Live panel on stderr, with one summary panel per terminal."""
 
     def __init__(self) -> None:
         self.console = console_ui.build_console(file=sys.stderr)
         self.started_at: float = time.monotonic()
+        self.repos: list[str] = []
         self.repo: str | None = None
         self.branch: str | None = None
         self.commit_sha: str | None = None
+        self.database: str | None = None
         self.dirty: bool = False
         self.mode: str | None = None
         self.last_event: str = "starting"
@@ -182,10 +209,19 @@ class RichEmitter:
         self.live = None
 
     def _capture_identity(self, event: str, values: JsonObject) -> None:
+        if event == "code_intel_plan":
+            repos = _string_list(values.get("repos"))
+            if repos:
+                self.repos = repos
+            database = values.get("database")
+            if isinstance(database, str) and database:
+                self.database = database
+            return
         if event == "code_intel_discovered":
             repo_value = values.get("repo")
             if isinstance(repo_value, str):
                 self.repo = repo_value
+                _append_unique(self.repos, repo_value)
             commit = values.get("commit_sha")
             if isinstance(commit, str):
                 self.commit_sha = commit
@@ -214,11 +250,23 @@ class RichEmitter:
                 return "running", PHASE_LABELS.get(phase, phase.upper())
         return "running", "STARTING"
 
+    def live_title_text(self) -> str:
+        if len(self.repos) > 1:
+            return f"pci-index {len(self.repos)} repos"
+        if len(self.repos) == 1:
+            return f"pci-index {self.repos[0]}"
+        return f"pci-index {self.repo or '...'}"
+
     def _live_header(self) -> Table:
         status, label = self._phase_label()
-        return console_ui.header_row(f"pci-index {self.repo or '...'}", status, label)
+        return console_ui.header_row(self.live_title_text(), status, label)
 
-    def _repo_row_text(self) -> str:
+    def repos_row_text(self) -> str:
+        if not self.repos:
+            return "discovering…"
+        return ", ".join(self.repos)
+
+    def current_repo_row_text(self) -> str:
         if not self.repo:
             return "discovering…"
         commit = _short_sha(self.commit_sha)
@@ -226,9 +274,20 @@ class RichEmitter:
         mode_suffix = f" · {self.mode}" if self.mode else ""
         return f"{self.repo} ({commit}{dirty_suffix}){mode_suffix}"
 
+    def database_row_text(self) -> str:
+        if not self.database:
+            return "resolving…"
+        return compact_database_target(self.database)
+
     def _live_rows(self, counts: JsonObject, progress: JsonObject, timing: JsonObject) -> Table:
         rows = _section_grid()
-        _add_row(rows, "Repository", self._repo_row_text())
+        if len(self.repos) > 1:
+            _add_row(rows, "Repositories", self.repos_row_text())
+            if progress.get("phase") == "scan" and self.repo:
+                _add_row(rows, "Current", self.current_repo_row_text())
+        else:
+            _add_row(rows, "Repository", self.current_repo_row_text())
+        _add_row(rows, "Database", self.database_row_text())
         _add_live_progress_row(rows, progress)
         _add_live_files_row(rows, counts)
         _add_live_records_row(rows, counts)
@@ -406,6 +465,9 @@ def _add_identity_rows(rows: Table, report: JsonObject) -> None:
     profile = report.get("profile")
     if isinstance(profile, str):
         _add_row(rows, "Profile", profile)
+    database = report.get("database")
+    if isinstance(database, str):
+        _add_row(rows, "Database", compact_database_target(database))
     collection = report.get("collection")
     if isinstance(collection, str) and mode == "reset":
         _add_row(rows, "Collection", collection)
@@ -459,6 +521,38 @@ def _embedding_row_text(report: JsonObject, counts: JsonObject, timing: JsonObje
     return f"{_format_count(embedded)} records{suffix}"
 
 
+def _sarif_warning_counts(report: JsonObject) -> tuple[int, int]:
+    warnings = report.get("sarif_warnings")
+    if not isinstance(warnings, list):
+        return 0, 0
+    warn_count = 0
+    note_count = 0
+    for item in warnings:
+        if isinstance(item, dict) and item.get("severity") == "warn":
+            warn_count += 1
+        else:
+            note_count += 1
+    return warn_count, note_count
+
+
+def _sarif_row_text(report: JsonObject) -> str | None:
+    files = _coerce_int(report.get("sarif_file_count"))
+    findings = _coerce_int(report.get("static_findings"))
+    warnings, notes = _sarif_warning_counts(report)
+    if not (files or findings or warnings or notes):
+        return None
+    parts: list[str] = []
+    if files:
+        parts.append(f"{_format_count(files)} files")
+    if findings:
+        parts.append(f"{_format_count(findings)} findings")
+    if warnings:
+        parts.append(f"{_format_count(warnings)} warnings")
+    if notes:
+        parts.append(f"{_format_count(notes)} notes")
+    return " · ".join(parts)
+
+
 def _add_count_rows(rows: Table, report: JsonObject, *, counts: JsonObject, timing: JsonObject) -> None:
     dry_run = bool(report.get("dry_run"))
 
@@ -493,6 +587,9 @@ def _add_outcome_rows(rows: Table, report: JsonObject, *, counts: JsonObject, ti
     parser_failures = _coerce_int(counts.get("parser_failures"))
     if parser_failures:
         _add_row(rows, "Parser fails", _format_count(parser_failures))
+    sarif_text = _sarif_row_text(report)
+    if sarif_text:
+        _add_row(rows, "SARIF", sarif_text)
     static_findings = _coerce_int(report.get("static_findings"))
     if static_findings:
         runs = _coerce_int(report.get("static_runs"))

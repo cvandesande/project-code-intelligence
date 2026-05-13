@@ -247,12 +247,16 @@ def _shorten_platform(msg: str) -> str:
 
 
 def _shorten_gpu(msg: str) -> str:
-    match = re.match(r"(.+?) GPU:\s*(.*)", msg)
+    match = re.match(r"(.+):\s*(.*)", msg)
     if not match:
         return msg
     name, rest = match.group(1), match.group(2)
-    rest = rest.replace("shared/unified=", "").replace("VRAM=", "VRAM ")
+    name = re.sub(r"\bGPU\b\s*", "", name).strip()
+    rest = rest.replace("shared/unified=", "shared ")
+    rest = rest.replace("visible VRAM=", "visible ")
+    rest = rest.replace("VRAM=", "VRAM ")
     rest = rest.replace("; ", " · ")
+    rest = re.sub(r"\b(\d+)\.0 (MiB|GiB)\b", r"\1 \2", rest)
     return f"{name} · {rest}" if rest else name
 
 

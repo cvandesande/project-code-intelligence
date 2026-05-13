@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
+from project_code_intelligence.embedding.types import EmbeddingEndpointUnavailableError
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError
 from project_code_intelligence.mcp import tools as mcp_tools
 from project_code_intelligence.mcp.filters import (
@@ -22,7 +23,7 @@ from project_code_intelligence.mcp.protocol import (
     result_text,
 )
 from project_code_intelligence.mcp.tool_catalog import TOOL_DEFINITIONS, validate_tool_arguments
-from project_code_intelligence.mcp.transport import handle_tool_call, set_mcp_environment_defaults
+from project_code_intelligence.mcp.transport import error_message, handle_tool_call, set_mcp_environment_defaults
 from project_code_intelligence.server import vector_literal_dimensions
 
 
@@ -210,6 +211,53 @@ class McpContractTests(unittest.TestCase):
         self.assertEqual(vector_literal_dimensions("[]"), 0)
         self.assertEqual(vector_literal_dimensions("[0.1]"), 1)
         self.assertEqual(vector_literal_dimensions("[0.1,0.2,0.3]"), 3)
+
+    def test_semantic_search_reports_missing_embedding_endpoint_clearly(self) -> None:
+        endpoint = "http://127.0.0.1:18081/v1/embeddings"
+
+        with (
+            patch.object(mcp_tools.config, "default_embedding_endpoint", return_value=endpoint),
+            patch.object(mcp_tools.embeddings, "resolve_embedding_endpoint_model", return_value="local"),
+            patch.object(
+                mcp_tools.embeddings,
+                "embed_with_endpoint",
+                side_effect=EmbeddingEndpointUnavailableError("connection refused"),
+            ),
+            self.assertRaises(McpProtocolError) as raised,
+        ):
+            _ = mcp_tools.query_embedding("find request handler")
+
+        message = str(raised.exception)
+        self.assertIn("semantic search requires an embedding endpoint", message)
+        self.assertIn(endpoint, message)
+        self.assertIn("PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT", message)
+
+    def test_semantic_search_endpoint_failure_is_user_visible_mcp_error(self) -> None:
+        endpoint = "http://127.0.0.1:18081/v1/embeddings"
+
+        with (
+            patch.object(mcp_tools.config, "default_embedding_endpoint", return_value=endpoint),
+            patch.object(mcp_tools.embeddings, "resolve_embedding_endpoint_model", return_value="local"),
+            patch.object(
+                mcp_tools.embeddings,
+                "embed_with_endpoint",
+                side_effect=EmbeddingEndpointUnavailableError("connection refused"),
+            ),
+            self.assertRaises(McpProtocolError) as raised,
+        ):
+            _ = handle_tool_call(
+                {
+                    "params": {
+                        "name": "search_code_intel_semantic",
+                        "arguments": {"query": "find request handler"},
+                    }
+                },
+                1,
+            )
+
+        message = error_message(raised.exception)
+        self.assertIn("semantic search requires an embedding endpoint", message)
+        self.assertNotEqual(message, "internal server error")
 
     def test_tool_schema_validation_rejects_unknown_and_bad_arguments(self) -> None:
         text_search = TOOL_DEFINITIONS["search_code_intel_text"]

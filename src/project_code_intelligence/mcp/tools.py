@@ -248,12 +248,26 @@ def vector_literal_dimensions(vector: str) -> int:
     return 0 if not inner else inner.count(",") + 1
 
 
+def semantic_search_embedding_error(endpoint: str, exc: BaseException) -> McpProtocolError:
+    return McpProtocolError(
+        "semantic search requires an embedding endpoint because the MCP server "
+        "must embed the query with a model compatible with the indexed record embeddings. "
+        f"The configured endpoint is unavailable: {endpoint}. "
+        "Start one of the local embedding profiles shown by pci-doctor, or set "
+        "PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT to a trusted OpenAI-compatible "
+        f"embedding provider. Detail: {exc}"
+    )
+
+
 def query_embedding(query: str) -> tuple[str, int]:
     endpoint = config.default_embedding_endpoint(local_default=True)
     if endpoint:
-        model = config.default_embedding_endpoint_model(endpoint=endpoint)
-        model = embeddings.resolve_embedding_endpoint_model(endpoint, model)
-        vectors = embeddings.embed_with_endpoint(endpoint, [query], model, track_metrics=False)
+        try:
+            model = config.default_embedding_endpoint_model(endpoint=endpoint)
+            model = embeddings.resolve_embedding_endpoint_model(endpoint, model)
+            vectors = embeddings.embed_with_endpoint(endpoint, [query], model, track_metrics=False)
+        except embeddings.EmbeddingEndpointUnavailableError as exc:
+            raise semantic_search_embedding_error(endpoint, exc) from exc
         if not vectors:
             raise McpProtocolError("embedding endpoint returned no query vector")
         vector = vectors[0]
