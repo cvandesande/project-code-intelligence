@@ -5,6 +5,7 @@ from __future__ import annotations
 from project_code_intelligence.storage.copy import copy_unchanged_parser_failures, copy_unchanged_records_and_edges
 from project_code_intelligence.storage.core import (
     RecordInsertContext,
+    delete_all_code_intel_data,
     delete_repo_data,
     insert_edges,
     insert_files,
@@ -29,6 +30,7 @@ __all__ = [
     "RecordInsertContext",
     "copy_unchanged_parser_failures",
     "copy_unchanged_records_and_edges",
+    "delete_all_code_intel_data",
     "delete_repo_data",
     "ensure_schema",
     "file_signature",

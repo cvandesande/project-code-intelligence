@@ -303,8 +303,25 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
     })
 
 
-def record_projection_query(*, include_content: bool) -> str:
+def record_projection_query(*, include_content: bool, filter_collection: bool = False) -> str:
     if include_content:
+        if filter_collection:
+            return """
+                SELECT id, collection, repo, repo_role, branch, commit_sha, tree_sha,
+                       source_path, language, file_role, content_class,
+                       record_type, record_id, parent_record_id, title, summary,
+                       left(embedding_text, %s) AS embedding_text,
+                       coalesce(length(embedding_text), 0) > %s AS embedding_text_truncated,
+                       left(display_content, %s) AS display_content,
+                       coalesce(length(display_content), 0) > %s AS display_content_truncated,
+                       false AS content_omitted,
+                       line_start, line_end, symbol, symbol_kind, confidence_kind,
+                       confidence, tool, rule_id, severity, analyzer, analyzer_version,
+                       parser, parser_version, chunker_version, metadata, created_at,
+                       updated_at, embedding IS NOT NULL AS has_embedding
+                FROM project_code_intel_records
+                WHERE id = %s AND collection = %s
+                """
         return """
             SELECT id, collection, repo, repo_role, branch, commit_sha, tree_sha,
                    source_path, language, file_role, content_class,
@@ -320,6 +337,23 @@ def record_projection_query(*, include_content: bool) -> str:
                    updated_at, embedding IS NOT NULL AS has_embedding
             FROM project_code_intel_records
             WHERE id = %s
+            """
+    if filter_collection:
+        return """
+            SELECT id, collection, repo, repo_role, branch, commit_sha, tree_sha,
+                   source_path, language, file_role, content_class,
+                   record_type, record_id, parent_record_id, title, summary,
+                   NULL::text AS embedding_text,
+                   false AS embedding_text_truncated,
+                   NULL::text AS display_content,
+                   false AS display_content_truncated,
+                   true AS content_omitted,
+                   line_start, line_end, symbol, symbol_kind, confidence_kind,
+                   confidence, tool, rule_id, severity, analyzer, analyzer_version,
+                   parser, parser_version, chunker_version, metadata, created_at,
+                   updated_at, embedding IS NOT NULL AS has_embedding
+            FROM project_code_intel_records
+            WHERE id = %s AND collection = %s
             """
     return """
             SELECT id, collection, repo, repo_role, branch, commit_sha, tree_sha,
@@ -344,17 +378,20 @@ def tool_get_code_intel_record(args: Json) -> Json:
     if not isinstance(record_id, int):
         raise McpProtocolTypeError("id must be an integer")
     include_content = optional_bool(args, "include_content")
+    collection = scoped_collection({})
     params: QueryParams
     if include_content:
         content_limit = mcp_max_record_content_chars()
         params = [content_limit, content_limit, content_limit, content_limit, record_id]
     else:
         params = [record_id]
+    if collection:
+        params.append(collection)
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
         row = conn.execute(
-            record_projection_query(include_content=include_content),
+            record_projection_query(include_content=include_content, filter_collection=collection is not None),
             params,
         ).fetchone()
     return ok({"result": row})
@@ -466,19 +503,30 @@ def tool_get_static_finding(args: Json) -> Json:
     finding_id = args.get("id")
     if not isinstance(finding_id, int):
         raise McpProtocolTypeError("id must be an integer")
+    collection = scoped_collection({})
+    finding_clauses = ["f.id = %s"]
+    finding_params: QueryParams = [finding_id]
+    if collection:
+        finding_clauses.append("f.collection = %s")
+        finding_params.append(collection)
     with mcp_db.connect() as conn:
         if not table_regclass_exists(conn, "project_code_intel_static_findings"):
             return ok({"error": "static-analysis schema is not initialized"})
         finding = conn.execute(
-            """
+            db.query_sql(
+                query_with_where(
+                    """
             SELECT f.*, r.tool_name, r.tool_version, r.semantic_version,
                    r.information_uri, r.automation_id, r.sarif_path,
                    r.sarif_sha256, r.run_index, r.metadata AS run_metadata
             FROM project_code_intel_static_findings f
             JOIN project_code_intel_static_runs r ON r.id = f.run_id
-            WHERE f.id = %s
             """,
-            [finding_id],
+                    finding_clauses,
+                    "",
+                )
+            ),
+            finding_params,
         ).fetchone()
         if not finding:
             return ok({"result": None})
@@ -521,12 +569,16 @@ def tool_get_static_code_flow(args: Json) -> Json:
     if not isinstance(finding_id, int):
         raise McpProtocolTypeError("finding_id must be an integer")
     flow_index = args.get("flow_index")
-    clauses = ["finding_id = %s"]
+    collection = scoped_collection({})
+    clauses = ["cf.finding_id = %s"]
     params: QueryParams = [finding_id]
+    if collection:
+        clauses.append("f.collection = %s")
+        params.append(collection)
     if flow_index is not None:
         if not isinstance(flow_index, int):
             raise McpProtocolTypeError("flow_index must be an integer")
-        clauses.append("flow_index = %s")
+        clauses.append("cf.flow_index = %s")
         params.append(flow_index)
     with mcp_db.connect() as conn:
         if not table_regclass_exists(conn, "project_code_intel_static_code_flows"):
@@ -535,14 +587,15 @@ def tool_get_static_code_flow(args: Json) -> Json:
             db.query_sql(
                 query_with_where(
                     """
-            SELECT id, finding_id, flow_index, thread_index, step_index,
-                   source_path, uri, message, line_start, line_end,
-                   column_start, column_end, importance, properties
-            FROM project_code_intel_static_code_flows
+            SELECT cf.id, cf.finding_id, cf.flow_index, cf.thread_index, cf.step_index,
+                   cf.source_path, cf.uri, cf.message, cf.line_start, cf.line_end,
+                   cf.column_start, cf.column_end, cf.importance, cf.properties
+            FROM project_code_intel_static_code_flows cf
+            JOIN project_code_intel_static_findings f ON f.id = cf.finding_id
             """,
                     clauses,
                     """
-            ORDER BY flow_index, thread_index, step_index, id
+            ORDER BY cf.flow_index, cf.thread_index, cf.step_index, cf.id
             """,
                 )
             ),

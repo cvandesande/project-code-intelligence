@@ -103,6 +103,7 @@ def cli_args(**overrides: object) -> CliArgs:
         "progress_every": 0,
         "dry_run": False,
         "reset_code_intel": False,
+        "reset_all_code_intel": False,
         "i_know_this_deletes_code_intel_db": False,
         "reset_only": False,
         "sarif": [],
@@ -153,14 +154,15 @@ class DatabaseSettingsTests(unittest.TestCase):
         self.assertEqual(settings.display_target(), "postgresql://example.invalid/db")
 
     def test_accept_database_url_with_separate_credentials(self) -> None:
+        credential = "test-credential"
         settings = DatabaseSettings.from_env({
             "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://example.invalid/db",
             "PROJECT_CODE_INTELLIGENCE_DATABASE_USER": "app",
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD": "secret",  # nosec B105
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD": credential,
         })
 
         self.assertEqual(settings.dsn_user, "app")
-        self.assertEqual(settings.dsn_password, "secret")  # nosec B105
+        self.assertEqual(settings.dsn_password, credential)
         self.assertEqual(
             settings.connection_hint(),
             "PROJECT_CODE_INTELLIGENCE_DATABASE_URL=<hidden> "
@@ -212,8 +214,26 @@ class ResetConfirmationTests(unittest.TestCase):
         output = stderr.getvalue()
         self.assertIn("Database target: postgresql://app@db:5432/codeintel sslmode=prefer", output)
         self.assertIn("acme-repo", output)
-        self.assertIn("schema and other repos are untouched", output)
+        self.assertIn("The schema is untouched", output)
+        self.assertIn("Other repos are untouched", output)
         self.assertNotIn("secret", output)
+
+    def test_reset_all_confirmation_prints_destructive_scope(self) -> None:
+        stderr = io.StringIO()
+
+        with patch("sys.stdin", TtyStringIO("yes\n")), patch("sys.stderr", stderr):
+            confirm_reset_code_intel(
+                cli_args(reset_code_intel=True, reset_all_code_intel=True),
+                DatabaseSettings(),
+                "default",
+                ["acme-repo"],
+            )
+
+        output = stderr.getvalue()
+        self.assertIn("delete all project-code-intelligence data", output)
+        self.assertIn("Collections/repos: all", output)
+        self.assertIn("The schema is untouched", output)
+        self.assertNotIn("Other repos are untouched", output)
 
     def test_reset_confirmation_requires_flag_in_noninteractive_mode(self) -> None:
         with (
@@ -438,7 +458,8 @@ class ParserAndRuntimeTests(unittest.TestCase):
 
 class McpQueryTests(unittest.TestCase):
     def test_mcp_record_queries_default_to_latest_snapshot(self) -> None:
-        clauses, params = code_intel_clauses({"collection": "test", "repo": "sample-repo"}, "r")
+        with patch.dict(os.environ, {}, clear=True):
+            clauses, params = code_intel_clauses({"collection": "test", "repo": "sample-repo"}, "r")
         sql = " AND ".join(clauses)
 
         self.assertIn("r.collection = %s", sql)
@@ -449,10 +470,11 @@ class McpQueryTests(unittest.TestCase):
         self.assertEqual(snapshot_scope_response({}), {"snapshot_scope": "latest"})
 
     def test_mcp_record_queries_can_include_historical_snapshots(self) -> None:
-        clauses, params = code_intel_clauses(
-            {"collection": "test", "repo": "sample-repo", "include_historical": True},
-            "r",
-        )
+        with patch.dict(os.environ, {}, clear=True):
+            clauses, params = code_intel_clauses(
+                {"collection": "test", "repo": "sample-repo", "include_historical": True},
+                "r",
+            )
         sql = " AND ".join(clauses)
 
         self.assertNotIn("latest_snapshot", sql)
@@ -495,11 +517,12 @@ class McpQueryTests(unittest.TestCase):
         )
 
     def test_mcp_snapshot_scope_rejects_ambiguous_args(self) -> None:
-        with self.assertRaises(ValueError):
+        with patch.dict(os.environ, {}, clear=True), self.assertRaises(ValueError):
             _ = code_intel_clauses({"snapshot_id": 42, "include_historical": True}, "r")
 
     def test_mcp_static_finding_queries_default_to_latest_snapshot(self) -> None:
-        clauses, params = static_finding_clauses({"collection": "test", "repo": "sample-repo"})
+        with patch.dict(os.environ, {}, clear=True):
+            clauses, params = static_finding_clauses({"collection": "test", "repo": "sample-repo"})
         sql = " AND ".join(clauses)
 
         self.assertIn("f.collection = %s", sql)

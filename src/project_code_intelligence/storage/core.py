@@ -74,6 +74,29 @@ def delete_repo_data(conn: db.DbConnection, collection: str, repos: list[str]) -
     return deleted
 
 
+def delete_all_code_intel_data(conn: db.DbConnection) -> int:
+    """Delete all code-intelligence snapshots and cascading data. Returns deleted snapshot count."""
+    row = conn.execute("SELECT count(*) AS count FROM project_code_intel_snapshots").fetchone()
+    snapshot_count = row_int(db.require_row(row, "snapshot count"), "count")
+    _ = conn.execute(
+        """
+        TRUNCATE
+            project_code_intel_snapshots,
+            project_code_intel_files,
+            project_code_intel_records,
+            project_code_intel_edges,
+            project_code_intel_parser_failures,
+            project_code_intel_static_runs,
+            project_code_intel_static_rules,
+            project_code_intel_static_findings,
+            project_code_intel_static_locations,
+            project_code_intel_static_code_flows
+        RESTART IDENTITY CASCADE
+        """
+    )
+    return snapshot_count
+
+
 def insert_snapshot(conn: db.DbConnection, snapshot: Snapshot) -> int:
     row = conn.execute(
         """
