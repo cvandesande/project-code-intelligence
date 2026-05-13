@@ -5,17 +5,18 @@ from __future__ import annotations
 import queue
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence import config
 from project_code_intelligence import runtime as runtime_state
 from project_code_intelligence.embedding.core import embed_items_with_retry
+from project_code_intelligence.embedding.store import embedding_metadata
 from project_code_intelligence.runtime import PreEmbeddingResult, PreEmbeddingState, progress_event
 from project_code_intelligence.storage import RecordInsertContext, insert_records
 
 if TYPE_CHECKING:
     from project_code_intelligence.embedding.types import EmbeddingRunConfig
-    from project_code_intelligence.models import IntelRecord
+    from project_code_intelligence.models import IntelRecord, JsonObject
 
 
 def code_preembedding_enabled() -> bool:
@@ -41,6 +42,14 @@ def mark_record_embedding_skipped(record: IntelRecord, reason: BaseException, ma
     )
 
 
+def mark_record_embedded(record: IntelRecord, embedding: str, run_config: EmbeddingRunConfig) -> None:
+    record.embedding = embedding
+    record.metadata = {
+        **record.metadata,
+        **cast("JsonObject", embedding_metadata(run_config, embedding)),
+    }
+
+
 def embed_record_batch(
     batch: list[IntelRecord],
     *,
@@ -54,7 +63,7 @@ def embed_record_batch(
         retry_event_values=lambda record: {"record_id": record.record_id},
     )
     for record, embedding in embedded:
-        record.embedding = embedding
+        mark_record_embedded(record, embedding, run_config)
     return len(embedded), skipped
 
 

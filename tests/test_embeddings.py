@@ -12,6 +12,7 @@ from project_code_intelligence.embeddings import (
     EmbeddingEndpointUnavailableError,
     EmbeddingRunConfig,
     embed_items_with_retry,
+    embed_record_batch,
     embed_with_endpoint,
     embedding_contract,
     embedding_contract_from_metadata,
@@ -26,6 +27,7 @@ from project_code_intelligence.embeddings import (
     vector_literal_dimensions,
     vector_literals_from_items,
 )
+from project_code_intelligence.models import IntelRecord
 
 if TYPE_CHECKING:
     from project_code_intelligence.models import JsonObject
@@ -202,6 +204,49 @@ class EmbeddingContractTests(unittest.TestCase):
         self.assertEqual(
             embedding_contract(run_config, "[0.1,0.2]"),
             {"version": 1, "backend": "endpoint", "model": "demo", "dimensions": 2},
+        )
+
+    def test_preembedding_records_same_metadata_contract_as_post_insert_embedding(self) -> None:
+        record = IntelRecord(
+            collection="test",
+            source_path="src/main.py",
+            language="python",
+            file_role="source",
+            content_class="source",
+            record_type="code_chunk",
+            record_id="src/main.py::chunk::000001-000002",
+            parent_record_id=None,
+            title="src/main.py:1-2",
+            summary="python chunk",
+            embedding_text="type: code_chunk\ncontent:\ndef main(): pass",
+            display_content="# src/main.py:1-2",
+            line_start=1,
+            line_end=2,
+            metadata={"project": "demo"},
+        )
+        run_config = EmbeddingRunConfig(
+            backend=EmbeddingBackend(
+                endpoint="http://127.0.0.1:18081/v1/embeddings", endpoint_model="demo-model", use_llama_cli=False
+            ),
+            max_chars=800,
+        )
+
+        with patch(
+            "project_code_intelligence.embedding.preembedding.embed_items_with_retry",
+            return_value=([(record, "[0.1,0.2,0.3]")], 0),
+        ):
+            embedded, skipped = embed_record_batch([record], run_config=run_config)
+
+        self.assertEqual((embedded, skipped), (1, 0))
+        self.assertEqual(record.embedding, "[0.1,0.2,0.3]")
+        self.assertEqual(
+            record.metadata,
+            {
+                "project": "demo",
+                "embedding_backend": "endpoint",
+                "embedding_model": "demo-model",
+                "embedding_dimensions": 3,
+            },
         )
 
     def test_snapshot_embedding_contract_requires_same_model_and_dimensions(self) -> None:
