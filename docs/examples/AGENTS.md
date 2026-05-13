@@ -8,6 +8,8 @@ changes.
 
 - Start with `code_intel_status` to inspect indexed repositories, snapshots,
   record types, languages, and static-analysis findings.
+- Use the collection and repo keys reported by `code_intel_status`. Repo filters
+  are stable repo names such as `openwrt`, not absolute filesystem paths.
 - Use `search_code_intel_text` for keyword, symbol, file, language, record-type,
   and metadata searches before broad filesystem searches.
 - Use `get_code_intel_record` when a search result needs full display content.
