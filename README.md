@@ -15,6 +15,18 @@ The package is generic by default. Project-specific behavior belongs in code
 profiles, with [`example.py`](src/project_code_intelligence/code_profiles/example.py)
 as the public example.
 
+Language-specific metadata is additive. The generic index currently records
+portable C-family, C#, Go, Java/Kotlin, Rust, Python, JavaScript/TypeScript,
+Lua, Perl, PHP, Ruby, shell, Objective-C/Objective-C++, Protobuf, SQL, XML,
+Markdown/RST, Swift, HTML/CSS/SCSS, Vue/Svelte, GraphQL, Starlark/Bazel,
+Groovy/Gradle, PowerShell, Scala, Elixir/Erlang, Zig, Dockerfile,
+Terraform/Packer, CMake/Meson, and common build DSL facts such as
+imports/includes, package or module names, functions, classes/types, macros,
+traits, sourced shell files, service functions, linker sections, boot-script
+variables, and unsafe markers.
+Project profiles can add project context without replacing those language
+extractors.
+
 ## Why This Exists
 
 Plain codebase RAG often means splitting files into text chunks, embedding those
@@ -43,7 +55,7 @@ The index can store:
 - candidate relationships between records and symbols
 - SARIF/static-analysis runs, rules, findings, locations, and code-flow steps
 - optional semantic embeddings for similarity search
-- metadata such as language, file role, content class, source path, line ranges, parser details, rule IDs, and confidence hints
+- metadata such as language, file role, content class, source path, line ranges, imports/includes, parser details, rule IDs, and confidence hints
 
 This makes the project more than a bag of embedded chunks. The MCP server can
 search semantically, search lexically, fetch individual records, follow
@@ -94,16 +106,16 @@ directories:
 
 ```sh
 cd /path/to/workspace
-pci-index openwrt ask-cmm fci
+pci-index service-api web-ui shared-lib
 ```
 
-MCP repo filters then use those repo names, such as `openwrt`, not absolute
-filesystem paths. Run `code_intel_status` without a repo filter to see the
-available collection and repo keys. Use `--collection` only when you want a
-name different from the inferred workspace name:
+MCP repo filters then use those repo names, such as `service-api`, not
+absolute filesystem paths. Run `code_intel_status` without a repo filter to
+see the available collection and repo keys. Use `--collection` only when you
+want a name different from the inferred workspace name:
 
 ```sh
-pci-index --collection workspace-name openwrt ask-cmm fci
+pci-index --collection workspace-name service-api web-ui shared-lib
 ```
 
 For advanced ingest options, put them after `--`:
@@ -111,6 +123,14 @@ For advanced ingest options, put them after `--`:
 ```sh
 pci-index /path/to/repo-to-index -- --limit-files 100
 ```
+
+SARIF files are discovered automatically under the selected repo paths. Obvious
+test fixtures such as `*-expected.sarif` under test directories are ignored
+unless passed explicitly with `--sarif`. The indexer records SARIF findings even
+when reports live in ignored output directories, and prints soft notes when
+freshness cannot be verified, for example when a report file is older than the
+indexed commit. Use `--sarif` for reports outside the selected repos, or
+`--no-profile-sarif` to disable automatic SARIF discovery.
 
 If indexing is interrupted, rerun the same command. `pci-index .` reuses the
 same snapshot when the Git tree is unchanged, keeps compatible existing
@@ -312,8 +332,9 @@ not for wrapping the MCP process.
 ## Project Profiles
 
 The generic profile covers common source, docs, build files, config files, and
-SARIF input. A project can add its own profile for domain-specific file roles,
-metadata, records, or security context.
+SARIF input under the selected repo paths. A project can add its own profile for
+domain-specific file roles, metadata, records, security context, or extra SARIF
+locations.
 
 Private profiles do not need to be registered in this package. Put them on
 `PYTHONPATH` and select them with a fully qualified profile path:
