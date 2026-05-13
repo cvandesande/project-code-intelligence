@@ -5,11 +5,13 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from typing_extensions import override
 
+from project_code_intelligence import profile_context
 from project_code_intelligence.code_profiles import load_profile
 from project_code_intelligence.config import (
     DEFAULT_EMBEDDING_ENDPOINT_MODEL,
@@ -23,20 +25,27 @@ from project_code_intelligence.config import (
 from project_code_intelligence.embedding.fastembed_server import embedding_response, normalize_input
 from project_code_intelligence.embeddings import validate_embedding_endpoint
 from project_code_intelligence.exceptions import ConfigError, ProfileLoadError
-from project_code_intelligence.ingest_code_intel import CliArgs, confirm_reset_code_intel, validate_args
+from project_code_intelligence.ingest_code_intel import (
+    CliArgs,
+    IngestPlan,
+    confirm_reset_code_intel,
+    validate_args,
+    warning_for_sarif_mtime,
+)
 from project_code_intelligence.mcp.filters import (
     code_intel_clauses,
     scoped_snapshot_clauses,
     snapshot_scope_response,
     static_finding_clauses,
 )
-from project_code_intelligence.models import IntelFile, JsonValue
+from project_code_intelligence.models import IntelFile, JsonValue, Snapshot
 from project_code_intelligence.parsers import go_records, python_records
 from project_code_intelligence.records import line_for_offset_with_index, line_offsets, line_window_records
 from project_code_intelligence.runtime import RuntimeMetrics
 from project_code_intelligence.sarif import (
     SarifIngestContext,
     SarifPathContext,
+    discover_sarif_files,
     ingest_sarif,
     resolve_sarif_source_path,
     source_path_from_sarif_uri,
@@ -533,6 +542,72 @@ class McpQueryTests(unittest.TestCase):
 
 
 class SarifTests(unittest.TestCase):
+    def test_generic_profile_discovers_sarif_under_selected_repos(self) -> None:
+        previous_profile = profile_context.active_profile
+        try:
+            profile_context.set_active_profile(load_profile("generic"))
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                selected = root / "repo-a" / "codeql-results"
+                fixture = root / "repo-a" / "build_dir" / "host" / "cmake" / "Tests" / "RunCMake"
+                ignored = root / "unselected-repo" / "codeql-results"
+                selected.mkdir(parents=True)
+                fixture.mkdir(parents=True)
+                ignored.mkdir(parents=True)
+                selected_sarif = selected / "results.sarif"
+                fixture_sarif = fixture / "example-expected.sarif"
+                ignored_sarif = ignored / "results.sarif"
+                _ = selected_sarif.write_text('{"version":"2.1.0","runs":[]}', encoding="utf-8")
+                _ = fixture_sarif.write_text('{"version":"2.1.0","runs":[]}', encoding="utf-8")
+                _ = ignored_sarif.write_text('{"version":"2.1.0","runs":[]}', encoding="utf-8")
+
+                discovered = discover_sarif_files(root, ["repo-a"], [], include_profile=True)
+
+            self.assertEqual(discovered, [selected_sarif.resolve()])
+        finally:
+            profile_context.set_active_profile(previous_profile)
+
+    def test_sarif_mtime_warning_is_soft_when_report_is_older_than_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sarif_dir = root / "repo-a" / "codeql-results"
+            sarif_dir.mkdir(parents=True)
+            sarif_path = sarif_dir / "results.sarif"
+            _ = sarif_path.write_text('{"version":"2.1.0","runs":[]}', encoding="utf-8")
+            old_timestamp = datetime(2026, 5, 9, tzinfo=timezone.utc).timestamp()
+            os.utime(sarif_path, (old_timestamp, old_timestamp))
+            plan = IngestPlan(
+                args=cli_args(),
+                profile=load_profile("generic"),
+                root=root,
+                collection="test",
+                repos=["repo-a"],
+                embed_types=set(),
+                sarif_files=[sarif_path],
+                embedding_requested=False,
+                preembedding_requested=False,
+                mode="full",
+            )
+            snapshot = Snapshot(
+                collection="test",
+                repo="repo-a",
+                repo_role="source",
+                branch="main",
+                commit_sha="abc123",
+                tree_sha="tree",
+                dirty=False,
+                metadata={"commit_time": "2026-05-10T00:00:00+00:00"},
+            )
+
+            warning = warning_for_sarif_mtime(plan, {"repo-a": snapshot}, sarif_path)
+
+        self.assertIsNotNone(warning)
+        if warning is None:
+            self.fail("expected SARIF freshness warning")
+        self.assertEqual(warning["severity"], "note")
+        self.assertEqual(warning["reason"], "sarif_older_than_snapshot_commit")
+        self.assertEqual(warning["sarif_path"], "repo-a/codeql-results/results.sarif")
+
     def test_sarif_ingest_creates_static_finding_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

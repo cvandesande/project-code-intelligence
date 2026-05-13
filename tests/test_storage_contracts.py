@@ -33,7 +33,7 @@ def snapshot_fixture() -> Snapshot:
         metadata={
             "schema_version": "code-intel-schema-v2",
             "chunker_version": "code-intel-v1",
-            "parser_version": "stdlib-heuristic-v3",
+            "parser_version": "stdlib-heuristic-v10",
             "profile_name": "generic",
             "profile_version": "v1",
         },

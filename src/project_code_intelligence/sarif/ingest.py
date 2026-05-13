@@ -101,6 +101,7 @@ def sarif_static_run(run_context: SarifRunContext, repo: str) -> StaticRun:
             "sarif_version": run_context.loaded.sarif.get("version"),
             "schema": run_context.loaded.sarif.get("$schema"),
             "originalUriBaseIds": uri_base_ids,
+            "versionControlProvenance": json_array(run_context.run.get("versionControlProvenance"))[:3],
             "invocations": json_array(run_context.run.get("invocations"))[:3],
         },
         rules=run_context.rules,

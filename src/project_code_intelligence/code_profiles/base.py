@@ -14,6 +14,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict, TypeVar
 
+from project_code_intelligence.language_profiles import language_metadata_keys
+
 if TYPE_CHECKING:
     from typing_extensions import override
 
@@ -134,7 +136,42 @@ class CodeIntelProfile:
 
     def should_scan_security(self, path: str, language: str, file_role: str) -> bool:
         del path, file_role
-        return language in {"c", "shell", "lua", "ucode", "make", "patch", "go", "rust", "python"}
+        return language in {
+            "bazel",
+            "c",
+            "csharp",
+            "dockerfile",
+            "elixir",
+            "erlang",
+            "go",
+            "groovy",
+            "html",
+            "java",
+            "javascript",
+            "kotlin",
+            "lua",
+            "make",
+            "objective_c",
+            "objective_cpp",
+            "patch",
+            "perl",
+            "php",
+            "python",
+            "powershell",
+            "ruby",
+            "rust",
+            "scala",
+            "shell",
+            "starlark",
+            "svelte",
+            "swift",
+            "sql",
+            "terraform",
+            "typescript",
+            "ucode",
+            "vue",
+            "zig",
+        }
 
     def security_context(self, path: str, language: str, file_role: str, content_class: str) -> JsonObject:
         contexts: list[str] = []
@@ -151,7 +188,41 @@ class CodeIntelProfile:
         if file_role == "runtime-service" or "/init.d/" in path:
             contexts.append("runtime_service")
             boundaries.append("service_entrypoint")
-        if language in {"c", "go", "rust", "python", "shell", "lua", "ucode"} and not contexts:
+        if (
+            language
+            in {
+                "c",
+                "csharp",
+                "elixir",
+                "erlang",
+                "go",
+                "groovy",
+                "html",
+                "java",
+                "javascript",
+                "kotlin",
+                "lua",
+                "objective_c",
+                "objective_cpp",
+                "perl",
+                "php",
+                "powershell",
+                "python",
+                "ruby",
+                "rust",
+                "scala",
+                "shell",
+                "sql",
+                "svelte",
+                "swift",
+                "terraform",
+                "typescript",
+                "ucode",
+                "vue",
+                "zig",
+            }
+            and not contexts
+        ):
             contexts.append("source_code")
         if not contexts:
             contexts.append(file_role)
@@ -161,7 +232,7 @@ class CodeIntelProfile:
         }
 
     def embedding_metadata_keys(self) -> list[str]:
-        return [
+        keys = [
             "symbol",
             "symbol_kind",
             "target",
@@ -176,13 +247,17 @@ class CodeIntelProfile:
             "boundary_candidates",
             "log_error_messages",
         ]
+        return [*keys, *[key for key in language_metadata_keys() if key not in keys]]
 
     def report_metadata_keys(self) -> list[str]:
         return self.embedding_metadata_keys()
 
     def sarif_globs(self, repos: list[str]) -> list[str]:
-        del repos
-        return []
+        globs: list[str] = []
+        for repo in repos:
+            prefix = "" if repo == "." else f"{repo}/"
+            globs.extend([f"{prefix}**/*.sarif", f"{prefix}**/*.sarif.json"])
+        return globs
 
 
 class GenericProfile(CodeIntelProfile):

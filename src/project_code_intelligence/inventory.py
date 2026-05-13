@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from project_code_intelligence import process, profile_context
 from project_code_intelligence.common import sha256_bytes, sha256_text, source_path_for
 from project_code_intelligence.git_utils import GIT_TIMEOUT_SECONDS, git_binary, run_git
+from project_code_intelligence.language_profiles import language_metadata_for_file
 from project_code_intelligence.models import (
     BINARY_SUFFIXES,
     CHUNKER_VERSION,
@@ -29,20 +30,52 @@ if TYPE_CHECKING:
 
 C_LANGUAGE_SUFFIXES = frozenset({".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"})
 ASM_SUFFIXES = frozenset({".s", ".S"})
-JAVASCRIPT_SUFFIXES = frozenset({".js", ".jsx"})
-TYPESCRIPT_SUFFIXES = frozenset({".ts", ".tsx"})
 KCONFIG_NAMES = frozenset({"Kconfig", "Config.in", "Config-defaults.in"})
 CONFIG_NAMES = frozenset({"config", "inittab"})
-CONFIG_SUFFIXES = frozenset({".conf", ".config", ".seed", ".service", ".init"})
+CONFIG_SUFFIXES = frozenset({
+    ".cfg",
+    ".cnf",
+    ".conf",
+    ".config",
+    ".default",
+    ".defaults",
+    ".init",
+    ".seed",
+    ".service",
+})
+SHELL_SUFFIXES = frozenset({
+    ".common",
+    ".failsafe",
+    ".hotplug",
+    ".initd",
+    ".local",
+    ".script",
+    ".usb",
+    ".usbmisc",
+    ".user",
+})
+BOOT_SCRIPT_SUFFIXES = frozenset({".bootscript", ".scr"})
+LINKER_SCRIPT_SUFFIXES = frozenset({".ld", ".lds"})
 BUILD_FILE_NAMES = frozenset({
+    ".bazelrc",
     "cargo.toml",
+    "build.gradle",
+    "build.gradle.kts",
     "go.mod",
     "go.sum",
+    "jenkinsfile",
     "pyproject.toml",
     "setup.py",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "build.sbt",
     "package.json",
     "tsconfig.json",
 })
+DOCKERFILE_NAMES = frozenset({"Dockerfile", "Containerfile"})
+CMAKE_NAMES = frozenset({"CMakeLists.txt"})
+MESON_NAMES = frozenset({"meson.build", "meson_options.txt"})
+BAZEL_NAMES = frozenset({"BUILD", "BUILD.bazel", "WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel"})
 CONTENT_CLASS_FLAG_ORDER = (
     ("is_doc", "doc"),
     ("is_build", "build"),
@@ -53,30 +86,81 @@ CONTENT_CLASS_FLAG_ORDER = (
     ("is_generated", "generated"),
 )
 
-LANGUAGE_SUFFIXES = {
-    ".rs": "rust",
-    ".go": "go",
-    ".py": "python",
-    ".java": "java",
-    ".cs": "csharp",
-    ".php": "php",
-    ".rb": "ruby",
-    ".mk": "make",
-    ".in": "kconfig",
-    ".sh": "shell",
-    ".dts": "dts",
-    ".dtsi": "dts",
-    ".patch": "patch",
-    ".diff": "patch",
-    ".json": "json",
-    ".toml": "toml",
-    ".yaml": "yaml",
-    ".yml": "yaml",
-    ".lua": "lua",
-    ".uc": "ucode",
-    ".md": "doc",
-    ".rst": "doc",
-}
+LANGUAGE_SUFFIXES = (
+    {
+        ".rs": "rust",
+        ".go": "go",
+        ".py": "python",
+        ".java": "java",
+        ".kt": "kotlin",
+        ".kts": "kotlin",
+        ".cs": "csharp",
+        ".swift": "swift",
+        ".m": "objective_c",
+        ".mm": "objective_cpp",
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".html": "html",
+        ".htm": "html",
+        ".css": "css",
+        ".scss": "scss",
+        ".sass": "scss",
+        ".vue": "vue",
+        ".svelte": "svelte",
+        ".graphql": "graphql",
+        ".gql": "graphql",
+        ".bzl": "starlark",
+        ".star": "starlark",
+        ".groovy": "groovy",
+        ".gradle": "groovy",
+        ".ps1": "powershell",
+        ".psm1": "powershell",
+        ".psd1": "powershell",
+        ".scala": "scala",
+        ".sbt": "scala",
+        ".ex": "elixir",
+        ".exs": "elixir",
+        ".erl": "erlang",
+        ".hrl": "erlang",
+        ".zig": "zig",
+        ".php": "php",
+        ".rb": "ruby",
+        ".xml": "xml",
+        ".sql": "sql",
+        ".proto": "protobuf",
+        ".tf": "terraform",
+        ".tfvars": "terraform",
+        ".hcl": "terraform",
+        ".cmake": "cmake",
+        ".pl": "perl",
+        ".pm": "perl",
+        ".awk": "awk",
+        ".l": "lex",
+        ".y": "yacc",
+        ".mk": "make",
+        ".in": "kconfig",
+        ".dts": "dts",
+        ".dtsi": "dts",
+        ".dtso": "dts",
+        ".patch": "patch",
+        ".diff": "patch",
+        ".json": "json",
+        ".toml": "toml",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+        ".lua": "lua",
+        ".uc": "ucode",
+        ".md": "doc",
+        ".rst": "doc",
+    }
+    | dict.fromkeys((".m4", ".am", ".ac"), "autotools")
+    | dict.fromkeys(SHELL_SUFFIXES | {".sh"}, "shell")
+    | dict.fromkeys(LINKER_SCRIPT_SUFFIXES, "linker_script")
+    | dict.fromkeys(BOOT_SCRIPT_SUFFIXES, "boot_script")
+    | dict.fromkeys(CONFIG_SUFFIXES, "config")
+)
 
 
 def run_git_required(root: Path, args: list[str]) -> str:
@@ -118,6 +202,63 @@ def git_ls_files(repo_root: Path) -> list[tuple[str | None, str]]:
     return out
 
 
+def shebang_language(data: bytes) -> str | None:
+    first_line = data.splitlines()[:1]
+    if not first_line:
+        return None
+    line = first_line[0].decode("utf-8", errors="replace").strip().lower()
+    if not line.startswith("#!"):
+        return None
+    language: str | None = None
+    if "perl" in line:
+        language = "perl"
+    elif "pwsh" in line or "powershell" in line:
+        language = "powershell"
+    elif "ucode" in line:
+        language = "ucode"
+    elif "bash" in line or "ash" in line or re.search(r"(?:^|/|\s)sh(?:\s|$)", line):
+        language = "shell"
+    return language
+
+
+def language_for_read_file(path: str, data: bytes, *, read_ok: bool) -> str:
+    language = profile_context.active_profile.language_for_path(path) or language_for(path)
+    if read_ok and language == "c" and Path(path).suffix.lower() == ".h":
+        header = data[:8192]
+        if b"@interface" in header or b"@protocol" in header or b"@implementation" in header or b"#import" in header:
+            return "objective_c"
+    if read_ok and language == "text":
+        return shebang_language(data) or language
+    return language
+
+
+def is_config_name(name: str) -> bool:
+    return name in CONFIG_NAMES or name.startswith("Config.") or bool(re.match(r"^config-\d+(?:\.\d+)*$", name))
+
+
+def is_shell_path(path: str) -> bool:
+    return "/init.d/" in path or "/preinit/" in path
+
+
+def special_name_language(path: str, name: str) -> str | None:
+    path_lower = path.lower()
+    name_lower = name.lower()
+    language: str | None = None
+    if name in DOCKERFILE_NAMES or name_lower.endswith(".dockerfile"):
+        language = "dockerfile"
+    elif name in CMAKE_NAMES:
+        language = "cmake"
+    elif name in MESON_NAMES:
+        language = "meson"
+    elif name in BAZEL_NAMES or name_lower == ".bazelrc":
+        language = "bazel"
+    elif name == "Jenkinsfile":
+        language = "groovy"
+    elif path_lower.endswith((".pkr.hcl", ".pkrvars.hcl")):
+        language = "packer"
+    return language
+
+
 def language_for(path: str) -> str:
     file_path = Path(path)
     name = file_path.name
@@ -128,17 +269,15 @@ def language_for(path: str) -> str:
         language = "c"
     elif suffix in ASM_SUFFIXES:
         language = "asm"
-    elif normalized_suffix in JAVASCRIPT_SUFFIXES:
-        language = "javascript"
-    elif normalized_suffix in TYPESCRIPT_SUFFIXES:
-        language = "typescript"
-    elif normalized_suffix == ".mk" or name == "Makefile":
+    elif name == "Makefile":
         language = "make"
-    elif normalized_suffix == ".in" or name in KCONFIG_NAMES:
+    elif name in KCONFIG_NAMES:
         language = "kconfig"
-    elif normalized_suffix == ".sh" or "/init.d/" in path or "/preinit/" in path:
+    elif special_language := special_name_language(path, name):
+        language = special_language
+    elif is_shell_path(path):
         language = "shell"
-    elif normalized_suffix in CONFIG_SUFFIXES or name in CONFIG_NAMES:
+    elif is_config_name(name):
         language = "config"
     return language
 
@@ -170,8 +309,29 @@ def classification_flags(path: str, language: str) -> dict[str, bool]:
     is_generated = any(part in {"generated", "autogenerated"} for part in parts) or "generated" in name
     is_vendor = any(part in {"vendor", "third_party", "3rdparty"} for part in parts)
     is_doc = language == "doc" or parts[0] in {"docs", "doc", "Documentation"} or suffix in {".md", ".rst"}
-    is_build = language == "make" or file_path.name == "Makefile" or "/cmake/" in path or name in BUILD_FILE_NAMES
-    is_config = language in {"kconfig", "config", "json", "toml", "yaml"} or "Config" in file_path.name
+    is_build = (
+        language
+        in {
+            "autotools",
+            "bazel",
+            "boot_script",
+            "cmake",
+            "dockerfile",
+            "linker_script",
+            "make",
+            "meson",
+            "packer",
+            "starlark",
+        }
+        or file_path.name == "Makefile"
+        or "/cmake/" in path
+        or name in BUILD_FILE_NAMES
+    )
+    is_config = (
+        language
+        in {"css", "graphql", "kconfig", "config", "json", "packer", "scss", "sql", "terraform", "toml", "xml", "yaml"}
+        or "Config" in file_path.name
+    )
     is_source = language in SOURCE_LANGUAGES
     return {
         "is_generated": is_generated,
@@ -225,7 +385,27 @@ def should_parse_text(repo_rel_path: str, language: str, skipped_reason: str | N
         return True
     if "/files/" in repo_rel_path or "/base-files/" in repo_rel_path:
         return True
-    return language in {"text", "config"}
+    return language in {
+        "autotools",
+        "awk",
+        "bazel",
+        "boot_script",
+        "cmake",
+        "config",
+        "dockerfile",
+        "lex",
+        "linker_script",
+        "meson",
+        "packer",
+        "protobuf",
+        "sql",
+        "starlark",
+        "terraform",
+        "text",
+        "xml",
+        "yacc",
+        *SOURCE_LANGUAGES,
+    }
 
 
 def classification_text(classified: JsonObject, key: str) -> str:
@@ -246,6 +426,7 @@ def make_snapshot(root: Path, repo: str, collection: str) -> Snapshot:
     repo_root = root / repo
     commit = run_git_required(repo_root, ["rev-parse", "HEAD"])
     base_tree_sha = run_git_required(repo_root, ["rev-parse", f"{commit}^{{tree}}"])
+    commit_time = run_git_required(repo_root, ["log", "-1", "--format=%cI", commit])
     dirty_fingerprint = git_dirty_fingerprint(repo_root)
     tree_sha = base_tree_sha
     if dirty_fingerprint:
@@ -265,6 +446,7 @@ def make_snapshot(root: Path, repo: str, collection: str) -> Snapshot:
             "profile_name": profile_context.active_profile.name,
             "profile_version": profile_context.active_profile.version,
             "base_tree_sha": base_tree_sha,
+            "commit_time": commit_time,
             "dirty_fingerprint": dirty_fingerprint,
         },
     )
@@ -277,16 +459,18 @@ def discover_files(root: Path, snapshot: Snapshot, max_file_bytes: int) -> list[
         abs_path = repo_root / rel_path
         if not abs_path.is_file():
             continue
-        language = profile_context.active_profile.language_for_path(rel_path) or language_for(rel_path)
         reason, data, size_bytes, read_ok = inspect_inventory_file(abs_path, max_file_bytes)
+        language = language_for_read_file(rel_path, data, read_ok=read_ok)
         if reason is None and not (
             should_parse_text(rel_path, language, None)
             or profile_context.active_profile.should_parse_text(rel_path, language, None)
         ):
             reason = "unsupported_file_type"
+        text = data.decode("utf-8", errors="replace") if read_ok and reason is None else None
         classified = profile_context.active_profile.classify_file(rel_path, language, classify_file(rel_path, language))
         metadata = {
             "path_parts": rel_path.split("/")[:8],
+            **language_metadata_for_file(rel_path, language, text),
             **profile_context.active_profile.file_metadata(rel_path, language, classified),
         }
         files.append(

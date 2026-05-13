@@ -232,14 +232,19 @@ def run_ingest_checks(fixture_dir: Path, env: dict[str, str]) -> None:
 
 
 def run_mcp_checks(fixture_dir: Path, env: dict[str, str]) -> tuple[int, int]:
-    status_proc = run([sys.executable, "-m", "project_code_intelligence.cli", "mcp-smoke"], cwd=fixture_dir, env=env)
-    status = parse_mcp_tool_response(status_proc.stdout, "code_intel_status")
+    repo_key = fixture_dir.name
+    status = call_mcp_tool("code_intel_status", {"repo": repo_key}, cwd=fixture_dir, env=env)
     if status.get("schema_present") is not True:
         fail("MCP status did not report an initialized schema")
     snapshots = status.get("snapshots")
     if not isinstance(snapshots, list) or not snapshots:
         fail("MCP status did not report the smoke snapshot")
-    search = call_mcp_tool("search_code_intel_text", {"query": "Greeter", "limit": 5}, cwd=fixture_dir, env=env)
+    search = call_mcp_tool(
+        "search_code_intel_text",
+        {"repo": repo_key, "query": "Greeter", "limit": 5},
+        cwd=fixture_dir,
+        env=env,
+    )
     search_results = search.get("results")
     if not isinstance(search_results, list):
         fail("MCP text search did not return the fixture symbol")

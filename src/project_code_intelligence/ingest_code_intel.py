@@ -8,6 +8,7 @@ import threading
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -37,6 +38,7 @@ from project_code_intelligence.models import (
     RepoIngest,
     SarifIngest,
     Snapshot,
+    StaticRun,
 )
 from project_code_intelligence.parsers import parse_file
 from project_code_intelligence.profile_context import set_active_profile
@@ -53,6 +55,7 @@ from project_code_intelligence.sarif import (
     explicit_sarif_patterns,
     ingest_sarif,
     relative_to_or_none,
+    repo_for_sarif_file,
 )
 from project_code_intelligence.storage import (
     RecordInsertContext,
@@ -628,6 +631,7 @@ def print_embed_only_report(plan: IngestPlan, snapshot_ids: list[int], embedded_
     report: JsonObject = {
         "repos": plan.repos,
         "collection": plan.collection,
+        "database": config.DatabaseSettings.from_env().display_target(),
         "snapshot_ids": snapshot_ids,
         "mode": "embed-only",
         "profile": profile_context.active_profile.name,
@@ -761,6 +765,8 @@ def scan_sarif(plan: IngestPlan, ingests: list[RepoIngest]) -> SarifIngest:
     )
     runtime_state.active_metrics.add_phase_done(len(plan.sarif_files))
     merge_sarif_into_ingests(plan, ingests, sarif_ingest)
+    sarif_ingest.warnings.extend(sarif_freshness_warnings(plan, ingests, sarif_ingest))
+    attach_sarif_warnings_to_runs(sarif_ingest)
     progress_event(
         "code_intel_sarif_parsed",
         files=len(plan.sarif_files),
@@ -768,8 +774,129 @@ def scan_sarif(plan: IngestPlan, ingests: list[RepoIngest]) -> SarifIngest:
         findings=sum(len(run.findings) for run in sarif_ingest.runs),
         records=sum(len(records) for records in sarif_ingest.records_by_repo.values()),
         parser_failures=len(sarif_ingest.failures),
+        warnings=len(sarif_ingest.warnings),
     )
     return sarif_ingest
+
+
+def parse_sarif_warning_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    with suppress(ValueError):
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return None
+
+
+def snapshot_commit_datetime(snapshot: Snapshot) -> datetime | None:
+    return parse_sarif_warning_datetime(snapshot.metadata.get("commit_time"))
+
+
+def sarif_warning_path(plan: IngestPlan, path: Path) -> str:
+    return relative_to_or_none(path, plan.root) or str(path)
+
+
+def warning_for_sarif_mtime(plan: IngestPlan, snapshot_by_repo: dict[str, Snapshot], path: Path) -> JsonObject | None:
+    repo = repo_for_sarif_file(plan.root, plan.repos, path)
+    if not repo:
+        return None
+    snapshot = snapshot_by_repo.get(repo)
+    if snapshot is None:
+        return None
+    commit_time = snapshot_commit_datetime(snapshot)
+    if commit_time is None:
+        return None
+    with suppress(OSError):
+        sarif_mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        if sarif_mtime < commit_time:
+            sarif_path = sarif_warning_path(plan, path)
+            return {
+                "severity": "note",
+                "reason": "sarif_older_than_snapshot_commit",
+                "sarif_path": sarif_path,
+                "repo": repo,
+                "sarif_mtime": sarif_mtime.isoformat(),
+                "snapshot_commit_time": commit_time.isoformat(),
+                "snapshot_commit": snapshot.commit_sha,
+                "message": (
+                    f"{sarif_path} is older than the indexed {repo} commit; "
+                    "findings may still be useful, but freshness could not be verified."
+                ),
+            }
+    return None
+
+
+def sarif_provenance_revision_ids(run_metadata: JsonObject) -> list[str]:
+    provenance = run_metadata.get("versionControlProvenance")
+    if not isinstance(provenance, list):
+        return []
+    revisions: list[str] = []
+    for item in provenance:
+        if isinstance(item, dict):
+            revision = item.get("revisionId")
+            if isinstance(revision, str) and revision:
+                revisions.append(revision)
+    return sorted(set(revisions))
+
+
+def commit_matches_provenance(snapshot_commit: str, sarif_revision: str) -> bool:
+    return (
+        snapshot_commit == sarif_revision
+        or snapshot_commit.startswith(sarif_revision)
+        or sarif_revision.startswith(snapshot_commit)
+    )
+
+
+def warning_for_sarif_provenance(run: StaticRun, snapshot_by_repo: dict[str, Snapshot]) -> JsonObject | None:
+    snapshot = snapshot_by_repo.get(run.repo)
+    if snapshot is None:
+        return None
+    revisions = sarif_provenance_revision_ids(run.metadata)
+    mismatches = [revision for revision in revisions if not commit_matches_provenance(snapshot.commit_sha, revision)]
+    if not mismatches:
+        return None
+    return {
+        "severity": "warn",
+        "reason": "sarif_provenance_commit_mismatch",
+        "sarif_path": run.sarif_path,
+        "repo": run.repo,
+        "sarif_revision_ids": mismatches,
+        "snapshot_commit": snapshot.commit_sha,
+        "message": f"{run.sarif_path} was generated for a different {run.repo} revision than the indexed snapshot.",
+    }
+
+
+def sarif_freshness_warnings(
+    plan: IngestPlan,
+    ingests: list[RepoIngest],
+    sarif_ingest: SarifIngest,
+) -> list[JsonObject]:
+    snapshot_by_repo = {ingest.snapshot.repo: ingest.snapshot for ingest in ingests}
+    warnings: list[JsonObject] = []
+    for path in plan.sarif_files:
+        warning = warning_for_sarif_mtime(plan, snapshot_by_repo, path)
+        if warning is not None:
+            warnings.append(warning)
+    for run in sarif_ingest.runs:
+        warning = warning_for_sarif_provenance(run, snapshot_by_repo)
+        if warning is not None:
+            warnings.append(warning)
+    return warnings
+
+
+def attach_sarif_warnings_to_runs(sarif_ingest: SarifIngest) -> None:
+    warnings_by_path: dict[str, list[JsonObject]] = {}
+    for warning in sarif_ingest.warnings:
+        path = warning.get("sarif_path")
+        if isinstance(path, str):
+            warnings_by_path.setdefault(path, []).append(warning)
+    for run in sarif_ingest.runs:
+        warnings = warnings_by_path.get(run.sarif_path)
+        if warnings:
+            run.metadata["code_intel_warnings"] = warnings
 
 
 def scan_plan(plan: IngestPlan) -> tuple[list[RepoIngest], SarifIngest]:
@@ -784,7 +911,10 @@ def scan_plan(plan: IngestPlan) -> tuple[list[RepoIngest], SarifIngest]:
 
 def print_dry_run_report(plan: IngestPlan, ingests: list[RepoIngest], sarif_ingest: SarifIngest) -> None:
     report = report_ingests(ingests, embeddings=plan.args.embed)
+    report["database"] = config.DatabaseSettings.from_env().display_target()
     report["sarif_files"] = [relative_to_or_none(path, plan.root) or str(path) for path in plan.sarif_files]
+    report["sarif_file_count"] = len(plan.sarif_files)
+    report["sarif_warnings"] = sarif_ingest.warnings
     report["static_runs"] = len(sarif_ingest.runs)
     report["static_findings"] = sum(len(run.findings) for run in sarif_ingest.runs)
     report["static_rules"] = sum(len(run.rules) for run in sarif_ingest.runs)
@@ -966,10 +1096,16 @@ def embed_after_upload(plan: IngestPlan, snapshot_ids: list[int]) -> int:
         runtime_state.active_metrics.complete_phase("embedding")
 
 
-def print_ingest_result(plan: IngestPlan, summary: DbUploadSummary, embedded_records: int) -> None:
+def print_ingest_result(
+    plan: IngestPlan,
+    summary: DbUploadSummary,
+    embedded_records: int,
+    sarif_ingest: SarifIngest,
+) -> None:
     progress.emit_summary({
         "repos": plan.repos,
         "collection": plan.collection,
+        "database": config.DatabaseSettings.from_env().display_target(),
         "snapshot_ids": summary.snapshot_ids,
         "files": summary.inserted_files,
         "records": summary.inserted_records,
@@ -983,6 +1119,9 @@ def print_ingest_result(plan: IngestPlan, summary: DbUploadSummary, embedded_rec
         "mode": plan.mode,
         "profile": profile_context.active_profile.name,
         "embeddings": plan.args.embed,
+        "sarif_files": [relative_to_or_none(path, plan.root) or str(path) for path in plan.sarif_files],
+        "sarif_file_count": len(plan.sarif_files),
+        "sarif_warnings": sarif_ingest.warnings,
         "embedded_records": embedded_records,
         "embedded_records_post_insert": embedded_records,
         "preembedded_records": summary.preembedded_records,
@@ -1004,6 +1143,12 @@ def resolve_plan_embedding_model(plan: IngestPlan) -> IngestPlan:
 
 
 def run_ingest_plan(plan: IngestPlan) -> int:
+    progress_event(
+        "code_intel_plan",
+        collection=plan.collection,
+        repos=plan.repos,
+        database=config.DatabaseSettings.from_env().display_target(),
+    )
     emit_sarif_discovery(plan)
     configure_ingest_progress(plan)
     plan = resolve_plan_embedding_model(plan)
@@ -1016,7 +1161,7 @@ def run_ingest_plan(plan: IngestPlan) -> int:
         return 0
     summary = upload_ingests(plan, ingests, sarif_ingest)
     embedded_records = embed_after_upload(plan, summary.snapshot_ids)
-    print_ingest_result(plan, summary, embedded_records)
+    print_ingest_result(plan, summary, embedded_records, sarif_ingest)
     return 0
 
 
