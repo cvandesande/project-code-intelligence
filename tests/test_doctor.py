@@ -13,6 +13,7 @@ from project_code_intelligence.doctor import (
     GpuInfo,
     check_embedding_endpoint,
     check_embedding_options,
+    check_gpu_support,
     color_text,
     cpu_suggests_supported_amd_npu,
     format_result,
@@ -112,6 +113,46 @@ class DoctorTests(unittest.TestCase):
         self.assertTrue(cpu_suggests_supported_amd_npu("AMD Ryzen AI 9 HX 370"))
         self.assertTrue(cpu_suggests_supported_amd_npu("AMD Ryzen AI Z2 Extreme"))
         self.assertFalse(cpu_suggests_supported_amd_npu("AMD Ryzen 7 8845HS"))
+
+    def test_nvidia_runtime_warns_with_container_toolkit_link_when_ctk_missing(self) -> None:
+        def which(command: str) -> str | None:
+            return "/usr/bin/nvidia-smi" if command == "nvidia-smi" else None
+
+        with (
+            patch("project_code_intelligence.doctor.hardware.shutil.which", side_effect=which),
+            patch("project_code_intelligence.doctor.hardware.Path.exists", return_value=True),
+            patch("project_code_intelligence.doctor.hardware.docker_has_nvidia_runtime", return_value=(False, None)),
+        ):
+            results = check_gpu_support([GpuInfo(name="NVIDIA L4", vendor="NVIDIA")])
+
+        item = next(result for result in results if result.name == "gpu-runtime-nvidia")
+        self.assertEqual(item.status, "warn")
+        self.assertIn("nvidia-ctk", item.message)
+        self.assertIn("NVIDIA Container Toolkit", item.message)
+        self.assertIn("nvidia-ctk runtime configure", item.detail or "")
+        self.assertIn("https://docs.nvidia.com/datacenter/cloud-native/container-toolkit", item.detail or "")
+
+    def test_nvidia_runtime_warns_when_docker_lacks_nvidia_runtime(self) -> None:
+        def which(command: str) -> str | None:
+            if command in {"nvidia-smi", "nvidia-ctk"}:
+                return f"/usr/bin/{command}"
+            return None
+
+        with (
+            patch("project_code_intelligence.doctor.hardware.shutil.which", side_effect=which),
+            patch("project_code_intelligence.doctor.hardware.Path.exists", return_value=True),
+            patch(
+                "project_code_intelligence.doctor.hardware.docker_has_nvidia_runtime",
+                return_value=(False, "Docker did not report an nvidia runtime."),
+            ),
+        ):
+            results = check_gpu_support([GpuInfo(name="NVIDIA L4", vendor="NVIDIA")])
+
+        item = next(result for result in results if result.name == "gpu-runtime-nvidia")
+        self.assertEqual(item.status, "warn")
+        self.assertIn("Docker is not configured", item.message)
+        self.assertIn("Docker did not report an nvidia runtime", item.detail or "")
+        self.assertIn("https://docs.nvidia.com/datacenter/cloud-native/container-toolkit", item.detail or "")
 
     def test_color_output_can_be_forced_or_disabled(self) -> None:
         self.assertTrue(should_use_color("always", stdout_isatty=False, env={}))
