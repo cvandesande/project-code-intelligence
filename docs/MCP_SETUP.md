@@ -10,21 +10,61 @@ embedding servers. Point your MCP client at the installed `pci-mcp` command.
 
 Use one database for one or more indexed repositories. Use:
 
-- `PROJECT_CODE_INTELLIGENCE_COLLECTION` for a workspace or project family.
+- a collection for a workspace or project family.
 - MCP tool `repo` filters for individual repositories inside that collection.
 
-For a single repository, collection can usually stay unset. For a workspace with
-related repositories, set a collection during indexing and in the MCP server:
+For normal use, you do not need to set a collection environment variable.
+`pci-index` infers it from the paths you pass:
+
+- one repo path: collection is the repo directory name
+- multiple repo paths: collection is the common parent directory name
+
+For a workspace with related repositories:
 
 ```sh
 cd /path/to/workspace
-PROJECT_CODE_INTELLIGENCE_COLLECTION=workspace-name pci-index repo-a repo-b repo-c
+pci-index repo-a repo-b repo-c
 ```
 
-The MCP server can then be hard-scoped to `workspace-name`, while agents use
-repo keys such as `repo-a` or `repo-b` in tool calls. Do not use absolute
-filesystem paths as repo filters. Run `code_intel_status` without a repo filter
-to see available collection and repo keys.
+The MCP server also infers its collection from its configured working directory
+when `PROJECT_CODE_INTELLIGENCE_COLLECTION` is unset. Set the MCP `cwd` to the
+same repo or workspace directory you used when indexing. Agents then use repo
+keys such as `repo-a` or `repo-b` in tool calls. Do not use absolute filesystem
+paths as repo filters. Run `code_intel_status` without a repo filter to see
+available collection and repo keys.
+
+Use explicit collection configuration only when you want a name different from
+the inferred directory name:
+
+```sh
+pci-index --collection workspace-name repo-a repo-b repo-c
+```
+
+## Security Model
+
+Collections are an organization and safety feature, not a database security
+boundary. The MCP server scopes normal tool calls to the configured or inferred
+collection, which helps avoid accidental cross-repo results when several repos
+share one database.
+
+Do not rely on collection filters as the only protection between repositories
+with different trust or sensitivity levels. If the same database credentials can
+read every collection, then direct database access, a misconfigured MCP `cwd`, a
+collection override, or a server bug could expose data from another collection.
+
+Recommended deployment by sensitivity:
+
+- Personal workstation with trusted assistants: one database with multiple
+  collections is usually reasonable.
+- Unrelated private repos with different sensitivity: prefer separate databases
+  or separate database users.
+- Team, shared, or untrusted-agent access: use stronger isolation such as
+  separate databases, scoped database roles, or PostgreSQL row-level security.
+
+Embeddings, SARIF findings, paths, symbols, and snippets can all reveal source
+details. Treat database dumps and vector indexes as source-derived private data.
+Remote embedding endpoints also receive source-derived text; use local
+embeddings unless sending that text to the provider is acceptable.
 
 ## Database Configuration
 
@@ -56,6 +96,7 @@ configuration.
 ```toml
 [mcp_servers.project-code-intelligence]
 command = "/home/you/.local/bin/pci-mcp"
+cwd = "/home/you/src/project-code-intelligence"
 startup_timeout_sec = 20
 tool_timeout_sec = 120
 
@@ -63,7 +104,6 @@ tool_timeout_sec = 120
 PROJECT_CODE_INTELLIGENCE_DATABASE_URL = "postgresql://host:5432/database?sslmode=prefer"
 PROJECT_CODE_INTELLIGENCE_DATABASE_USER = "user"
 PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD = "password"
-PROJECT_CODE_INTELLIGENCE_COLLECTION = "workspace-name"
 ```
 
 For a single-repo local setup using the Compose database, the environment block
@@ -85,11 +125,11 @@ credentials in local/user configuration or environment variables.
       "type": "stdio",
       "command": "/home/you/.local/bin/pci-mcp",
       "args": [],
+      "cwd": "/home/you/src/project-code-intelligence",
       "env": {
         "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://host:5432/database?sslmode=prefer",
         "PROJECT_CODE_INTELLIGENCE_DATABASE_USER": "user",
-        "PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD": "password",
-        "PROJECT_CODE_INTELLIGENCE_COLLECTION": "workspace-name"
+        "PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD": "password"
       }
     }
   }
@@ -108,11 +148,11 @@ OpenCode config is JSON or JSONC and defines MCP servers under `mcp`.
       "type": "local",
       "command": ["/home/you/.local/bin/pci-mcp"],
       "enabled": true,
+      "cwd": "/home/you/src/project-code-intelligence",
       "environment": {
         "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://host:5432/database?sslmode=prefer",
         "PROJECT_CODE_INTELLIGENCE_DATABASE_USER": "user",
-        "PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD": "password",
-        "PROJECT_CODE_INTELLIGENCE_COLLECTION": "workspace-name"
+        "PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD": "password"
       }
     }
   }

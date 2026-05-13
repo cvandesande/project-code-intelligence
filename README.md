@@ -87,17 +87,24 @@ pci-index /path/to/repo-to-index
 pci-index /path/to/repo-a /path/to/repo-b
 ```
 
-For a workspace with related repositories, use one collection for the workspace
-and stable repo names under that collection:
+`pci-index` infers a collection name for you. A single repo path uses that repo
+directory name. Multiple repo paths use their common parent directory name. For
+a workspace with related repositories, run from the workspace and pass the repo
+directories:
 
 ```sh
 cd /path/to/workspace
-PROJECT_CODE_INTELLIGENCE_COLLECTION=workspace-name pci-index openwrt ask-cmm fci
+pci-index openwrt ask-cmm fci
 ```
 
 MCP repo filters then use those repo names, such as `openwrt`, not absolute
 filesystem paths. Run `code_intel_status` without a repo filter to see the
-available collection and repo keys.
+available collection and repo keys. Use `--collection` only when you want a
+name different from the inferred workspace name:
+
+```sh
+pci-index --collection workspace-name openwrt ask-cmm fci
+```
 
 For advanced ingest options, put them after `--`:
 
@@ -121,17 +128,25 @@ For that mode, choose the Postgres-only command from `pci-doctor` and verify
 that the database is reachable. `pci-doctor` may still warn about the missing
 embedding endpoint, which is expected for a deliberate text-only run.
 
-To wipe and rebuild the code-intelligence tables in the configured database:
+To delete indexed data for one repo and rebuild it:
 
 ```sh
-pci-index --reset
+pci-index --reset .
 ```
 
-This drops and recreates this project's `project_code_intel_*` tables. It does
-not drop the database or unrelated tables. The command prints the resolved
-database target, asks for confirmation before deleting anything, and exits
-without scanning. Run `pci-index .` afterwards to rebuild the index. For
-non-interactive automation, add `--i-know-this-deletes-code-intel-db`.
+This deletes snapshots, records, edges, embeddings, and findings for the
+selected collection and repo key only. Other repos and the schema are untouched.
+The command prints the resolved database target, asks for confirmation before
+deleting anything, and exits without scanning. Run `pci-index .` afterwards to
+rebuild the index.
+
+To delete all indexed data in the configured database while keeping the schema:
+
+```sh
+pci-index --reset-all
+```
+
+For non-interactive automation, add `--i-know-this-deletes-code-intel-db`.
 
 In a brand-new local repository, make an initial commit before scanning so the
 indexer has a Git `HEAD` snapshot.
@@ -343,6 +358,11 @@ symbols, findings, metadata, and embeddings derived from source text.
 Remote embedding endpoints receive source-derived text. Use local embeddings for
 private code unless you have explicitly accepted the risk of sending that text to
 a remote provider.
+
+Collections help organize multiple repos in one database and prevent accidental
+cross-repo MCP results, but they are not a security boundary. Use separate
+databases or database users when repos need stronger isolation. See
+[docs/MCP_SETUP.md](docs/MCP_SETUP.md#security-model).
 
 ## License
 
