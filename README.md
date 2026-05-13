@@ -1,25 +1,53 @@
 # Project Code Intelligence
 
-## Hardware-Accelerated Codebase Mapping
+Local codebase mapping and semantic retrieval for coding agents.
 
-`project-code-intelligence` indexes a Git repository into Postgres/pgvector and
-serves the result through a small stdio MCP server.
+`project-code-intelligence` indexes one or more Git repositories into
+Postgres/pgvector and exposes the result through a small stdio MCP server.
 
-The goal is higher-quality agent results: reuse a local code index instead of
-re-reading the same repository over and over, reducing token and embedding cost
-while making codebase navigation faster.
-
-It can store:
-
-- repository snapshots and file inventory
-- functions, classes, symbols, docs, config, and other code records
-- candidate relationships between records
-- SARIF/static-analysis findings and code-flow steps
-- semantic embeddings for similarity search
+The goal is higher-quality agent results: reuse a local code-intelligence index
+instead of repeatedly asking an assistant to re-read the same repository. The
+index combines semantic search with a structured map of the codebase, so an
+assistant can retrieve relevant context, fetch exact records, inspect metadata,
+follow likely relationships, and search static-analysis findings.
 
 The package is generic by default. Project-specific behavior belongs in code
 profiles, with [`example.py`](src/project_code_intelligence/code_profiles/example.py)
 as the public example.
+
+## Why This Exists
+
+Plain codebase RAG often means splitting files into text chunks, embedding those
+chunks, and retrieving similar passages when an assistant needs context. That is
+useful, but source code has structure that plain text chunks do not capture well.
+
+Code has files, symbols, functions, classes, configuration, documentation,
+generated artifacts, tests, static-analysis findings, and relationships between
+those things.
+
+`project-code-intelligence` stores that structure directly.
+
+In short:
+
+- embeddings help answer: “what looks relevant?”
+- lexical search helps answer: “where does this exact word, path, symbol, or rule appear?”
+- the code map helps answer: “what is it, where is it, and how does it relate to the rest of the project?”
+
+## What the Index Stores
+
+The index can store:
+
+- repository snapshots and file inventory
+- source, documentation, build, and configuration files
+- code records such as chunks, functions, classes, symbols, docs, package definitions, and config entries
+- candidate relationships between records and symbols
+- SARIF/static-analysis runs, rules, findings, locations, and code-flow steps
+- optional semantic embeddings for similarity search
+- metadata such as language, file role, content class, source path, line ranges, parser details, rule IDs, and confidence hints
+
+This makes the project more than a bag of embedded chunks. The MCP server can
+search semantically, search lexically, fetch individual records, follow
+candidate relationships, and inspect static-analysis results.
 
 ## Quick Start
 
@@ -252,39 +280,6 @@ docker compose --profile nvidia up -d --build llama-cuda
 When unsure, use the commands from `pci-doctor`. The `cpu` profile is the
 portable local fallback.
 
-## Docker Lifecycle
-
-Use the exact service commands suggested by `pci-doctor`. Start `pgvector` only
-when you want the local database; omit it when
-`PROJECT_CODE_INTELLIGENCE_DATABASE_URL` points at an external database. Use
-`stop` when you want to pause containers but keep them around:
-
-```sh
-docker compose stop
-```
-
-Use `down` for normal cleanup. This removes containers and the Compose network
-while keeping the local database and downloaded model caches:
-
-```sh
-docker compose down
-```
-
-Use `down -v` only when you intentionally want a fresh database and fresh
-Docker-managed model caches:
-
-```sh
-docker compose down -v
-```
-
-That deletes the named volumes for Postgres, FastEmbed, Lemonade, and ROCm
-runtime caches. It does not delete the bind-mounted `./models` directory used by
-the GPU profiles.
-
-On Apple Silicon, Docker Compose is still useful for Postgres/pgvector. Local
-Apple embeddings run on the macOS host, not inside Docker. See Supported
-Hardware for the available acceleration paths.
-
 ## What the MCP Server Provides
 
 The server exposes tools for:
@@ -344,6 +339,10 @@ Do not publish database dumps, restore artifacts, SARIF output, embedding
 caches, model files, vector indexes, local MCP configs, or generated data from
 private repositories. These can contain source snippets, internal paths,
 symbols, findings, metadata, and embeddings derived from source text.
+
+Remote embedding endpoints receive source-derived text. Use local embeddings for
+private code unless you have explicitly accepted the risk of sending that text to
+a remote provider.
 
 ## License
 
