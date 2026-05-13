@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import sys
 import time
@@ -33,7 +34,7 @@ else:
         return method
 
 
-from project_code_intelligence import config
+from project_code_intelligence import config, console_ui
 from project_code_intelligence.embedding.coreml_compute_plan import (
     format_compute_plan,
     print_compute_plan,
@@ -197,23 +198,88 @@ def coreml_request_max_bytes() -> int:
     return config.env_int("PROJECT_CODE_INTELLIGENCE_COREML_MAX_REQUEST_BYTES", 4 * 1024 * 1024, minimum=1024)
 
 
+# Raw ANSI codes used by `_ProgressIndicator` and the startup status lines.
+# We can't drive Rich's Live UI here because the heavy Core ML work holds the
+# GIL and would freeze a spinner thread; we keep the existing forked-child
+# mechanism and just match the look/glyphs of `console_ui` so startup feels
+# visually consistent with the rest of the CLI.
+_ANSI_RESET = b"\x1b[0m"
+_ANSI_DIM = b"\x1b[2m"
+_ANSI_CYAN = b"\x1b[36m"
+_ANSI_GREEN = b"\x1b[32m"
+_ANSI_RED = b"\x1b[31m"
+_ANSI_CLEAR_TO_EOL = b"\x1b[K"
+_GLYPH_RUNNING = console_ui.STATUS_GLYPHS["running"]
+_GLYPH_OK = console_ui.STATUS_GLYPHS["ok"]
+_GLYPH_FAIL = console_ui.STATUS_GLYPHS["fail"]
+
+
+def _format_status_line(glyph: str, ansi_color: bytes, text: str) -> str:
+    """Render a one-line status message with a leading glyph, styled when stderr is a TTY."""
+    if not console_ui.should_emit_pretty(sys.stderr):
+        return f"{text}\n"
+    color = ansi_color.decode()
+    reset = _ANSI_RESET.decode()
+    return f"{color}{glyph}{reset} {text}\n"
+
+
+def _format_dim_line(text: str) -> str:
+    if not console_ui.should_emit_pretty(sys.stderr):
+        return f"{text}\n"
+    return f"{_ANSI_DIM.decode()}{text}{_ANSI_RESET.decode()}\n"
+
+
 class _ProgressIndicator:
-    """Context manager that prints dots from a forked child process.
+    """Context manager that prints progress feedback from a forked child process.
 
     A background *thread* cannot reliably print during heavy C-extension work
     (e.g. Core ML model compilation) because the GIL blocks thread scheduling.
-    A forked child process is independent and prints dots on time regardless of
-    GIL contention in the parent.
+    A forked child process is independent of the parent's GIL state and can
+    tick on time.
 
     Stderr is temporarily redirected to ``/dev/null`` in the parent so library
-    warnings do not break the progress line.  The child writes to a saved copy
-    of the original stderr fd.
+    warnings do not break the progress line. The child writes to a saved copy
+    of the original stderr fd, styled to match the rest of the CLI when
+    stderr is a TTY.
     """
 
     def __init__(self, label: str) -> None:
         self._label = label
         self._saved_stderr: int | None = None
         self._child_pid: int | None = None
+        self._pretty = console_ui.should_emit_pretty(sys.stderr)
+
+    def _line_intro(self) -> bytes:
+        # Running glyph + label, followed by a space and the first dim dot.
+        if self._pretty:
+            return (
+                b"  "
+                + _ANSI_CYAN
+                + _GLYPH_RUNNING.encode()
+                + _ANSI_RESET
+                + f" {self._label} ".encode()
+                + _ANSI_DIM
+                + b"."
+            )
+        return f"  {self._label} .".encode()
+
+    def _tick(self) -> bytes:
+        return _ANSI_DIM + b"." + _ANSI_RESET if self._pretty else b"."
+
+    def _completion(self) -> bytes:
+        # Overwrite the whole line with the success glyph + label, then newline.
+        if self._pretty:
+            return (
+                b"\r  "
+                + _ANSI_GREEN
+                + _GLYPH_OK.encode()
+                + _ANSI_RESET
+                + f" {self._label}".encode()
+                + _ANSI_CLEAR_TO_EOL
+                + b"\n"
+            )
+        # In plain mode, the dots are real feedback — close them with "done".
+        return b". done\n"
 
     def __enter__(self) -> _ProgressIndicator:
         # Duplicate the real stderr before redirecting fd 2 to /dev/null.
@@ -223,14 +289,16 @@ class _ProgressIndicator:
         _ = os.dup2(devnull_fd, 2)
         os.close(devnull_fd)
 
+        intro = self._line_intro()
+        tick = self._tick()
         pid = os.fork()
         if pid == 0:
-            # Child: print dots until killed.
-            _ = os.write(saved_fd, f"  {self._label} .".encode())
+            # Child: write opener + ticks until killed.
+            _ = os.write(saved_fd, intro)
             try:
                 while True:
                     time.sleep(0.5)
-                    _ = os.write(saved_fd, b".")
+                    _ = os.write(saved_fd, tick)
             except (KeyboardInterrupt, SystemExit):
                 pass
             os._exit(0)  # child must not run parent cleanup
@@ -244,9 +312,9 @@ class _ProgressIndicator:
             os.kill(self._child_pid, signal.SIGTERM)
             _ = os.waitpid(self._child_pid, 0)
             self._child_pid = None
-        # Write the "done" message and restore stderr.
+        # Write the completion line and restore stderr.
         if self._saved_stderr is not None:
-            _ = os.write(self._saved_stderr, b". done\n")
+            _ = os.write(self._saved_stderr, self._completion())
             _ = os.dup2(self._saved_stderr, 2)
             os.close(self._saved_stderr)
             self._saved_stderr = None
@@ -360,8 +428,6 @@ def _materialize_mlpackage(source: Path, *, cache_dir: str | None) -> str:
     coremltools' compiler cannot follow. Copying the files into a
     conventionally-named directory resolves this.
     """
-    import shutil  # noqa: PLC0415
-
     dest_parent = Path(cache_dir) if cache_dir else source.parent
     dest = dest_parent / (source.name + ".mlpackage")
     if dest.exists() and _is_mlpackage_dir(dest):
@@ -550,8 +616,10 @@ def serve(*, foreground: bool = False) -> int:
     # Check for an already-running instance.
     existing_pid = read_pid_file()
     if existing_pid is not None and is_pid_alive(existing_pid):
-        _ = sys.stderr.write(f"Core ML server is already running (PID {existing_pid}).\n")
-        _ = sys.stderr.write("Stop it first with: pci-doctor --stop\n")
+        _ = sys.stderr.write(
+            _format_status_line(_GLYPH_FAIL, _ANSI_RED, f"Core ML server is already running (PID {existing_pid}).")
+        )
+        _ = sys.stderr.write(_format_dim_line("Stop it first with: pci-doctor --stop"))
         return 1
 
     ready_write_fd: int | None = None
@@ -563,7 +631,13 @@ def serve(*, foreground: bool = False) -> int:
     # Load the model in the process that will actually serve requests.
     # Core ML's Objective-C/Metal/ANE runtime handles do not survive fork().
     model_name = coreml_model_name()
-    _ = sys.stderr.write(f"Loading Core ML model {model_name} with compute_units=ALL (ANE + GPU + CPU)...\n")
+    _ = sys.stderr.write(
+        _format_status_line(
+            _GLYPH_RUNNING,
+            _ANSI_CYAN,
+            f"Loading Core ML model {model_name} (compute_units=ALL, ANE + GPU + CPU)",
+        )
+    )
     _ = sys.stderr.flush()
     embedder = load_coreml_embedder(model_name)
 
@@ -581,14 +655,16 @@ def serve(*, foreground: bool = False) -> int:
     port = config.env_int("PROJECT_CODE_INTELLIGENCE_COREML_PORT", DEFAULT_COREML_PORT, minimum=1)
     server = CoreMLHTTPServer((host, port), CoreMLHandler, embedder=embedder)
     max_info = f", max_length={embedder.max_length}" if embedder.max_length else ""
-    _ = sys.stderr.write(f"Core ML embedding server listening on {host}:{port} with model {model_name}{max_info}\n")
+    _ = sys.stderr.write(
+        _format_status_line(_GLYPH_OK, _ANSI_GREEN, f"Listening on {host}:{port} (model {model_name}{max_info})")
+    )
 
-    if not foreground:
-        _ = sys.stderr.write(f"Daemonized as PID {os.getpid()}. Stop with: pci-doctor --stop\n")
+    if ready_write_fd is not None:
+        _ = sys.stderr.write(_format_dim_line(f"Daemonized as PID {os.getpid()}. Stop with: pci-doctor --stop"))
         _ = sys.stderr.flush()
         # Signal the parent that loading is done so it can return the shell.
-        _ = os.write(ready_write_fd, b"\n")  # type: ignore[arg-type]
-        os.close(ready_write_fd)  # type: ignore[arg-type]
+        _ = os.write(ready_write_fd, b"\n")
+        os.close(ready_write_fd)
         # Now redirect stderr to /dev/null for the long-running server.
         _silence_stderr()
     else:

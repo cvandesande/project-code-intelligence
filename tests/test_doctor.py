@@ -176,41 +176,46 @@ class DoctorTests(unittest.TestCase):
         )
 
     def test_format_summary_is_concise_and_keeps_verbose_details_out(self) -> None:
-        output = format_summary(
-            [
-                CheckResult("platform", "ok", "Python 3.13 on Linux"),
-                CheckResult("gpu-0", "ok", "AMD GPU: shared/unified=64.0 GiB", "card=card0; driver=amdgpu"),
-                CheckResult("gpu-runtime-amd", "ok", "AMD GPU runtime devices are accessible."),
-                CheckResult("npu", "ok", "AMD NPU device detected: /dev/accel/accel0"),
-                CheckResult(
-                    "database",
-                    "ok",
-                    "connected to codeintel as codeintel at "
-                    "postgresql://codeintel@127.0.0.1:5433/codeintel sslmode=prefer",
-                    "PostgreSQL 17",
-                ),
-                CheckResult(
-                    "embedding-config",
-                    "ok",
-                    "endpoint=http://127.0.0.1:18081/v1/embeddings model=local",
-                ),
-                CheckResult(
-                    "embedding-endpoint",
-                    "ok",
-                    "response model=embed-gemma-300m-FLM; dimensions=768; latency=0.01s",
-                ),
-                CheckResult("option-cpu", "ok", "CPU embeddings: FastEmbed default demo."),
-                CheckResult("option-npu", "ok", "AMD NPU embeddings: Lemonade FLM default demo."),
-                CheckResult("option-gpu-amd", "ok", "AMD GPU embeddings: llama.cpp ROCm default demo.gguf."),
-            ],
-            color=False,
-        )
+        with patch("project_code_intelligence.process.container_engine_name", return_value="docker"):
+            output = format_summary(
+                [
+                    CheckResult("platform", "ok", "Python 3.13 on Linux"),
+                    CheckResult("gpu-0", "ok", "AMD GPU: shared/unified=64.0 GiB", "card=card0; driver=amdgpu"),
+                    CheckResult("gpu-runtime-amd", "ok", "AMD GPU runtime devices are accessible."),
+                    CheckResult("npu", "ok", "AMD NPU device detected: /dev/accel/accel0"),
+                    CheckResult(
+                        "database",
+                        "ok",
+                        "connected to codeintel as codeintel at "
+                        "postgresql://codeintel@127.0.0.1:5433/codeintel sslmode=prefer",
+                        "PostgreSQL 17",
+                    ),
+                    CheckResult(
+                        "embedding-config",
+                        "ok",
+                        "endpoint=http://127.0.0.1:18081/v1/embeddings model=local",
+                    ),
+                    CheckResult(
+                        "embedding-endpoint",
+                        "ok",
+                        "response model=embed-gemma-300m-FLM; dimensions=768; latency=0.01s",
+                    ),
+                    CheckResult("option-cpu", "ok", "CPU embeddings: FastEmbed default demo."),
+                    CheckResult("option-npu", "ok", "AMD NPU embeddings: Lemonade FLM default demo."),
+                    CheckResult("option-gpu-amd", "ok", "AMD GPU embeddings: llama.cpp ROCm default demo.gguf."),
+                ],
+                color=False,
+            )
 
-        self.assertIn("Status: ok ready", output)
-        self.assertIn("Database: ok connected to codeintel as codeintel at postgresql://codeintel@", output)
+        self.assertIn("✓ READY", output)
+        self.assertIn("Database", output)
+        self.assertIn("codeintel @ 127.0.0.1:5433", output)
+        self.assertNotIn("postgresql://codeintel@", output)
         self.assertNotIn("codeintel:codeintel", output)
-        self.assertIn("Active embedding path", output)
-        self.assertIn("NPU: ok response model=embed-gemma-300m-FLM", output)
+        self.assertIn("Active path", output)
+        self.assertIn("NPU", output)
+        self.assertIn("http://127.0.0.1:18081/v1/embeddings", output)
+        self.assertNotIn("response model=embed-gemma-300m-FLM; dimensions=", output)
         self.assertNotIn("Available embedding paths", output)
         self.assertIn("Switch embedding runtime", output)
         self.assertIn("cpu: docker compose --profile cpu up -d --build fastembed", output)
@@ -240,27 +245,31 @@ class DoctorTests(unittest.TestCase):
             color=False,
         )
 
-        self.assertIn("Active embedding path", output)
-        self.assertIn("Remote: ok response model=text-embedding-3-small", output)
+        self.assertIn("Active path", output)
+        self.assertIn("Remote", output)
+        self.assertIn("https://api.openai.com/v1/embeddings", output)
         self.assertNotIn("Available embedding paths", output)
         self.assertNotIn("remote: no embedding container needed", output)
 
     def test_format_summary_colorizes_headings_and_startup_profiles(self) -> None:
-        output = format_summary(
-            [
-                CheckResult("platform", "ok", "Python 3.13 on Linux"),
-                CheckResult("gpu", "skip", "No local GPU was detected."),
-                CheckResult("npu", "skip", "No supported local NPU device was detected."),
-                CheckResult("database", "ok", "connected to codeintel as codeintel"),
-                CheckResult("embedding-endpoint", "warn", "no endpoint configured"),
-                CheckResult("option-cpu", "ok", "CPU embeddings: FastEmbed default demo."),
-            ],
-            color=True,
-        )
+        with patch("project_code_intelligence.process.container_engine_name", return_value="docker"):
+            output = format_summary(
+                [
+                    CheckResult("platform", "ok", "Python 3.13 on Linux"),
+                    CheckResult("gpu", "skip", "No local GPU was detected."),
+                    CheckResult("npu", "skip", "No supported local NPU device was detected."),
+                    CheckResult("database", "ok", "connected to codeintel as codeintel"),
+                    CheckResult("embedding-endpoint", "warn", "no endpoint configured"),
+                    CheckResult("option-cpu", "ok", "CPU embeddings: FastEmbed default demo."),
+                ],
+                color=True,
+            )
 
-        self.assertIn(color_text("Detected", "\033[1m", enabled=True), output)
-        self.assertIn(color_text("ok", "\033[32m", enabled=True), output)
-        self.assertIn("To start a local CPU embedding server, run:", output)
+        self.assertIn("\033[1m", output)
+        self.assertIn("\033[32m", output)
+        self.assertIn("System", output)
+        self.assertIn("Start CPU embeddings", output)
+        self.assertIn("docker compose --profile cpu up -d --build fastembed", output)
 
     def test_format_summary_uses_user_facing_issue_labels(self) -> None:
         output = format_summary(
@@ -276,10 +285,12 @@ class DoctorTests(unittest.TestCase):
             color=False,
         )
 
-        self.assertIn("NPU kernel: warn Linux kernel 6.19 is below 7.0", output)
-        self.assertIn("NPU firmware: fail AMD NPU firmware version", output)
-        self.assertNotIn("npu-kernel: warn", output)
-        self.assertNotIn("npu-firmware: fail", output)
+        self.assertIn("NPU kernel", output)
+        self.assertIn("Linux kernel 6.19 is below 7.0", output)
+        self.assertIn("NPU firmware", output)
+        self.assertIn("AMD NPU firmware version", output)
+        self.assertNotIn("npu-kernel", output)
+        self.assertNotIn("npu-firmware", output)
 
 
 class DoctorEndpointTests(unittest.TestCase):
@@ -415,7 +426,8 @@ class DoctorAppleTests(unittest.TestCase):
             color=False,
         )
 
-        self.assertIn("To start a local Apple native embedding server, run: pci-coreml-server", output)
+        self.assertIn("Start Apple native embeddings", output)
+        self.assertIn("pci-coreml-server", output)
         self.assertNotIn("pci-embedding-server", output)
 
     def test_format_summary_shows_apple_metal_startup_command(self) -> None:
@@ -432,7 +444,8 @@ class DoctorAppleTests(unittest.TestCase):
             color=False,
         )
 
-        self.assertIn("To start a local Apple native embedding server, run: pci-embedding-server", output)
+        self.assertIn("Start Apple native embeddings", output)
+        self.assertIn("pci-embedding-server", output)
         self.assertNotIn("pci-coreml-server", output)
 
     def test_coremltools_available_returns_false_when_not_installed(self) -> None:

@@ -14,7 +14,6 @@ from project_code_intelligence.storage.schema import (
     file_signature,
     latest_snapshot_info,
     previous_file_signatures,
-    reset_code_intel_schema,
     row_int,
     schema_migration_versions,
     snapshot_versions_compatible,
@@ -40,7 +39,6 @@ __all__ = [
     "parser_failure_metadata",
     "previous_file_signatures",
     "replace_repos",
-    "reset_code_intel_schema",
     "row_int",
     "schema_migration_versions",
     "snapshot_versions_compatible",
@@ -62,6 +60,18 @@ def replace_repos(conn: db.DbConnection, collection: str, repos: list[str]) -> N
             "DELETE FROM project_code_intel_snapshots WHERE collection = %s AND repo = %s",
             [collection, repo],
         )
+
+
+def delete_repo_data(conn: db.DbConnection, collection: str, repos: list[str]) -> dict[str, int]:
+    """Delete all snapshots and cascading data for the given repos. Returns deleted counts per repo."""
+    deleted: dict[str, int] = {}
+    for repo in repos:
+        rows = conn.execute(
+            "DELETE FROM project_code_intel_snapshots WHERE collection = %s AND repo = %s RETURNING id",
+            [collection, repo],
+        ).fetchall()
+        deleted[repo] = len(rows)
+    return deleted
 
 
 def insert_snapshot(conn: db.DbConnection, snapshot: Snapshot) -> int:

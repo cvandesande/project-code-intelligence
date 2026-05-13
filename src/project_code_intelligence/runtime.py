@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import math
-import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -277,8 +275,9 @@ def reset_active_metrics() -> RuntimeMetrics:
 
 
 def progress_event(event: str, **values: JsonValue) -> None:
-    _ = sys.stderr.write(json.dumps({"event": event, **values}, sort_keys=True) + "\n")
-    _ = sys.stderr.flush()
+    from project_code_intelligence import progress  # noqa: PLC0415 - lazy import avoids a cycle.
+
+    progress.get_emitter().emit(event, dict(values))
 
 
 def format_duration(seconds: float) -> str:

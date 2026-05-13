@@ -156,11 +156,11 @@ class DatabaseSettingsTests(unittest.TestCase):
         settings = DatabaseSettings.from_env({
             "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://example.invalid/db",
             "PROJECT_CODE_INTELLIGENCE_DATABASE_USER": "app",
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD": "secret",
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD": "secret",  # nosec B105
         })
 
         self.assertEqual(settings.dsn_user, "app")
-        self.assertEqual(settings.dsn_password, "secret")
+        self.assertEqual(settings.dsn_password, "secret")  # nosec B105
         self.assertEqual(
             settings.connection_hint(),
             "PROJECT_CODE_INTELLIGENCE_DATABASE_URL=<hidden> "
@@ -205,11 +205,14 @@ class ResetConfirmationTests(unittest.TestCase):
             confirm_reset_code_intel(
                 cli_args(reset_code_intel=True),
                 DatabaseSettings(host="db", port="5432", dbname="codeintel", user="app", password=credential),
+                "default",
+                ["acme-repo"],
             )
 
         output = stderr.getvalue()
         self.assertIn("Database target: postgresql://app@db:5432/codeintel sslmode=prefer", output)
-        self.assertIn("Tables: project_code_intel_*", output)
+        self.assertIn("acme-repo", output)
+        self.assertIn("schema and other repos are untouched", output)
         self.assertNotIn("secret", output)
 
     def test_reset_confirmation_requires_flag_in_noninteractive_mode(self) -> None:
@@ -218,7 +221,7 @@ class ResetConfirmationTests(unittest.TestCase):
             patch("sys.stderr", io.StringIO()),
             self.assertRaises(ValueError),
         ):
-            confirm_reset_code_intel(cli_args(reset_code_intel=True), DatabaseSettings())
+            confirm_reset_code_intel(cli_args(reset_code_intel=True), DatabaseSettings(), "default", ["acme-repo"])
 
 
 class CodeIntelParserTests(unittest.TestCase):

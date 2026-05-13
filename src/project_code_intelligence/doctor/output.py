@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
-import os
+import io
 import re
 import sys
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
+from rich.box import ROUNDED
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+
+from project_code_intelligence import console_ui, process
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+
+    from rich.console import RenderableType
 
     from project_code_intelligence.doctor.types import CheckResult, ColorMode, Status
 
@@ -23,7 +33,17 @@ STATUS_COLORS: dict[Status, str] = {
     "fail": "\033[31m",
     "skip": "\033[36m",
 }
+STATUS_GLYPHS: dict[Status, str] = {"ok": "✓", "warn": "⚠", "fail": "✗", "skip": "○"}
+STATUS_STYLES: dict[Status, str] = {"ok": "green", "warn": "yellow", "fail": "red", "skip": "cyan"}
+STATUS_PILL_TEXT: dict[Status, str] = {
+    "ok": "READY",
+    "warn": "USABLE WITH NOTES",
+    "fail": "NEEDS ATTENTION",
+    "skip": "READY",
+}
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+SUMMARY_WIDTH = 78
+SECONDS_AS_MS_THRESHOLD = 10
 
 
 def status_rank(status: Status) -> int:
@@ -37,15 +57,8 @@ def exit_code(results: Sequence[CheckResult]) -> int:
 def should_use_color(
     mode: ColorMode, *, stdout_isatty: bool | None = None, env: Mapping[str, str] | None = None
 ) -> bool:
-    env = os.environ if env is None else env
-    if mode == "always":
-        return True
-    if mode == "never" or "NO_COLOR" in env:
-        return False
-    if env.get("FORCE_COLOR"):
-        return True
-    is_tty = sys.stdout.isatty() if stdout_isatty is None else stdout_isatty
-    return is_tty and env.get("TERM") != "dumb"
+    force = {"always": True, "never": False, "auto": None}[mode]
+    return console_ui.should_emit_pretty(sys.stdout, force=force, env=env, isatty=stdout_isatty)
 
 
 def color_text(text: str, color: str, *, enabled: bool) -> str:
@@ -83,13 +96,6 @@ def result_map(results: Sequence[CheckResult]) -> dict[str, CheckResult]:
 def matching_results(results: Sequence[CheckResult], pattern: str) -> list[CheckResult]:
     compiled = re.compile(pattern)
     return [item for item in results if compiled.fullmatch(item.name)]
-
-
-def concise_line(label: str, item: CheckResult | None, *, color: bool = False) -> str:
-    formatted_label = label_text(label, color=color)
-    if item is None:
-        return f"  {formatted_label}: {status_text('skip', color=color)} not checked"
-    return f"  {formatted_label}: {status_text(item.status, color=color)} {item.message}"
 
 
 def summary_status(results: Sequence[CheckResult]) -> tuple[Status, str]:
@@ -153,15 +159,6 @@ def check_label(name: str) -> str:
     }.get(name, name)
 
 
-def format_option(item: CheckResult, *, color: bool = False) -> str:
-    label = label_text(option_label(item.name), color=color)
-    return f"  {label}: {status_text(item.status, color=color)} {item.message}"
-
-
-def format_startup_command(profile: str, command: str, *, color: bool = False) -> str:
-    return f"  {profile_text(profile, color=color)}: {command}"
-
-
 def ok_result(by_name: Mapping[str, CheckResult], name: str) -> bool:
     item = by_name.get(name)
     return item is not None and item.status == "ok"
@@ -223,54 +220,17 @@ def active_embedding_profile(by_name: Mapping[str, CheckResult]) -> tuple[str, s
     return "local", "Local endpoint"
 
 
-def active_embedding_lines(by_name: Mapping[str, CheckResult], *, color: bool = False) -> list[str]:
-    endpoint = by_name.get("embedding-endpoint")
-    if endpoint is None or endpoint.status != "ok":
-        return []
-    profile, label = active_embedding_profile(by_name)
-    message = endpoint.message
-    if config_item := by_name.get("embedding-config"):
-        message = f"{message}; {config_item.message}"
-    lines = [
-        "",
-        heading_text("Active embedding path", color=color),
-        f"  {label_text(label, color=color)}: {status_text('ok', color=color)} {message}",
-    ]
-    if profile == "apple" and ok_result(by_name, "apple-coreml"):
-        hint = "Run pci-coreml-server --diagnose to inspect ANE/GPU/CPU scheduling."
-        lines.append(f"  {color_text(hint, ANSI_DIM, enabled=color)}")
-    return lines
-
-
-def summary_option_names(by_name: Mapping[str, CheckResult]) -> list[str]:
-    has_apple = ok_result(by_name, "option-gpu-apple")
-    option_names: list[str] = []
-    # Skip CPU option when a better accelerated path is available.
-    if not has_apple:
-        option_names.append("option-cpu")
-    option_names.extend([
-        "option-npu",
-        "option-gpu-amd",
-        "option-gpu-nvidia",
-        "option-gpu-apple",
-        "option-gpu-large-model",
-    ])
-    if remote_embedding_validated(by_name):
-        option_names.append("option-remote")
-    return option_names
-
-
 def local_embedding_startup_commands(by_name: Mapping[str, CheckResult]) -> list[tuple[str, str]]:
+    engine = process.container_engine_name()
     commands: list[tuple[str, str]] = []
-    # Skip CPU option when a better accelerated path is available.
     if ok_result(by_name, "option-cpu") and not ok_result(by_name, "option-gpu-apple"):
-        commands.append(("cpu", "docker compose --profile cpu up -d --build fastembed"))
+        commands.append(("cpu", f"{engine} compose --profile cpu up -d --build fastembed"))
     if ok_result(by_name, "option-npu"):
-        commands.append(("npu", "docker compose --profile npu up -d lemonade-npu"))
+        commands.append(("npu", f"{engine} compose --profile npu up -d lemonade-npu"))
     if ok_result(by_name, "option-gpu-amd") and ok_result(by_name, "gpu-runtime-amd"):
-        commands.append(("amdgpu", "docker compose --profile amdgpu up -d --build llama-rocm"))
+        commands.append(("amdgpu", f"{engine} compose --profile amdgpu up -d --build llama-rocm"))
     if ok_result(by_name, "option-gpu-nvidia") and ok_result(by_name, "gpu-runtime-nvidia"):
-        commands.append(("nvidia", "docker compose --profile nvidia up -d --build llama-cuda"))
+        commands.append(("nvidia", f"{engine} compose --profile nvidia up -d --build llama-cuda"))
     if ok_result(by_name, "option-gpu-apple"):
         if ok_result(by_name, "apple-coreml"):
             commands.append(("apple", "pci-coreml-server"))
@@ -279,28 +239,224 @@ def local_embedding_startup_commands(by_name: Mapping[str, CheckResult]) -> list
     return commands
 
 
-def startup_command_lines(by_name: Mapping[str, CheckResult], *, color: bool = False) -> list[str]:
-    lines = ["", heading_text("Startup commands", color=color)]
-    if not ok_result(by_name, "database"):
-        lines.append(format_startup_command("database", "docker compose up -d pgvector", color=color))
-    for profile, command in local_embedding_startup_commands(by_name):
-        lines.append(format_startup_command(profile, command, color=color))
-    if remote_embedding_validated(by_name):
-        lines.append(
-            format_startup_command(
-                "remote",
-                "no embedding container needed; use the configured remote embedding endpoint",
-                color=color,
-            )
+def _shorten_platform(msg: str) -> str:
+    match = re.match(r"Python (\S+) on (\S+) \S+ \(([^)]+)\)", msg)
+    if match:
+        return f"Python {match.group(1)} · {match.group(2)} {match.group(3)}"
+    return msg
+
+
+def _shorten_gpu(msg: str) -> str:
+    match = re.match(r"(.+?) GPU:\s*(.*)", msg)
+    if not match:
+        return msg
+    name, rest = match.group(1), match.group(2)
+    rest = rest.replace("shared/unified=", "").replace("VRAM=", "VRAM ")
+    rest = rest.replace("; ", " · ")
+    return f"{name} · {rest}" if rest else name
+
+
+def _shorten_npu(msg: str) -> str:
+    cores = re.search(r"(\d+) cores", msg)
+    if "Apple Neural Engine" in msg and cores:
+        return f"Apple Neural Engine · {cores.group(1)} cores"
+    return msg
+
+
+def _shorten_db(msg: str) -> str:
+    match = re.search(r"connected to (\S+) as \S+ at postgresql://[^@/]*@([^/?\s]+)", msg)
+    if match:
+        return f"{match.group(1)} @ {match.group(2)}"
+    return msg
+
+
+def _shorten_model(model: str) -> str:
+    model = model.strip()
+    if "/" in model:
+        model = model.rsplit("/", 1)[-1]
+    return re.sub(r"\.(mlpackage|gguf|safetensors)$", "", model)
+
+
+def _beautify_embedding(msg: str) -> str:
+    model_match = re.search(r"response model=([^;]+)", msg)
+    dim_match = re.search(r"dimensions=(\d+)", msg)
+    lat_match = re.search(r"latency=([\d.]+)s", msg)
+    parts: list[str] = []
+    if model_match:
+        parts.append(_shorten_model(model_match.group(1)))
+    if lat_match:
+        seconds = float(lat_match.group(1))
+        parts.append(f"{round(seconds * 1000)} ms" if seconds < SECONDS_AS_MS_THRESHOLD else f"{seconds:.1f} s")
+    if dim_match:
+        parts.append(f"{dim_match.group(1)}d")
+    return " · ".join(parts) if parts else msg
+
+
+def _glyph(status: Status) -> Text:
+    return Text(STATUS_GLYPHS[status], style=STATUS_STYLES[status])
+
+
+def _section_table() -> Table:
+    table = Table.grid(padding=(0, 1))
+    table.add_column(width=1, no_wrap=True)
+    table.add_column(min_width=10, no_wrap=True)
+    table.add_column(overflow="fold")
+    return table
+
+
+def _row(table: Table, status: Status, label: str, detail: str) -> None:
+    table.add_row(_glyph(status), Text(label, style="bold"), Text(detail))
+
+
+def _system_section(by_name: Mapping[str, CheckResult], results: Sequence[CheckResult]) -> Table:
+    table = _section_table()
+    if platform := by_name.get("platform"):
+        _row(table, platform.status, "Platform", _shorten_platform(platform.message))
+    gpus = matching_results(results, r"gpu-\d+")
+    if gpus:
+        for gpu in gpus:
+            _row(table, gpu.status, "GPU", _shorten_gpu(gpu.message))
+    elif (gpu := by_name.get("gpu")) is not None:
+        if gpu.status == "skip":
+            _row(table, "skip", "GPU", "not detected")
+        else:
+            _row(table, gpu.status, "GPU", _shorten_gpu(gpu.message))
+    if (npu := by_name.get("npu")) is not None:
+        if npu.status == "skip":
+            _row(table, "skip", "NPU", "not available")
+        else:
+            _row(table, npu.status, "NPU", _shorten_npu(npu.message))
+    return table
+
+
+def _services_section(by_name: Mapping[str, CheckResult]) -> Table:
+    table = _section_table()
+    if database := by_name.get("database"):
+        detail = _shorten_db(database.message) if database.status == "ok" else database.message
+        _row(table, database.status, "Database", detail)
+    if (pgvector := by_name.get("pgvector")) and pgvector.status != "ok":
+        _row(table, pgvector.status, "pgvector", pgvector.message)
+    if (schema := by_name.get("schema")) and schema.status != "ok":
+        _row(table, schema.status, "Schema", schema.message)
+    embedding = by_name.get("embedding-endpoint") or by_name.get("embedding")
+    if embedding is not None:
+        detail = _beautify_embedding(embedding.message) if embedding.status == "ok" else embedding.message
+        _row(table, embedding.status, "Embedding", detail)
+    return table
+
+
+def _active_path_section(by_name: Mapping[str, CheckResult]) -> Group | None:
+    endpoint = by_name.get("embedding-endpoint")
+    if endpoint is None or endpoint.status != "ok":
+        return None
+    profile, label = active_embedding_profile(by_name)
+    if profile == "apple" and ok_result(by_name, "apple-coreml"):
+        label = "Apple Core ML"
+    elif profile == "apple":
+        label = "Apple Metal"
+    url = embedding_config_endpoint(by_name)
+    header = Table.grid(expand=True)
+    header.add_column()
+    header.add_column(justify="right")
+    header.add_row(Text("Active path", style="bold"), Text(label, style="bold cyan"))
+    pieces: list[RenderableType] = [header]
+    if url:
+        pieces.append(Text(f"  {url}", overflow="fold"))
+    if profile == "apple" and ok_result(by_name, "apple-coreml"):
+        pieces.append(Text("  ⓘ pci-coreml-server --diagnose for scheduling", style="dim"))
+    return Group(*pieces)
+
+
+def _status_pill(status: Status) -> Text:
+    return Text(f" {STATUS_GLYPHS[status]} {STATUS_PILL_TEXT[status]} ", style=f"bold reverse {STATUS_STYLES[status]}")
+
+
+def _build_main_panel(by_name: Mapping[str, CheckResult], results: Sequence[CheckResult]) -> Panel:
+    overall, _ = summary_status(results)
+
+    header = Table.grid(expand=True)
+    header.add_column()
+    header.add_column(justify="right")
+    header.add_row(
+        Text("project-code-intelligence doctor", style="bold"),
+        _status_pill(overall),
+    )
+
+    parts: list[RenderableType] = [
+        header,
+        Text(),
+        Text("System", style="bold"),
+        _system_section(by_name, results),
+        Text(),
+        Text("Services", style="bold"),
+        _services_section(by_name),
+    ]
+    issues = summary_issue_items(results)
+    service_names = {"database", "database-config", "pgvector", "embedding-endpoint", "embedding-config", "embedding"}
+    non_service_issues = [item for item in issues if item.name not in service_names]
+    if non_service_issues:
+        parts.extend((Text(), Text("Needs attention", style="bold"), _issues_table(non_service_issues)))
+    if issues:
+        steps = _next_steps(by_name, issues)
+        if steps:
+            parts.extend((Text(), _next_steps_section(steps)))
+    else:
+        active = _active_path_section(by_name)
+        if active is not None:
+            parts.extend((Text(), active))
+    return Panel(Group(*parts), box=ROUNDED, padding=(1, 2), border_style="dim", expand=True, width=SUMMARY_WIDTH)
+
+
+def _issues_table(issues: Sequence[CheckResult]) -> Table:
+    table = _section_table()
+    for item in issues:
+        _row(table, item.status, check_label(item.name), item.message)
+    return table
+
+
+_PROFILE_FRIENDLY_DESCRIPTIONS = {
+    "cpu": "Start CPU embeddings",
+    "npu": "Start AMD NPU embeddings",
+    "amdgpu": "Start AMD GPU embeddings",
+    "nvidia": "Start NVIDIA GPU embeddings",
+    "apple": "Start Apple native embeddings",
+}
+
+
+def _next_steps(
+    by_name: Mapping[str, CheckResult],
+    issues: Sequence[CheckResult],
+) -> list[tuple[str, str]]:
+    engine = process.container_engine_name()
+    db_names = {"database", "database-config", "pgvector", "schema", "schema-version"}
+    embedding_names = {"embedding-endpoint", "embedding-config", "embedding"}
+    issue_names = {item.name for item in issues}
+    steps: list[tuple[str, str]] = []
+    if issue_names & db_names:
+        steps.extend((
+            ("Start a local database", f"{engine} compose up -d pgvector"),
+            ("Use an existing Postgres", "set PROJECT_CODE_INTELLIGENCE_DATABASE_URL"),
+        ))
+    if issue_names & embedding_names:
+        steps.extend(
+            (_PROFILE_FRIENDLY_DESCRIPTIONS.get(profile, f"Start {profile} embeddings"), cmd)
+            for profile, cmd in local_embedding_startup_commands(by_name)
         )
-    return lines
+        steps.append(("Use a remote provider", "set PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT"))
+    return steps
 
 
-DOCKER_COMPOSE_SERVICES = ("fastembed", "lemonade-npu", "llama-rocm", "llama-cuda")
-HOST_EMBEDDING_PROCESSES = ("pci-coreml-server", "pci-embedding-server")
+def _next_steps_section(steps: Sequence[tuple[str, str]]) -> Group:
+    table = Table.grid(padding=(0, 1))
+    table.add_column(width=1, no_wrap=True)
+    table.add_column(overflow="fold")
+    for description, command in steps:
+        table.add_row(Text("→", style="dim"), Text(description))
+        table.add_row("", Text(command, style="bold cyan"))
+    return Group(Text("Next steps", style="bold"), table)
 
 
-def switch_embedding_lines(by_name: Mapping[str, CheckResult], *, color: bool = False) -> list[str]:
+def _switch_renderables(by_name: Mapping[str, CheckResult]) -> list[RenderableType]:
     active_profile, _ = active_embedding_profile(by_name)
     commands = [
         (profile, command)
@@ -309,167 +465,63 @@ def switch_embedding_lines(by_name: Mapping[str, CheckResult], *, color: bool = 
     ]
     if not commands:
         return []
-    lines = ["", heading_text("Switch embedding runtime", color=color)]
-    lines.append("  Stop current local embedding service first: pci-doctor --stop-embedding")
-    lines.extend(format_startup_command(profile, command, color=color) for profile, command in commands)
-    return lines
+    pieces: list[RenderableType] = [Text("Switch embedding runtime", style="bold")]
+    pieces.append(Text("  Stop current local embedding service first: pci-doctor --stop-embedding", style="dim"))
+    for profile, command in commands:
+        pieces.append(Text.assemble("  ", (profile, "bold cyan"), ": ", command))
+    return pieces
 
 
-def embedding_summary_lines(by_name: Mapping[str, CheckResult], *, color: bool = False) -> list[str]:
-    option_names = summary_option_names(by_name)
-    options = [by_name[name] for name in option_names if name in by_name and by_name[name].status == "ok"]
-    if ok_result(by_name, "embedding-endpoint"):
-        return [*active_embedding_lines(by_name, color=color), *switch_embedding_lines(by_name, color=color)]
-    if not options:
-        return []
-    return [
-        "",
-        heading_text("Available embedding paths", color=color),
-        *(format_option(item, color=color) for item in options),
-    ]
-
-
-def _stop_hints(by_name: Mapping[str, CheckResult], *, color: bool = False) -> list[str]:
-    """Return contextual stop command hints based on running services."""
+def _stop_renderables(by_name: Mapping[str, CheckResult]) -> list[RenderableType]:
     db_running = ok_result(by_name, "database")
     embedding_running = ok_result(by_name, "embedding-endpoint")
     if not db_running and not embedding_running:
         return []
-    lines: list[str] = []
+    pieces: list[RenderableType] = []
     if db_running and embedding_running:
-        lines.append(color_text("Stop all services: pci-doctor --stop", ANSI_DIM, enabled=color))
+        pieces.append(Text("Stop all services: pci-doctor --stop", style="dim"))
     if embedding_running:
-        lines.append(color_text("Stop embedding server: pci-doctor --stop-embedding", ANSI_DIM, enabled=color))
+        pieces.append(Text("Stop embedding server: pci-doctor --stop-embedding", style="dim"))
     if db_running:
-        lines.append(color_text("Stop database: pci-doctor --stop-database", ANSI_DIM, enabled=color))
-    return lines
+        pieces.append(Text("Stop database: pci-doctor --stop-database", style="dim"))
+    return pieces
 
 
-def _embedding_profile_description(profile: str) -> str:
-    return {
-        "cpu": "a local CPU embedding server",
-        "npu": "a local AMD NPU embedding server",
-        "amdgpu": "a local AMD GPU embedding server",
-        "nvidia": "a local NVIDIA GPU embedding server",
-        "apple": "a local Apple native embedding server",
-    }.get(profile, f"a local {profile} embedding server")
-
-
-def _suggestion_line(text: str, command: str, *, color: bool = False) -> str:
-    return f"{text} {color_text(command, ANSI_BOLD_CYAN, enabled=color)}"
-
-
-def _issue_suggestions(
-    by_name: Mapping[str, CheckResult],
-    issues: Sequence[CheckResult],
-    *,
-    color: bool = False,
-) -> dict[str, list[str]]:
-    """Map the first matching warn/fail check to friendly remediation hints."""
-    suggestions: dict[str, list[str]] = {}
-    db_names = {"database", "database-config", "pgvector", "schema", "schema-version"}
-    embedding_names = {"embedding-endpoint", "embedding-config", "embedding"}
-    db_done = False
-    embedding_done = False
-    for item in issues:
-        if item.name in db_names and not db_done:
-            suggestions[item.name] = [
-                _suggestion_line(
-                    "To start a local database, run:",
-                    "docker compose up -d pgvector",
-                    color=color,
-                ),
-                _suggestion_line(
-                    "Or set",
-                    "PROJECT_CODE_INTELLIGENCE_DATABASE_URL",
-                    color=color,
-                )
-                + " to use an existing Postgres instance.",
-            ]
-            db_done = True
-        elif item.name in embedding_names and not embedding_done:
-            hints: list[str] = []
-            commands = local_embedding_startup_commands(by_name)
-            if commands:
-                for profile, cmd in commands:
-                    desc = _embedding_profile_description(profile)
-                    hints.append(_suggestion_line(f"To start {desc}, run:", cmd, color=color))
-            hints.append(
-                _suggestion_line(
-                    "Or set",
-                    "PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT",
-                    color=color,
-                )
-                + " to use a remote provider."
-            )
-            suggestions[item.name] = hints
-            embedding_done = True
-    return suggestions
-
-
-def _needs_attention_lines(
-    results: Sequence[CheckResult],
-    by_name: Mapping[str, CheckResult],
-    *,
-    color: bool = False,
-) -> list[str]:
-    issues = summary_issue_items(results)
-    if not issues:
-        return []
-    suggestions = _issue_suggestions(by_name, issues, color=color)
-    lines = ["", heading_text("Needs attention", color=color)]
-    for item in issues:
-        label = check_label(item.name)
-        lines.append(f"  {label_text(label, color=color)}: {status_text(item.status, color=color)} {item.message}")
-        if item.detail:
-            lines.append(f"    {color_text(item.detail, ANSI_DIM, enabled=color)}")
-        lines.extend(f"    {s}" for s in suggestions.get(item.name, []))
-    return lines
+def _build_console(buffer: io.StringIO, *, color: bool) -> Console:
+    return Console(
+        file=buffer,
+        force_terminal=color,
+        color_system="truecolor" if color else None,
+        width=SUMMARY_WIDTH,
+        record=False,
+        highlight=False,
+        legacy_windows=False,
+        soft_wrap=False,
+    )
 
 
 def format_summary(results: Sequence[CheckResult], *, color: bool = False) -> str:
     by_name = result_map(results)
-    status, status_message = summary_status(results)
-    lines = [
-        heading_text("project-code-intelligence doctor", color=color),
-        f"Status: {status_text(status, color=color)} {status_message}",
-        "",
-        heading_text("Detected", color=color),
-        concise_line("Platform", by_name.get("platform"), color=color),
-    ]
+    buffer = io.StringIO()
+    console = _build_console(buffer, color=color)
 
-    gpus = matching_results(results, r"gpu-\d+")
-    if gpus:
-        lines.extend(concise_line("GPU", gpu, color=color) for gpu in gpus)
-    else:
-        lines.append(concise_line("GPU", by_name.get("gpu"), color=color))
+    console.print(_build_main_panel(by_name, results))
 
-    npu = by_name.get("npu")
-    if npu and npu.status != "skip":
-        lines.append(concise_line("NPU", npu, color=color))
-    elif npu:
-        lines.append(f"  {label_text('NPU', color=color)}: {status_text('skip', color=color)} not available")
+    switch = _switch_renderables(by_name)
+    if switch:
+        console.print()
+        for piece in switch:
+            console.print(piece)
 
-    lines.extend([
-        "",
-        heading_text("Services", color=color),
-        concise_line("Database", by_name.get("database"), color=color),
-    ])
-    if (pgvector := by_name.get("pgvector")) and pgvector.status != "ok":
-        lines.append(concise_line("pgvector", pgvector, color=color))
-    if (schema := by_name.get("schema")) and schema.status != "ok":
-        lines.append(concise_line("Schema", schema, color=color))
-    lines.append(
-        concise_line("Embedding endpoint", by_name.get("embedding-endpoint") or by_name.get("embedding"), color=color)
+    stops = _stop_renderables(by_name)
+    if stops:
+        console.print()
+        for piece in stops:
+            console.print(piece)
+
+    console.print()
+    console.print(
+        Text("--verbose for all checks · --json for machine-readable output", style="dim"),
     )
 
-    lines.extend(embedding_summary_lines(by_name, color=color))
-    lines.extend(_needs_attention_lines(results, by_name, color=color))
-
-    stop_hints = _stop_hints(by_name, color=color)
-    if stop_hints:
-        lines.extend(["", *stop_hints])
-
-    footer = color_text("Use --verbose for all checks, or --json for machine-readable output.", ANSI_DIM, enabled=color)
-    lines.extend(["", footer])
-    return "\n".join(lines)
+    return buffer.getvalue().rstrip("\n")

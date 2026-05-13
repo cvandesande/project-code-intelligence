@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import cast
 
-from project_code_intelligence import config, ingest_code_intel, process
+from project_code_intelligence import config, console_ui, ingest_code_intel, mcp_smoke_render, process, progress
 from project_code_intelligence.embeddings import resolve_embedding_endpoint_model
 
 DEFAULT_EMBED_RECORD_TYPES = (
@@ -20,6 +20,11 @@ DEFAULT_EMBED_RECORD_TYPES = (
 
 def index_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Index code intelligence in pgvector.")
+    _ = parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit raw JSON progress events and reports instead of the pretty TTY display.",
+    )
     _ = parser.add_argument("--dry-run", action="store_true", help="Show what would be ingested without writing.")
     _ = parser.add_argument(
         "--reset-code-intel",
@@ -55,6 +60,7 @@ def index_parser() -> argparse.ArgumentParser:
 
 
 class IndexNamespace(argparse.Namespace):
+    json: bool
     dry_run: bool
     reset_code_intel: bool
     i_know_this_deletes_code_intel_db: bool
@@ -92,9 +98,7 @@ def parse_index_args(argv: list[str] | None = None) -> tuple[IndexNamespace, lis
     public_argv, passthrough = split_index_argv(argv)
     parser = index_parser()
     parsed = parser.parse_args(public_argv, namespace=IndexNamespace())
-    if parsed.reset_code_intel and parsed.repo_paths:
-        parser.error("--reset-code-intel does not accept repository paths")
-    if not parsed.reset_code_intel and not parsed.repo_paths:
+    if not parsed.repo_paths:
         parser.error("one or more repository paths are required; use . for the current directory")
     return parsed, normalized_passthrough(passthrough)
 
@@ -169,40 +173,85 @@ def index_main(argv: list[str] | None = None) -> int:
     embed_only = config.env_bool("PROJECT_CODE_INTELLIGENCE_EMBED_ONLY")
     if (embed or embed_only) and not parsed.reset_code_intel:
         forwarded = [*index_embedding_args(embed_only=embed_only), *forwarded]
+    if parsed.json:
+        os.environ["PROJECT_CODE_INTELLIGENCE_OUTPUT"] = "json"
+    _ = progress.set_emitter(progress.detect_progress_mode(requested="json" if parsed.json else None))
     return ingest_code_intel.cli_main(forwarded)
 
 
-def mcp_smoke_main(argv: list[str] | None = None) -> int:
+class McpSmokeNamespace(argparse.Namespace):
+    json: bool
+    repo_paths: list[str]
+
+
+def mcp_smoke_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Call code_intel_status through the stdio MCP server.")
-    _ = parser.parse_args(argv)
-    arguments: dict[str, object] = {}
+    _ = parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the raw JSON-RPC response instead of the pretty TTY display.",
+    )
+    _ = parser.add_argument(
+        "repo_paths",
+        nargs="*",
+        help="Repository path(s) to scope the status query to. Use . for the current directory.",
+    )
+    return parser
+
+
+def _path_to_repo(path: str) -> str:
+    resolved = Path(path).expanduser().resolve(strict=False)
+    return resolved.name or "."
+
+
+def _run_mcp_status(arguments: dict[str, object]) -> tuple[int, object | None, str]:
     params: dict[str, object] = {"name": "code_intel_status", "arguments": arguments}
-    request: dict[str, object] = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": params,
-    }
+    request: dict[str, object] = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}
     proc = process.run(
         [sys.executable, "-m", "project_code_intelligence.server"],
-        process.RunOptions(
-            input_text=json.dumps(request) + "\n",
-            capture_output=True,
-            timeout=30,
-            check=False,
-        ),
+        process.RunOptions(input_text=json.dumps(request) + "\n", capture_output=True, timeout=30, check=False),
     )
-    if proc.stderr:
-        _ = sys.stderr.write(proc.stderr)
-    if proc.stdout:
-        _ = sys.stdout.write(proc.stdout)
     if proc.returncode != 0:
-        return proc.returncode
+        return proc.returncode, None, proc.stderr or ""
     try:
         response_value = cast("object", json.loads(proc.stdout))
     except json.JSONDecodeError:
+        return 1, None, proc.stderr or "MCP response was not valid JSON"
+    return 0, response_value, proc.stderr or ""
+
+
+def mcp_smoke_main(argv: list[str] | None = None) -> int:
+    parser = mcp_smoke_parser()
+    parsed = parser.parse_args(argv, namespace=McpSmokeNamespace())
+    if not parsed.repo_paths:
+        parser.error("one or more repository paths are required; use . for the current directory")
+
+    repos = [_path_to_repo(path) for path in parsed.repo_paths]
+    primary_repo = repos[0]
+    arguments: dict[str, object] = {"repo": primary_repo}
+
+    return_code, response, stderr_text = _run_mcp_status(arguments)
+    if stderr_text:
+        _ = sys.stderr.write(stderr_text)
+    if return_code != 0:
+        return return_code
+
+    use_pretty = console_ui.should_emit_pretty(sys.stdout, force=False if parsed.json else None)
+
+    has_error = isinstance(response, dict) and "error" in cast("dict[object, object]", response)
+    response_for_render = cast("object", response)
+    if has_error:
+        if use_pretty:
+            mcp_smoke_render.render_error(response_for_render)
+        else:
+            _ = sys.stdout.write(json.dumps(response) + "\n")
         return 1
-    return 1 if isinstance(response_value, dict) and "error" in response_value else 0
+
+    if use_pretty:
+        mcp_smoke_render.render_status(response_for_render, repo=primary_repo)
+    else:
+        _ = sys.stdout.write(json.dumps(response) + "\n")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

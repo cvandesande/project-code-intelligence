@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import threading
 import time
@@ -12,7 +11,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from project_code_intelligence import config, db, profile_context
+from project_code_intelligence import config, db, profile_context, progress
 from project_code_intelligence import runtime as runtime_state
 from project_code_intelligence.code_profiles import load_profile
 from project_code_intelligence.common import default_collection, parse_repos, repo_for_source_path
@@ -59,6 +58,7 @@ from project_code_intelligence.storage import (
     RecordInsertContext,
     copy_unchanged_parser_failures,
     copy_unchanged_records_and_edges,
+    delete_repo_data,
     ensure_schema,
     file_signature,
     insert_edges,
@@ -70,7 +70,6 @@ from project_code_intelligence.storage import (
     latest_snapshot_info,
     previous_file_signatures,
     replace_repos,
-    reset_code_intel_schema,
     snapshot_versions_compatible,
 )
 
@@ -511,13 +510,17 @@ def emit_sarif_discovery(plan: IngestPlan) -> None:
         )
 
 
-def confirm_reset_code_intel(args: CliArgs, settings: config.DatabaseSettings) -> None:
+def confirm_reset_code_intel(
+    args: CliArgs, settings: config.DatabaseSettings, collection: str, repos: list[str]
+) -> None:
     if not args.reset_code_intel:
         return
-    write_stderr("About to reset project-code-intelligence tables.")
+    repo_list = ", ".join(repos)
+    write_stderr(f"About to delete project-code-intelligence data for repo(s): {repo_list}")
+    write_stderr(f"Collection: {collection}")
     write_stderr(f"Database target: {settings.display_target()}")
-    write_stderr("Tables: project_code_intel_*")
-    write_stderr("This permanently deletes indexed records, findings, metadata, and embeddings in that database.")
+    write_stderr("This permanently deletes snapshots, records, edges, embeddings, and findings for those repos.")
+    write_stderr("The schema and other repos are untouched.")
     if args.i_know_this_deletes_code_intel_db:
         write_stderr("Reset confirmed by --i-know-this-deletes-code-intel-db.")
         return
@@ -536,40 +539,55 @@ def prepare_writable_database(args: CliArgs, *, embedding_requested: bool) -> No
     settings = config.DatabaseSettings.from_env()
     if not db.allow_writes(settings):
         raise PermissionError("set PROJECT_CODE_INTELLIGENCE_ALLOW_WRITES=1 to ingest")
-    confirm_reset_code_intel(args, settings)
     if embedding_requested and not args.embedding_endpoint and not args.llama_embed:
         raise ValueError("set --embedding-endpoint or --llama-embed when --embed is used")
     if embedding_requested and args.embedding_endpoint:
         preflight_embedding_endpoint(args.embedding_endpoint, args.embedding_endpoint_model)
     with db.connect(readonly=False, settings=settings) as conn:
-        if args.reset_code_intel:
-            progress_event("code_intel_reset_started")
-            reset_code_intel_schema(conn)
         ensure_schema(conn)
         conn.commit()
-        if args.reset_code_intel:
-            progress_event("code_intel_reset_completed")
 
 
-def print_reset_only_report(args: CliArgs, settings: config.DatabaseSettings) -> None:
-    write_stdout(
-        json.dumps(
-            {
-                "mode": "reset-only",
-                "dry_run": args.dry_run,
-                "reset": args.reset_code_intel and not args.dry_run,
-                "database": settings.display_target(),
-            },
-            sort_keys=True,
-        )
-    )
+def resolve_reset_targets(args: CliArgs) -> tuple[str, list[str]]:
+    profile = load_profile(args.profile)
+    set_active_profile(profile)
+    collection = args.collection or default_collection(args.root.resolve())
+    repos = parse_repos(args.repos or ",".join(profile.default_repos))
+    return collection, repos
+
+
+def print_reset_only_report(
+    args: CliArgs,
+    settings: config.DatabaseSettings,
+    collection: str,
+    repos: list[str],
+    deleted: dict[str, int],
+) -> None:
+    progress.emit_summary({
+        "mode": "reset",
+        "dry_run": args.dry_run,
+        "reset": args.reset_code_intel and not args.dry_run,
+        "database": settings.display_target(),
+        "collection": collection,
+        "repos": repos,
+        "deleted_snapshots": deleted,
+    })
 
 
 def run_reset_only(args: CliArgs) -> int:
     validate_args(args, embedding_requested=False)
     settings = config.DatabaseSettings.from_env()
+    collection, repos = resolve_reset_targets(args)
+    confirm_reset_code_intel(args, settings, collection, repos)
     prepare_writable_database(args, embedding_requested=False)
-    print_reset_only_report(args, settings)
+    deleted: dict[str, int] = dict.fromkeys(repos, 0)
+    if not args.dry_run:
+        with db.connect(readonly=False, settings=settings) as conn:
+            progress_event("code_intel_reset_started", collection=collection, repos=repos)
+            deleted = delete_repo_data(conn, collection, repos)
+            conn.commit()
+            progress_event("code_intel_reset_completed", collection=collection, deleted=deleted)
+    print_reset_only_report(args, settings, collection, repos, deleted)
     return 0
 
 
@@ -602,7 +620,7 @@ def print_embed_only_report(plan: IngestPlan, snapshot_ids: list[int], embedded_
             "embedded_records_post_insert": embedded_records,
             "embedded_records_total": embedded_records,
         })
-    write_stdout(json.dumps(report, sort_keys=True))
+    progress.emit_summary(report)
 
 
 def run_embed_only(plan: IngestPlan) -> int:
@@ -755,7 +773,8 @@ def print_dry_run_report(plan: IngestPlan, ingests: list[RepoIngest], sarif_inge
     )
     report["sarif_parser_failures"] = sarif_ingest.failures
     report["metrics"] = runtime_state.active_metrics.snapshot()
-    write_stdout(json.dumps(report, indent=2, sort_keys=True))
+    report["dry_run"] = True
+    progress.emit_summary(report, indent=2)
 
 
 def db_upload_total(ingests: list[RepoIngest]) -> int:
@@ -927,35 +946,30 @@ def embed_after_upload(plan: IngestPlan, snapshot_ids: list[int]) -> int:
 
 
 def print_ingest_result(plan: IngestPlan, summary: DbUploadSummary, embedded_records: int) -> None:
-    write_stdout(
-        json.dumps(
-            {
-                "repos": plan.repos,
-                "collection": plan.collection,
-                "snapshot_ids": summary.snapshot_ids,
-                "files": summary.inserted_files,
-                "records": summary.inserted_records,
-                "edges": summary.inserted_edges,
-                "parser_failures": summary.inserted_parser_failures + summary.copied_parser_failures,
-                "inserted_parser_failures": summary.inserted_parser_failures,
-                **summary.static_counts,
-                "copied_records": summary.copied_records,
-                "copied_edges": summary.copied_edges,
-                "copied_parser_failures": summary.copied_parser_failures,
-                "mode": plan.mode,
-                "profile": profile_context.active_profile.name,
-                "embeddings": plan.args.embed,
-                "embedded_records": embedded_records,
-                "embedded_records_post_insert": embedded_records,
-                "preembedded_records": summary.preembedded_records,
-                "embedded_records_total": summary.preembedded_records + embedded_records,
-                "preembedding_skipped": summary.preembedding_skipped,
-                "embedding_max_chars": plan.args.embedding_max_chars if plan.args.embed else None,
-                "metrics": runtime_state.active_metrics.snapshot(),
-            },
-            sort_keys=True,
-        )
-    )
+    progress.emit_summary({
+        "repos": plan.repos,
+        "collection": plan.collection,
+        "snapshot_ids": summary.snapshot_ids,
+        "files": summary.inserted_files,
+        "records": summary.inserted_records,
+        "edges": summary.inserted_edges,
+        "parser_failures": summary.inserted_parser_failures + summary.copied_parser_failures,
+        "inserted_parser_failures": summary.inserted_parser_failures,
+        **summary.static_counts,
+        "copied_records": summary.copied_records,
+        "copied_edges": summary.copied_edges,
+        "copied_parser_failures": summary.copied_parser_failures,
+        "mode": plan.mode,
+        "profile": profile_context.active_profile.name,
+        "embeddings": plan.args.embed,
+        "embedded_records": embedded_records,
+        "embedded_records_post_insert": embedded_records,
+        "preembedded_records": summary.preembedded_records,
+        "embedded_records_total": summary.preembedded_records + embedded_records,
+        "preembedding_skipped": summary.preembedding_skipped,
+        "embedding_max_chars": plan.args.embedding_max_chars if plan.args.embed else None,
+        "metrics": runtime_state.active_metrics.snapshot(),
+    })
 
 
 def resolve_plan_embedding_model(plan: IngestPlan) -> IngestPlan:
@@ -1050,6 +1064,7 @@ def cli_main(argv: list[str] | None = None) -> int:
             exit_code=exit_code,
             metrics=runtime_state.active_metrics.snapshot(),
         )
+        progress.close_emitter()
 
 
 if __name__ == "__main__":
