@@ -51,6 +51,11 @@ Credentials may be embedded in the URL or supplied with
 `PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD`. The split `PGVECTOR_*` variables
 remain supported for Docker Compose and compatibility.
 
+`PROJECT_CODE_INTELLIGENCE_COLLECTION` remains a supported override, but normal
+CLI/MCP use should not need it. `pci-index` infers the collection from the repo
+path or workspace path, and `pci-mcp` infers it from the process working
+directory when the variable is unset.
+
 ## MCP Tools
 
 The MCP protocol surface is public. The server runs over stdio through
@@ -120,9 +125,14 @@ Python API.
 Public expectations:
 
 - Tables are namespaced as `project_code_intel_*`.
-- `pci-index --reset-code-intel` only drops and recreates this project's tables.
+- `pci-index --reset <repo>` deletes data for the selected collection and repo
+  key while leaving other repos and the schema untouched.
+- `pci-index --reset-all` deletes all indexed data in the configured database
+  while leaving the schema in place.
 - Existing embeddings are checked for model and dimension compatibility before
   resume.
+- Collections are an application-level scope used by CLI and MCP behavior; they
+  are not a database security boundary.
 - Private database dumps, vector indexes, and generated SARIF output should not
   be published.
 
