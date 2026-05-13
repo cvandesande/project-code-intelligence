@@ -2,6 +2,11 @@ PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 PYTHONPATH := src
 RUFF ?= $(if $(wildcard .venv/bin/ruff),.venv/bin/ruff,ruff)
 COVERAGE ?= $(if $(wildcard .venv/bin/coverage),.venv/bin/coverage,coverage)
+BANDIT ?= $(if $(wildcard .venv/bin/bandit),.venv/bin/bandit,bandit)
+PIP_AUDIT ?= $(if $(wildcard .venv/bin/pip-audit),.venv/bin/pip-audit,pip-audit)
+# Container engine: docker preferred, podman as drop-in replacement.
+# Override with `make ... DOCKER=podman` or by setting DOCKER in the environment.
+DOCKER ?= $(shell command -v docker 2>/dev/null || command -v podman 2>/dev/null)
 SHELLCHECK ?= shellcheck
 SHFMT ?= shfmt
 RUFF_TARGETS := . $(wildcard src/project_code_intelligence/code_profiles/*.py)
@@ -19,9 +24,9 @@ SHELL_FILES := \
 	docker/llamacpp-cuda/entrypoint.sh \
 	docker/llamacpp-rocm/entrypoint.sh
 
-.PHONY: check lint format-check format shellcheck shell-format-check shell-format test coverage typecheck security security-audit doctor integration-smoke scan scan-dry-run mcp-smoke embedding-bench amd-rocm-bundle compose-check compose-up compose-cpu compose-npu compose-amdgpu compose-nvidia compose-down tool-install
+.PHONY: check lint format-check format shellcheck shell-format-check shell-format test coverage typecheck security security-audit deps-audit doctor integration-smoke scan scan-dry-run mcp-smoke embedding-bench amd-rocm-bundle compose-check compose-up compose-cpu compose-npu compose-amdgpu compose-nvidia compose-down tool-install
 
-check: format-check shell-format-check lint shellcheck test typecheck security compose-check
+check: format-check shell-format-check lint shellcheck test typecheck security deps-audit compose-check
 
 lint:
 	$(RUFF) check $(RUFF_TARGETS)
@@ -64,10 +69,20 @@ typecheck:
 	basedpyright --warnings
 
 security:
-	bandit -r src tests scripts --severity-level all --confidence-level all
+	$(BANDIT) -c pyproject.toml -r src tests scripts --severity-level all --confidence-level all
 
 security-audit:
-	bandit -r src tests scripts --severity-level all --confidence-level all --ignore-nosec
+	$(BANDIT) -c pyproject.toml -r src tests scripts --severity-level all --confidence-level all --ignore-nosec
+
+deps-audit:
+	@if ! command -v uv >/dev/null 2>&1; then \
+		echo "warning: uv not found; skipping dependency audit" >&2; \
+	elif [ -x "$(PIP_AUDIT)" ] || command -v $(PIP_AUDIT) >/dev/null 2>&1; then \
+		uv export --frozen --no-emit-project --no-emit-workspace --format requirements-txt --quiet \
+			| $(PIP_AUDIT) -r /dev/stdin --require-hashes --disable-pip --strict; \
+	else \
+		echo "warning: pip-audit not found; skipping dependency audit" >&2; \
+	fi
 
 doctor:
 	./pci-doctor
@@ -91,29 +106,29 @@ amd-rocm-bundle:
 	$(PYTHON) scripts/select_llamacpp_rocm_bundle.py --format env
 
 compose-check:
-	@if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then \
-		docker compose config --quiet; \
+	@if [ -n "$(DOCKER)" ] && $(DOCKER) compose version >/dev/null 2>&1; then \
+		$(DOCKER) compose config --quiet; \
 	else \
-		echo "warning: docker compose not found; skipping compose validation" >&2; \
+		echo "warning: no container engine (docker or podman) with compose support found; skipping compose validation" >&2; \
 	fi
 
 compose-up:
-	docker compose up -d --wait --wait-timeout 60 pgvector
+	$(DOCKER) compose up -d --wait --wait-timeout 60 pgvector
 
 compose-cpu:
-	docker compose --profile cpu up -d --build
+	$(DOCKER) compose --profile cpu up -d --build
 
 compose-npu:
-	docker compose --profile npu up -d
+	$(DOCKER) compose --profile npu up -d
 
 compose-amdgpu:
-	docker compose --profile amdgpu up -d --build
+	$(DOCKER) compose --profile amdgpu up -d --build
 
 compose-nvidia:
-	docker compose --profile nvidia up -d --build
+	$(DOCKER) compose --profile nvidia up -d --build
 
 compose-down:
-	docker compose down
+	$(DOCKER) compose down
 
 tool-install:
 	uv tool install . --reinstall

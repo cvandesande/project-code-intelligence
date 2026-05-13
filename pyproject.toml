@@ -32,6 +32,8 @@ classifiers = [
 ]
 dependencies = [
   "psycopg[binary]>=3.1",
+  "pydantic>=2.5",
+  "rich>=13.0",
   "coremltools>=8.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "transformers>=4.30; sys_platform == 'darwin' and platform_machine == 'arm64'",
   "numpy>=1.24; sys_platform == 'darwin' and platform_machine == 'arm64'",
@@ -65,6 +67,8 @@ dev = [
   "bandit>=1.7.10",
   "basedpyright>=1.39",
   "coverage[toml]>=7.14.0",
+  "pip-audit>=2.7",
+  "pre-commit>=3.7",
   "ruff>=0.15.12",
   "typing-extensions>=4.12",
 ]
@@ -80,6 +84,13 @@ include = ["project_code_intelligence*"]
 
 [tool.setuptools.package-data]
 project_code_intelligence = ["schema.sql"]
+
+[tool.bandit]
+exclude_dirs = ["build", "dist", ".venv", "src/project_code_intelligence.egg-info"]
+# B404: subprocess import is intentional; concentrated in process.py wrapper that hardcodes shell=False.
+# B603: subprocess call is safe; same wrapper enforces shell=False and argument-vector calls only.
+# B310: urllib.request usage is intentional; http_client.py validates scheme/netloc before any call.
+skips = ["B404", "B603", "B310"]
 
 [tool.ruff]
 line-length = 120
