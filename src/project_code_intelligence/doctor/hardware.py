@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import re
@@ -29,6 +30,9 @@ NVIDIA_SMI_MIN_CSV_COLUMNS = 3
 GIB = 1024 * 1024 * 1024
 GPU_QWEN3_DEFAULT_MODEL = config.DEFAULT_GPU_EMBEDDING_MODEL
 GPU_QWEN3_LARGE_MODEL = config.DEFAULT_LARGE_GPU_EMBEDDING_MODEL
+NVIDIA_CONTAINER_TOOLKIT_INSTALL_GUIDE = (
+    "https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html"
+)
 
 
 def npu_embedding_required(env: config.Env) -> bool:
@@ -401,6 +405,42 @@ def has_ready_npu(results: Sequence[CheckResult]) -> bool:
     return required.issubset(statuses) and all(status == "ok" for status in statuses.values())
 
 
+def nvidia_container_toolkit_remediation(reason: str) -> str:
+    return (
+        f"{reason} Install NVIDIA Container Toolkit, run "
+        "sudo nvidia-ctk runtime configure --runtime=docker, then restart Docker. "
+        f"Guide: {NVIDIA_CONTAINER_TOOLKIT_INSTALL_GUIDE}"
+    )
+
+
+def docker_has_nvidia_runtime() -> tuple[bool, str | None]:
+    docker = shutil.which("docker")
+    if not docker:
+        return False, "Docker was not found."
+    ready = False
+    detail: str | None = None
+    try:
+        proc = process.run(
+            [docker, "info", "--format", "{{json .Runtimes}}"],
+            process.RunOptions(capture_output=True, timeout=5, check=False),
+        )
+    except (OSError, process.SubprocessError) as exc:
+        return False, f"Docker runtime check failed: {exc}"
+    if proc.returncode != 0:
+        output = (proc.stderr or proc.stdout).strip()
+        detail = f"Docker runtime check failed: {output}" if output else "Docker runtime check failed."
+    else:
+        try:
+            runtimes = cast("object", json.loads(proc.stdout))
+        except json.JSONDecodeError:
+            ready = "nvidia" in proc.stdout
+        else:
+            ready = isinstance(runtimes, dict) and "nvidia" in runtimes
+        if not ready:
+            detail = "Docker did not report an nvidia runtime."
+    return ready, detail
+
+
 def check_gpu_support(gpus: Sequence[GpuInfo]) -> list[CheckResult]:
     if not gpus:
         return [result("gpu", "skip", "No local GPU was detected.")]
@@ -437,17 +477,29 @@ def check_gpu_support(gpus: Sequence[GpuInfo]) -> list[CheckResult]:
 
     if has_gpu_vendor(gpus, "NVIDIA"):
         nvidia_smi = shutil.which("nvidia-smi")
+        nvidia_ctk = shutil.which("nvidia-ctk")
         nvidia_device_present = Path("/dev/nvidiactl").exists() or any(Path("/dev").glob("nvidia[0-9]*"))
+        docker_runtime_ready, docker_runtime_detail = docker_has_nvidia_runtime()
+        nvidia_ready = bool(nvidia_smi and nvidia_device_present and nvidia_ctk and docker_runtime_ready)
+        if nvidia_ready:
+            message = "NVIDIA driver, devices, and Docker runtime are ready."
+            detail = None
+        elif not (nvidia_smi and nvidia_device_present):
+            message = "NVIDIA GPU detected, but nvidia-smi or /dev/nvidia* was not found."
+            detail = "Install the NVIDIA driver before using the nvidia Compose profile."
+        elif not nvidia_ctk:
+            message = "NVIDIA GPU detected, but nvidia-ctk / NVIDIA Container Toolkit was not found."
+            detail = nvidia_container_toolkit_remediation("Docker cannot pass NVIDIA GPUs to containers yet.")
+        else:
+            message = "NVIDIA GPU detected, but Docker is not configured with the NVIDIA runtime."
+            reason = f"{docker_runtime_detail} " if docker_runtime_detail else ""
+            detail = nvidia_container_toolkit_remediation(reason)
         results.append(
             result(
                 "gpu-runtime-nvidia",
-                "ok" if nvidia_smi and nvidia_device_present else "warn",
-                "NVIDIA runtime tools and devices are present."
-                if nvidia_smi and nvidia_device_present
-                else "NVIDIA GPU detected, but nvidia-smi or /dev/nvidia* was not found.",
-                None
-                if nvidia_smi and nvidia_device_present
-                else "Install the NVIDIA driver and NVIDIA Container Toolkit before using the nvidia Compose profile.",
+                "ok" if nvidia_ready else "warn",
+                message,
+                detail,
             )
         )
 
