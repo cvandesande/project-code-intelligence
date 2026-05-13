@@ -7,7 +7,7 @@ import sys
 import traceback
 from typing import TYPE_CHECKING, cast
 
-from project_code_intelligence import db
+from project_code_intelligence import db, progress
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError, McpWritePermissionError
 from project_code_intelligence.mcp.protocol import (
     Json,
@@ -154,6 +154,11 @@ def error_message(exc: BaseException) -> str:
 
 
 def main() -> int:
+    # MCP is a stdio JSON-RPC service: any progress_event firing inside a tool
+    # handler (e.g. embedding endpoint retries during semantic search) should
+    # be emitted as JSON on stderr, never as a Rich Live display, regardless
+    # of FORCE_COLOR or similar env hints inherited from the launcher.
+    _ = progress.set_emitter("json")
     for line_value in jsonrpc_input_lines():
         if line_value is None:
             write_response(

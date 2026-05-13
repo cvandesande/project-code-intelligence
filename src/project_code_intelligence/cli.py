@@ -204,9 +204,9 @@ def _path_to_repo(path: str) -> str:
     return resolved.name or "."
 
 
-def _run_mcp_status(arguments: dict[str, object]) -> tuple[int, object | None, str]:
-    params: dict[str, object] = {"name": "code_intel_status", "arguments": arguments}
-    request: dict[str, object] = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}
+def _run_mcp_call(tool_name: str, arguments: dict[str, object], request_id: int = 1) -> tuple[int, object | None, str]:
+    params: dict[str, object] = {"name": tool_name, "arguments": arguments}
+    request: dict[str, object] = {"jsonrpc": "2.0", "id": request_id, "method": "tools/call", "params": params}
     proc = process.run(
         [sys.executable, "-m", "project_code_intelligence.server"],
         process.RunOptions(input_text=json.dumps(request) + "\n", capture_output=True, timeout=30, check=False),
@@ -220,6 +220,47 @@ def _run_mcp_status(arguments: dict[str, object]) -> tuple[int, object | None, s
     return 0, response_value, proc.stderr or ""
 
 
+# Tools the smoke run exercises, in order. Each entry is (tool name, kwargs).
+# Read-only by design — we never trigger a write_tool here.
+# `related_code_intel` requires a record_id or symbol; "main" is a reasonable
+# generic probe — any project either has a `main` symbol or returns 0 edges.
+_SMOKE_TOOLS: tuple[tuple[str, dict[str, object]], ...] = (
+    ("list_code_intel_files", {"limit": 5}),
+    ("list_code_intel_parser_failures", {"limit": 5}),
+    ("search_code_intel_text", {"limit": 1}),
+    ("search_code_intel_semantic", {"query": "main entry point", "limit": 1}),
+    ("related_code_intel", {"symbol": "main", "limit": 1}),
+)
+
+
+def _run_smoke_probes(primary_repo: str) -> tuple[list[dict[str, object]], int]:
+    """Run a short read-only sequence against the MCP server. Returns (probes, exit_code)."""
+    probes: list[dict[str, object]] = []
+    exit_code = 0
+    for index, (tool_name, base_args) in enumerate(_SMOKE_TOOLS, start=2):
+        arguments: dict[str, object] = {"repo": primary_repo, **base_args}
+        return_code, response, stderr_text = _run_mcp_call(tool_name, arguments, request_id=index)
+        if stderr_text:
+            _ = sys.stderr.write(stderr_text)
+        probe: dict[str, object] = {"tool": tool_name, "arguments": arguments}
+        if return_code != 0:
+            probe["status"] = "fail"
+            probe["error"] = f"MCP server exited with code {return_code}"
+            probes.append(probe)
+            exit_code = max(exit_code, return_code)
+            continue
+        if isinstance(response, dict) and "error" in cast("dict[object, object]", response):
+            probe["status"] = "fail"
+            probe["response"] = response
+            probes.append(probe)
+            exit_code = 1
+            continue
+        probe["status"] = "ok"
+        probe["response"] = response
+        probes.append(probe)
+    return probes, exit_code
+
+
 def mcp_smoke_main(argv: list[str] | None = None) -> int:
     parser = mcp_smoke_parser()
     parsed = parser.parse_args(argv, namespace=McpSmokeNamespace())
@@ -230,7 +271,7 @@ def mcp_smoke_main(argv: list[str] | None = None) -> int:
     primary_repo = repos[0]
     arguments: dict[str, object] = {"repo": primary_repo}
 
-    return_code, response, stderr_text = _run_mcp_status(arguments)
+    return_code, response, stderr_text = _run_mcp_call("code_intel_status", arguments)
     if stderr_text:
         _ = sys.stderr.write(stderr_text)
     if return_code != 0:
@@ -247,11 +288,14 @@ def mcp_smoke_main(argv: list[str] | None = None) -> int:
             _ = sys.stdout.write(json.dumps(response) + "\n")
         return 1
 
+    probes, probe_exit = _run_smoke_probes(primary_repo)
+
     if use_pretty:
-        mcp_smoke_render.render_status(response_for_render, repo=primary_repo)
+        mcp_smoke_render.render_status(response_for_render, repo=primary_repo, probes=probes)
     else:
-        _ = sys.stdout.write(json.dumps(response) + "\n")
-    return 0
+        payload: dict[str, object] = {"status": response, "probes": probes}
+        _ = sys.stdout.write(json.dumps(payload) + "\n")
+    return probe_exit
 
 
 def main(argv: list[str] | None = None) -> int:

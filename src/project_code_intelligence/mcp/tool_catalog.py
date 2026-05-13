@@ -51,6 +51,7 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "confidence_kind": {"type": "string"},
                 "source_path": {"type": "string"},
                 "symbol": {"type": "string"},
+                "parent_record_id": {"type": "string"},
                 "metadata_key": {"type": "string"},
                 "metadata_value": {"type": "string"},
                 "metadata_contains": {"type": "object"},
@@ -76,6 +77,7 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "confidence_kind": {"type": "string"},
                 "source_path": {"type": "string"},
                 "symbol": {"type": "string"},
+                "parent_record_id": {"type": "string"},
                 "metadata_key": {"type": "string"},
                 "metadata_value": {"type": "string"},
                 "metadata_contains": {"type": "object"},
@@ -99,15 +101,65 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         },
     ),
     "related_code_intel": ToolDefinition(
-        "Return code intelligence graph edges related to a record id or symbol.",
+        "Return code intelligence graph edges related to a record id or symbol, "
+        "joined with source and target record details so a single call resolves both "
+        "ends of every edge. Filter by edge_type (e.g. 'imports', 'calls', 'inherits') "
+        "when you only want one kind of relationship.",
         {
             "type": "object",
             "properties": {
                 "record_id": {"type": "string"},
                 "symbol": {"type": "string"},
+                "edge_type": {"type": "string"},
                 "collection": {"type": "string"},
                 "repo": {"type": "string"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                "snapshot_id": {"type": "integer", "minimum": 1},
+                "include_historical": {"type": "boolean"},
+            },
+            "additionalProperties": False,
+        },
+    ),
+    "list_code_intel_files": ToolDefinition(
+        "List indexed source files filtered by language, role, content class, or skip status. "
+        "Use this to discover the shape of the codebase (e.g. all test files, only Python sources, "
+        "files that were skipped during ingestion).",
+        {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                "collection": {"type": "string"},
+                "repo": {"type": "string"},
+                "language": {"type": "string"},
+                "file_role": {"type": "string"},
+                "content_class": {"type": "string"},
+                "source_path": {"type": "string"},
+                "is_test": {"type": "boolean"},
+                "is_doc": {"type": "boolean"},
+                "is_generated": {"type": "boolean"},
+                "is_vendor": {"type": "boolean"},
+                "is_source": {"type": "boolean"},
+                "is_build": {"type": "boolean"},
+                "is_config": {"type": "boolean"},
+                "only_skipped": {"type": "boolean"},
+                "snapshot_id": {"type": "integer", "minimum": 1},
+                "include_historical": {"type": "boolean"},
+            },
+            "additionalProperties": False,
+        },
+    ),
+    "list_code_intel_parser_failures": ToolDefinition(
+        "List files that failed to parse during ingestion, so an agent can report honestly which "
+        "parts of the codebase are missing from the index.",
+        {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                "collection": {"type": "string"},
+                "repo": {"type": "string"},
+                "language": {"type": "string"},
+                "parser": {"type": "string"},
+                "source_path": {"type": "string"},
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
             },
