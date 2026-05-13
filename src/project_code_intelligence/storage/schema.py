@@ -10,20 +10,6 @@ from project_code_intelligence.models import CHUNKER_VERSION, PARSER_VERSION, SC
 if TYPE_CHECKING:
     from project_code_intelligence.models import IntelFile, JsonObject
 
-CODE_INTEL_TABLES = [
-    "project_code_intel_schema_migrations",
-    "project_code_intel_static_code_flows",
-    "project_code_intel_static_locations",
-    "project_code_intel_static_findings",
-    "project_code_intel_static_rules",
-    "project_code_intel_static_runs",
-    "project_code_intel_parser_failures",
-    "project_code_intel_edges",
-    "project_code_intel_records",
-    "project_code_intel_files",
-    "project_code_intel_snapshots",
-]
-
 
 def file_signature(item: IntelFile) -> str:
     if item.file_sha256:
@@ -116,8 +102,3 @@ def schema_migration_versions(conn: db.DbConnection) -> list[str]:
         """
     ).fetchall()
     return [str(row["version"]) for row in rows]
-
-
-def reset_code_intel_schema(conn: db.DbConnection) -> None:
-    for table in CODE_INTEL_TABLES:
-        _ = conn.execute(f"DROP TABLE IF EXISTS {table} CASCADE")

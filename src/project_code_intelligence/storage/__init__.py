@@ -5,6 +5,7 @@ from __future__ import annotations
 from project_code_intelligence.storage.copy import copy_unchanged_parser_failures, copy_unchanged_records_and_edges
 from project_code_intelligence.storage.core import (
     RecordInsertContext,
+    delete_repo_data,
     insert_edges,
     insert_files,
     insert_parser_failures,
@@ -18,7 +19,6 @@ from project_code_intelligence.storage.schema import (
     file_signature,
     latest_snapshot_info,
     previous_file_signatures,
-    reset_code_intel_schema,
     row_int,
     schema_migration_versions,
     snapshot_versions_compatible,
@@ -29,6 +29,7 @@ __all__ = [
     "RecordInsertContext",
     "copy_unchanged_parser_failures",
     "copy_unchanged_records_and_edges",
+    "delete_repo_data",
     "ensure_schema",
     "file_signature",
     "insert_edges",
@@ -41,7 +42,6 @@ __all__ = [
     "parser_failure_metadata",
     "previous_file_signatures",
     "replace_repos",
-    "reset_code_intel_schema",
     "row_int",
     "schema_migration_versions",
     "snapshot_versions_compatible",

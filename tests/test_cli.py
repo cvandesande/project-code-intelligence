@@ -99,6 +99,7 @@ class CliWrapperTests(unittest.TestCase):
             status = cli.index_main([
                 "--reset-code-intel",
                 "--i-know-this-deletes-code-intel-db",
+                ".",
             ])
 
         self.assertEqual(status, 0)
@@ -107,6 +108,8 @@ class CliWrapperTests(unittest.TestCase):
         self.assertIn("--reset-code-intel", forwarded)
         self.assertIn("--reset-only", forwarded)
         self.assertIn("--i-know-this-deletes-code-intel-db", forwarded)
+        self.assertIn("--root", forwarded)
+        self.assertIn("--repos", forwarded)
         self.assertNotIn("--embed", forwarded)
         self.assertNotIn("--embedding-endpoint", forwarded)
 
@@ -121,7 +124,7 @@ class CliWrapperTests(unittest.TestCase):
             patch.dict(os.environ, {}, clear=True),
             patch("project_code_intelligence.cli.ingest_code_intel.cli_main", side_effect=fake_ingest_main),
         ):
-            status = cli.index_main(["--reset", "--i-know-this-deletes-code-intel-db"])
+            status = cli.index_main(["--reset", "--i-know-this-deletes-code-intel-db", "."])
 
         self.assertEqual(status, 0)
         self.assertIn("--reset-code-intel", forwarded)
