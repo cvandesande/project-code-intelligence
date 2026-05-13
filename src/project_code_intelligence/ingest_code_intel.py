@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import threading
 import time
+from concurrent.futures import ProcessPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -33,8 +35,10 @@ from project_code_intelligence.inventory import discover_files, make_snapshot
 from project_code_intelligence.models import (
     DEFAULT_EMBED_RECORD_TYPES,
     IntelEdge,
+    IntelFile,
     IntelRecord,
     JsonObject,
+    PreviousFileState,
     RepoIngest,
     SarifIngest,
     Snapshot,
@@ -72,15 +76,22 @@ from project_code_intelligence.storage import (
     insert_snapshot,
     insert_static_runs,
     latest_snapshot_info,
-    previous_file_signatures,
+    previous_file_state_signature,
+    previous_file_states,
     replace_repos,
     snapshot_versions_compatible,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from project_code_intelligence.code_profiles.base import CodeIntelProfile
 
 MIN_CHUNK_CHARS = 100
+AUTO_SCAN_WORKERS = 0
+MAX_AUTO_SCAN_WORKERS = 4
+MIN_PARALLEL_PARSE_FILES = 64
+PARSE_CHUNKS_PER_WORKER = 8
 
 
 def write_stdout(message: str) -> None:
@@ -98,6 +109,7 @@ class CliArgs:
     profile: str
     repos: str | None
     max_file_bytes: int
+    scan_workers: int
     chunk_chars: int
     overlap_lines: int
     limit_files: int | None
@@ -143,13 +155,15 @@ class RepoIngestConfig:
     root: Path
     repo: str
     collection: str
+    profile_name: str
     max_file_bytes: int
+    scan_workers: int
     max_chars: int
     overlap_lines: int
     limit_files: int | None
     progress_every: int
     previous_snapshot_id: int | None = None
-    previous_signatures: dict[str, str] | None = None
+    previous_files: dict[str, PreviousFileState] | None = None
     mode: str = "full"
 
 
@@ -188,6 +202,7 @@ class CliNamespace(argparse.Namespace):
     profile: str
     repos: str | None
     max_file_bytes: int
+    scan_workers: int
     chunk_chars: int
     overlap_lines: int
     limit_files: int | None
@@ -225,14 +240,165 @@ def json_int(obj: JsonObject, key: str) -> int:
     raise TypeError(f"{key} is not an integer")
 
 
+@dataclass(frozen=True)
+class ParseWorkerTask:
+    intel_file: IntelFile
+    max_chars: int
+    overlap_lines: int
+
+
+@dataclass(frozen=True)
+class ParseWorkerResult:
+    source_path: str
+    records: list[IntelRecord]
+    edges: list[IntelEdge]
+    failures: list[JsonObject]
+
+
+def initialize_parse_worker(profile_name: str) -> None:
+    set_active_profile(load_profile(profile_name))
+
+
+def parse_file_worker(task: ParseWorkerTask) -> ParseWorkerResult:
+    records, edges, failures = parse_file(task.intel_file, task.max_chars, task.overlap_lines)
+    return ParseWorkerResult(
+        source_path=task.intel_file.source_path,
+        records=records,
+        edges=edges,
+        failures=failures,
+    )
+
+
+def resolve_scan_workers(requested_workers: int, changed_files: int) -> int:
+    if requested_workers > 0:
+        return min(requested_workers, max(1, changed_files))
+    if changed_files < MIN_PARALLEL_PARSE_FILES:
+        return 1
+    cpu_count = os.cpu_count() or 1
+    return min(MAX_AUTO_SCAN_WORKERS, cpu_count, changed_files)
+
+
+def parse_task_chunksize(task_count: int, workers: int) -> int:
+    if task_count <= 0 or workers <= 1:
+        return 1
+    return max(1, task_count // (workers * PARSE_CHUNKS_PER_WORKER))
+
+
+def serial_parse_results(tasks: list[ParseWorkerTask]) -> Iterator[ParseWorkerResult]:
+    for task in tasks:
+        yield parse_file_worker(task)
+
+
+def parallel_parse_results(
+    tasks: list[ParseWorkerTask],
+    *,
+    workers: int,
+    profile_name: str,
+) -> Iterator[ParseWorkerResult]:
+    chunksize = parse_task_chunksize(len(tasks), workers)
+    progress_event(
+        "code_intel_scan_workers_started",
+        workers=workers,
+        files=len(tasks),
+        chunksize=chunksize,
+    )
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        initializer=initialize_parse_worker,
+        initargs=(profile_name,),
+    ) as executor:
+        yield from executor.map(parse_file_worker, tasks, chunksize=chunksize)
+
+
+def collect_parse_results(
+    files: list[IntelFile],
+    changed_paths: set[str],
+    results: Iterator[ParseWorkerResult],
+    *,
+    repo: str,
+    progress_every: int,
+) -> tuple[list[IntelRecord], list[IntelEdge], list[JsonObject]]:
+    records: list[IntelRecord] = []
+    edges: list[IntelEdge] = []
+    failures: list[JsonObject] = []
+    for idx, intel_file in enumerate(files, 1):
+        runtime_state.active_metrics.add_phase_done(1)
+        if intel_file.source_path in changed_paths:
+            result = next(results)
+            if result.source_path != intel_file.source_path:
+                raise RuntimeError("parallel parser returned results out of order")
+            records.extend(result.records)
+            edges.extend(result.edges)
+            failures.extend(result.failures)
+        if progress_every and (idx % progress_every == 0 or idx == len(files)):
+            progress_event(
+                "code_intel_parsed",
+                repo=repo,
+                files=idx,
+                total_files=len(files),
+                changed_files=len(changed_paths),
+                unchanged_files=len(files) - len(changed_paths),
+                records=len(records),
+                edges=len(edges),
+                parser_failures=len(failures),
+            )
+    return records, edges, failures
+
+
+def parse_changed_files(
+    files: list[IntelFile],
+    changed_paths: set[str],
+    *,
+    config: RepoIngestConfig,
+) -> tuple[list[IntelRecord], list[IntelEdge], list[JsonObject]]:
+    tasks = [
+        ParseWorkerTask(
+            intel_file=intel_file,
+            max_chars=config.max_chars,
+            overlap_lines=config.overlap_lines,
+        )
+        for intel_file in files
+        if intel_file.source_path in changed_paths
+    ]
+    workers = resolve_scan_workers(config.scan_workers, len(tasks))
+    runtime_state.active_metrics.set("scan_workers", workers)
+    if workers > 1 and len(tasks) > 1:
+        results = parallel_parse_results(tasks, workers=workers, profile_name=config.profile_name)
+    else:
+        results = serial_parse_results(tasks)
+    return collect_parse_results(
+        files,
+        changed_paths,
+        results,
+        repo=config.repo,
+        progress_every=config.progress_every,
+    )
+
+
+def previous_signatures_from_states(previous_files: dict[str, PreviousFileState]) -> dict[str, str]:
+    return {source_path: previous_file_state_signature(state) for source_path, state in previous_files.items()}
+
+
 def ingest_repo(config: RepoIngestConfig) -> RepoIngest:
+    started = time.monotonic()
     snapshot = make_snapshot(config.root, config.repo, config.collection)
-    files = discover_files(config.root, snapshot, config.max_file_bytes)
+    runtime_state.active_metrics.add("scan_git_seconds", time.monotonic() - started)
+    previous_snapshot_id = config.previous_snapshot_id
+    previous_files = config.previous_files or {}
+    previous_signatures = previous_signatures_from_states(previous_files)
+    reuse_unchanged_blobs = config.mode == "incremental" and not snapshot.dirty and bool(previous_files)
+    started = time.monotonic()
+    files = discover_files(
+        config.root,
+        snapshot,
+        config.max_file_bytes,
+        previous_files=previous_files,
+        reuse_unchanged_blobs=reuse_unchanged_blobs,
+    )
+    runtime_state.active_metrics.add("scan_discovery_seconds", time.monotonic() - started)
     if config.limit_files is not None:
         files = files[: config.limit_files]
     runtime_state.active_metrics.add_phase_total(len(files))
-    previous_snapshot_id = config.previous_snapshot_id
-    previous_signatures = config.previous_signatures or {}
     current_signatures = {item.source_path: file_signature(item) for item in files}
     unchanged_paths: set[str] = {
         path for path, signature in current_signatures.items() if previous_signatures.get(path) == signature
@@ -243,6 +409,14 @@ def ingest_repo(config: RepoIngestConfig) -> RepoIngest:
         unchanged_paths = set[str]()
         deleted_paths = set[str]()
     changed_paths: set[str] = set(current_signatures) - unchanged_paths
+    reused_unchanged_files = sum(
+        1
+        for item in files
+        if reuse_unchanged_blobs
+        and (previous := previous_files.get(item.source_path)) is not None
+        and previous.git_blob_sha == item.git_blob_sha
+    )
+    runtime_state.active_metrics.add("reused_unchanged_files", reused_unchanged_files)
     progress_event(
         "code_intel_discovered",
         repo=config.repo,
@@ -253,42 +427,11 @@ def ingest_repo(config: RepoIngestConfig) -> RepoIngest:
         mode=config.mode,
         commit_sha=snapshot.commit_sha,
         tree_sha=snapshot.tree_sha,
+        reused_unchanged_files=reused_unchanged_files,
     )
-    records: list[IntelRecord] = []
-    edges: list[IntelEdge] = []
-    failures: list[JsonObject] = []
-    for idx, intel_file in enumerate(files, 1):
-        runtime_state.active_metrics.add_phase_done(1)
-        if intel_file.source_path in unchanged_paths:
-            if config.progress_every and (idx % config.progress_every == 0 or idx == len(files)):
-                progress_event(
-                    "code_intel_parsed",
-                    repo=config.repo,
-                    files=idx,
-                    total_files=len(files),
-                    changed_files=len(changed_paths),
-                    unchanged_files=len(unchanged_paths),
-                    records=len(records),
-                    edges=len(edges),
-                    parser_failures=len(failures),
-                )
-            continue
-        file_records, file_edges, file_failures = parse_file(intel_file, config.max_chars, config.overlap_lines)
-        records.extend(file_records)
-        edges.extend(file_edges)
-        failures.extend(file_failures)
-        if config.progress_every and (idx % config.progress_every == 0 or idx == len(files)):
-            progress_event(
-                "code_intel_parsed",
-                repo=config.repo,
-                files=idx,
-                total_files=len(files),
-                changed_files=len(changed_paths),
-                unchanged_files=len(unchanged_paths),
-                records=len(records),
-                edges=len(edges),
-                parser_failures=len(failures),
-            )
+    started = time.monotonic()
+    records, edges, failures = parse_changed_files(files, changed_paths, config=config)
+    runtime_state.active_metrics.add("scan_parse_seconds", time.monotonic() - started)
     return RepoIngest(
         snapshot=snapshot,
         files=files,
@@ -312,6 +455,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _ = parser.add_argument("--repos", default=config.env_text("PROJECT_CODE_INTELLIGENCE_REPOS"))
     _ = parser.add_argument("--max-file-bytes", type=int, default=512 * 1024)
+    _ = parser.add_argument(
+        "--scan-workers",
+        type=int,
+        default=config.env_int("PROJECT_CODE_INTELLIGENCE_SCAN_WORKERS", AUTO_SCAN_WORKERS, minimum=0),
+        help="Parser worker processes. 0 chooses a conservative auto value; 1 disables process-pool parsing.",
+    )
     _ = parser.add_argument("--chunk-chars", type=int, default=2400)
     _ = parser.add_argument("--overlap-lines", type=int, default=6)
     _ = parser.add_argument("--limit-files", type=int)
@@ -407,6 +556,7 @@ def parse_cli_args(argv: list[str] | None = None) -> CliArgs:
         profile=parsed.profile,
         repos=parsed.repos,
         max_file_bytes=parsed.max_file_bytes,
+        scan_workers=parsed.scan_workers,
         chunk_chars=parsed.chunk_chars,
         overlap_lines=parsed.overlap_lines,
         limit_files=parsed.limit_files,
@@ -437,6 +587,7 @@ def parse_cli_args(argv: list[str] | None = None) -> CliArgs:
 def validate_non_negative_args(args: CliArgs) -> None:
     checks = {
         "--max-file-bytes": args.max_file_bytes,
+        "--scan-workers": args.scan_workers,
         "--overlap-lines": args.overlap_lines,
         "--progress-every": args.progress_every,
         "--sarif-max-bytes": args.sarif_max_bytes,
@@ -681,7 +832,7 @@ def run_embed_only(plan: IngestPlan) -> int:
     return 0
 
 
-def previous_repo_states(plan: IngestPlan) -> dict[str, tuple[int | None, dict[str, str], str]]:
+def previous_repo_states(plan: IngestPlan) -> dict[str, tuple[int | None, dict[str, PreviousFileState], str]]:
     if plan.mode != "incremental":
         return {repo: (None, {}, "full") for repo in plan.repos}
     try:
@@ -692,13 +843,17 @@ def previous_repo_states(plan: IngestPlan) -> dict[str, tuple[int | None, dict[s
         return {repo: (None, {}, "full") for repo in plan.repos}
 
 
-def previous_repo_state(conn: db.DbConnection, collection: str, repo: str) -> tuple[int | None, dict[str, str], str]:
+def previous_repo_state(
+    conn: db.DbConnection,
+    collection: str,
+    repo: str,
+) -> tuple[int | None, dict[str, PreviousFileState], str]:
     previous = latest_snapshot_info(conn, collection, repo)
     metadata = previous.get("metadata") if previous else None
     metadata_obj = metadata if isinstance(metadata, dict) else None
     if previous and snapshot_versions_compatible(metadata_obj):
         previous_id = json_int(previous, "id")
-        return previous_id, previous_file_signatures(conn, previous_id), "incremental"
+        return previous_id, previous_file_states(conn, previous_id), "incremental"
     return None, {}, "full"
 
 
@@ -717,23 +872,25 @@ def add_repo_ingest_metrics(ingest: RepoIngest) -> None:
 
 def scan_repositories(
     plan: IngestPlan,
-    previous_by_repo: dict[str, tuple[int | None, dict[str, str], str]],
+    previous_by_repo: dict[str, tuple[int | None, dict[str, PreviousFileState], str]],
 ) -> list[RepoIngest]:
     ingests: list[RepoIngest] = []
     for repo in plan.repos:
-        previous_snapshot_id, previous_signatures, repo_mode = previous_by_repo.get(repo, (None, {}, "full"))
+        previous_snapshot_id, previous_files, repo_mode = previous_by_repo.get(repo, (None, {}, "full"))
         ingest = ingest_repo(
             RepoIngestConfig(
                 root=plan.root,
                 repo=repo,
                 collection=plan.collection,
+                profile_name=plan.args.profile,
                 max_file_bytes=plan.args.max_file_bytes,
+                scan_workers=plan.args.scan_workers,
                 max_chars=plan.args.chunk_chars,
                 overlap_lines=plan.args.overlap_lines,
                 limit_files=plan.args.limit_files,
                 progress_every=plan.args.progress_every,
                 previous_snapshot_id=previous_snapshot_id,
-                previous_signatures=previous_signatures,
+                previous_files=previous_files,
                 mode=repo_mode,
             )
         )
@@ -761,37 +918,41 @@ def merge_sarif_into_ingests(plan: IngestPlan, ingests: list[RepoIngest], sarif_
 
 
 def scan_sarif(plan: IngestPlan, ingests: list[RepoIngest]) -> SarifIngest:
+    started = time.monotonic()
     sarif_ingest = SarifIngest(runs=[], records_by_repo={}, failures=[])
-    sarif_files = discover_plan_sarif_files(plan)
-    emit_sarif_discovery(plan, sarif_files)
-    if not sarif_files:
+    try:
+        sarif_files = discover_plan_sarif_files(plan)
+        emit_sarif_discovery(plan, sarif_files)
+        if not sarif_files:
+            return sarif_ingest
+        runtime_state.active_metrics.add_phase_total(len(sarif_files))
+        file_by_source_path = {file.source_path: file for ingest in ingests for file in ingest.files}
+        sarif_ingest = ingest_sarif(
+            SarifIngestContext(
+                root=plan.root,
+                repos=plan.repos,
+                collection=plan.collection,
+                file_by_source_path=file_by_source_path,
+                max_bytes=plan.args.sarif_max_bytes,
+            ),
+            sarif_files,
+        )
+        runtime_state.active_metrics.add_phase_done(len(sarif_files))
+        merge_sarif_into_ingests(plan, ingests, sarif_ingest)
+        sarif_ingest.warnings.extend(sarif_freshness_warnings(plan, ingests, sarif_ingest))
+        attach_sarif_warnings_to_runs(sarif_ingest)
+        progress_event(
+            "code_intel_sarif_parsed",
+            files=len(sarif_files),
+            runs=len(sarif_ingest.runs),
+            findings=sum(len(run.findings) for run in sarif_ingest.runs),
+            records=sum(len(records) for records in sarif_ingest.records_by_repo.values()),
+            parser_failures=len(sarif_ingest.failures),
+            warnings=len(sarif_ingest.warnings),
+        )
         return sarif_ingest
-    runtime_state.active_metrics.add_phase_total(len(sarif_files))
-    file_by_source_path = {file.source_path: file for ingest in ingests for file in ingest.files}
-    sarif_ingest = ingest_sarif(
-        SarifIngestContext(
-            root=plan.root,
-            repos=plan.repos,
-            collection=plan.collection,
-            file_by_source_path=file_by_source_path,
-            max_bytes=plan.args.sarif_max_bytes,
-        ),
-        sarif_files,
-    )
-    runtime_state.active_metrics.add_phase_done(len(sarif_files))
-    merge_sarif_into_ingests(plan, ingests, sarif_ingest)
-    sarif_ingest.warnings.extend(sarif_freshness_warnings(plan, ingests, sarif_ingest))
-    attach_sarif_warnings_to_runs(sarif_ingest)
-    progress_event(
-        "code_intel_sarif_parsed",
-        files=len(sarif_files),
-        runs=len(sarif_ingest.runs),
-        findings=sum(len(run.findings) for run in sarif_ingest.runs),
-        records=sum(len(records) for records in sarif_ingest.records_by_repo.values()),
-        parser_failures=len(sarif_ingest.failures),
-        warnings=len(sarif_ingest.warnings),
-    )
-    return sarif_ingest
+    finally:
+        runtime_state.active_metrics.add("scan_sarif_seconds", time.monotonic() - started)
 
 
 def parse_sarif_warning_datetime(value: object) -> datetime | None:

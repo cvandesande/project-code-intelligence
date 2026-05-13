@@ -54,6 +54,10 @@ class RuntimeMetrics:
     active_phase: str | None = None
     active_phase_started: float | None = None
     scan_seconds: float = 0.0
+    scan_git_seconds: float = 0.0
+    scan_discovery_seconds: float = 0.0
+    scan_parse_seconds: float = 0.0
+    scan_sarif_seconds: float = 0.0
     db_upload_seconds: float = 0.0
     db_retries: int = 0
     embedding_seconds: float = 0.0
@@ -62,10 +66,12 @@ class RuntimeMetrics:
     discovered_files: int = 0
     changed_files: int = 0
     unchanged_files: int = 0
+    reused_unchanged_files: int = 0
     parsed_files: int = 0
     generated_records: int = 0
     generated_edges: int = 0
     parser_failures: int = 0
+    scan_workers: int = 1
     inserted_files: int = 0
     inserted_records: int = 0
     inserted_edges: int = 0
@@ -192,6 +198,10 @@ class RuntimeMetrics:
             )
             timing: JsonObject = {
                 "scan_seconds": round(self.scan_seconds + (active_seconds if active_phase == "scan" else 0.0), 3),
+                "scan_git_seconds": round(self.scan_git_seconds, 3),
+                "scan_discovery_seconds": round(self.scan_discovery_seconds, 3),
+                "scan_parse_seconds": round(self.scan_parse_seconds, 3),
+                "scan_sarif_seconds": round(self.scan_sarif_seconds, 3),
                 "db_upload_seconds": round(
                     self.db_upload_seconds + (active_seconds if active_phase == "db_upload" else 0.0), 3
                 ),
@@ -203,10 +213,12 @@ class RuntimeMetrics:
                 "discovered_files": self.discovered_files,
                 "changed_files": self.changed_files,
                 "unchanged_files": self.unchanged_files,
+                "reused_unchanged_files": self.reused_unchanged_files,
                 "parsed_files": self.parsed_files,
                 "generated_records": self.generated_records,
                 "generated_edges": self.generated_edges,
                 "parser_failures": self.parser_failures,
+                "scan_workers": self.scan_workers,
                 "inserted_files": self.inserted_files,
                 "inserted_records": self.inserted_records,
                 "inserted_edges": self.inserted_edges,

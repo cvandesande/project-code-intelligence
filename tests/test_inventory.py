@@ -15,7 +15,7 @@ from project_code_intelligence.inventory import (
     language_for_read_file,
     should_parse_text,
 )
-from project_code_intelligence.models import Snapshot
+from project_code_intelligence.models import PreviousFileState, Snapshot
 
 
 def snapshot_for(repo: str) -> Snapshot:
@@ -209,6 +209,48 @@ class InventoryContractTests(unittest.TestCase):
         self.assertEqual(by_path["scripts/env"].metadata["shell_functions"], ["run_demo"])
         self.assertEqual(by_path["README.md"].content_class, "doc")
         self.assertEqual(by_path["image.png"].skipped_reason, "binary_suffix")
+
+    def test_discover_files_reuses_previous_clean_blob_without_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "src" / "main.py"
+            source.parent.mkdir()
+            _ = source.write_text("def changed_on_disk():\n    return 1\n", encoding="utf-8")
+            previous = PreviousFileState(
+                source_path="src/main.py",
+                git_blob_sha="a" * 40,
+                file_sha256="previous-file-sha",
+                size_bytes=25,
+                language="python",
+                file_role="source",
+                content_class="source",
+                is_generated=False,
+                is_vendor=False,
+                is_test=False,
+                is_source=True,
+                is_build=False,
+                is_config=False,
+                is_doc=False,
+                skipped_reason=None,
+                metadata={"python_functions": ["previous"]},
+            )
+
+            with (
+                patch("project_code_intelligence.inventory.git_ls_files", return_value=[("a" * 40, "src/main.py")]),
+                patch("project_code_intelligence.inventory.inspect_inventory_file") as mocked_inspect,
+            ):
+                files = discover_files(
+                    root,
+                    snapshot_for("."),
+                    max_file_bytes=1024,
+                    previous_files={"src/main.py": previous},
+                    reuse_unchanged_blobs=True,
+                )
+
+        mocked_inspect.assert_not_called()
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].file_sha256, "previous-file-sha")
+        self.assertEqual(files[0].metadata["python_functions"], ["previous"])
 
 
 if __name__ == "__main__":

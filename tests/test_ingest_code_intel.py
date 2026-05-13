@@ -31,6 +31,7 @@ from project_code_intelligence.ingest_code_intel import (
     build_ingest_plan,
     confirm_reset_code_intel,
     discover_plan_sarif_files,
+    resolve_scan_workers,
     validate_args,
     warning_for_sarif_mtime,
 )
@@ -108,6 +109,7 @@ def cli_args(**overrides: object) -> CliArgs:
         "profile": "generic",
         "repos": None,
         "max_file_bytes": 0,
+        "scan_workers": 1,
         "chunk_chars": 2400,
         "overlap_lines": 0,
         "limit_files": None,
@@ -445,6 +447,12 @@ class ParserAndRuntimeTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             validate_args(args, embedding_requested=False)
+
+    def test_scan_workers_auto_stays_serial_for_small_scans(self) -> None:
+        self.assertEqual(resolve_scan_workers(0, 1), 1)
+        self.assertEqual(resolve_scan_workers(0, 63), 1)
+        self.assertGreaterEqual(resolve_scan_workers(0, 64), 1)
+        self.assertEqual(resolve_scan_workers(8, 3), 3)
 
     def test_reset_only_requires_reset_flag(self) -> None:
         with self.assertRaises(ValueError):

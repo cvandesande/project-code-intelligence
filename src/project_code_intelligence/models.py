@@ -281,6 +281,26 @@ class IntelFile:
     metadata: JsonObject = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class PreviousFileState:
+    source_path: str
+    git_blob_sha: str | None
+    file_sha256: str | None
+    size_bytes: int
+    language: str
+    file_role: str
+    content_class: str
+    is_generated: bool
+    is_vendor: bool
+    is_test: bool
+    is_source: bool
+    is_build: bool
+    is_config: bool
+    is_doc: bool
+    skipped_reason: str | None
+    metadata: JsonObject = field(default_factory=dict)
+
+
 @dataclass
 class IntelRecord:
     collection: str

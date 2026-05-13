@@ -21,6 +21,7 @@ from project_code_intelligence.models import (
     TEXT_SUFFIXES,
     IntelFile,
     JsonObject,
+    PreviousFileState,
     Snapshot,
 )
 from project_code_intelligence.profile_context import repo_role_for
@@ -376,6 +377,55 @@ def inspect_inventory_file(path: Path, max_file_bytes: int) -> tuple[str | None,
     return reason, data, size_bytes, True
 
 
+def file_from_previous_state(
+    snapshot: Snapshot,
+    rel_path: str,
+    abs_path: Path,
+    previous: PreviousFileState,
+) -> IntelFile:
+    return IntelFile(
+        collection=snapshot.collection,
+        repo=snapshot.repo,
+        repo_role=snapshot.repo_role,
+        branch=snapshot.branch,
+        commit_sha=snapshot.commit_sha,
+        tree_sha=snapshot.tree_sha,
+        source_path=previous.source_path,
+        repo_rel_path=rel_path,
+        abs_path=abs_path,
+        git_blob_sha=previous.git_blob_sha,
+        file_sha256=previous.file_sha256,
+        size_bytes=previous.size_bytes,
+        language=previous.language,
+        file_role=previous.file_role,
+        content_class=previous.content_class,
+        is_generated=previous.is_generated,
+        is_vendor=previous.is_vendor,
+        is_test=previous.is_test,
+        is_source=previous.is_source,
+        is_build=previous.is_build,
+        is_config=previous.is_config,
+        is_doc=previous.is_doc,
+        skipped_reason=previous.skipped_reason,
+        metadata=dict(previous.metadata),
+    )
+
+
+def reusable_previous_file(
+    source_path: str,
+    git_blob_sha: str | None,
+    previous_files: Mapping[str, PreviousFileState],
+    *,
+    reuse_unchanged_blobs: bool,
+) -> PreviousFileState | None:
+    if not reuse_unchanged_blobs or git_blob_sha is None:
+        return None
+    previous = previous_files.get(source_path)
+    if previous is None or previous.git_blob_sha != git_blob_sha:
+        return None
+    return previous
+
+
 def should_parse_text(repo_rel_path: str, language: str, skipped_reason: str | None) -> bool:
     if skipped_reason:
         return False
@@ -452,12 +502,30 @@ def make_snapshot(root: Path, repo: str, collection: str) -> Snapshot:
     )
 
 
-def discover_files(root: Path, snapshot: Snapshot, max_file_bytes: int) -> list[IntelFile]:
+def discover_files(
+    root: Path,
+    snapshot: Snapshot,
+    max_file_bytes: int,
+    *,
+    previous_files: Mapping[str, PreviousFileState] | None = None,
+    reuse_unchanged_blobs: bool = False,
+) -> list[IntelFile]:
     repo_root = root / snapshot.repo
     files: list[IntelFile] = []
+    previous_by_source_path = previous_files or {}
     for git_blob_sha, rel_path in sorted(git_ls_files(repo_root), key=itemgetter(1)):
         abs_path = repo_root / rel_path
         if not abs_path.is_file():
+            continue
+        source_path = source_path_for(snapshot.repo, rel_path)
+        previous = reusable_previous_file(
+            source_path,
+            git_blob_sha,
+            previous_by_source_path,
+            reuse_unchanged_blobs=reuse_unchanged_blobs,
+        )
+        if previous is not None:
+            files.append(file_from_previous_state(snapshot, rel_path, abs_path, previous))
             continue
         reason, data, size_bytes, read_ok = inspect_inventory_file(abs_path, max_file_bytes)
         language = language_for_read_file(rel_path, data, read_ok=read_ok)
@@ -481,7 +549,7 @@ def discover_files(root: Path, snapshot: Snapshot, max_file_bytes: int) -> list[
                 branch=snapshot.branch,
                 commit_sha=snapshot.commit_sha,
                 tree_sha=snapshot.tree_sha,
-                source_path=source_path_for(snapshot.repo, rel_path),
+                source_path=source_path,
                 repo_rel_path=rel_path,
                 abs_path=abs_path,
                 git_blob_sha=git_blob_sha,
