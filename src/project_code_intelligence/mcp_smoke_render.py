@@ -184,7 +184,55 @@ def _status_rows(payload: JsonDict, repo: str, snapshot: JsonDict | None) -> Tab
     return rows
 
 
-def render_status(response: object, *, repo: str) -> None:
+_PROBE_RESULT_KEYS: dict[str, str] = {
+    "list_code_intel_files": "files",
+    "list_code_intel_parser_failures": "parser_failures",
+    "search_code_intel_text": "results",
+    "search_code_intel_semantic": "results",
+    "related_code_intel": "edges",
+}
+
+
+def _probes_block(probes: list[dict[str, object]] | None) -> Group | None:
+    if not probes:
+        return None
+    sub = Table.grid(padding=(0, 1))
+    sub.add_column(width=1, no_wrap=True)
+    sub.add_column(min_width=32, no_wrap=True)
+    sub.add_column(overflow="fold")
+    for probe in probes:
+        tool = str(probe.get("tool", "?"))
+        status = str(probe.get("status", "?"))
+        glyph_kind: console_ui.PillKind = "ok" if status == "ok" else "fail"
+        glyph = Text(console_ui.STATUS_GLYPHS[glyph_kind], style={"ok": "green", "fail": "red"}[glyph_kind])
+        detail = _probe_detail(probe, tool)
+        sub.add_row(glyph, Text(tool, style="dim"), Text(detail))
+    return Group(Text("MCP tool probes", style="bold"), sub)
+
+
+def _probe_detail(probe: dict[str, object], tool: str) -> str:
+    if probe.get("status") != "ok":
+        error = probe.get("error")
+        if isinstance(error, str):
+            return error
+        response = _as_dict(probe.get("response"))
+        if response is not None:
+            inner = response.get("error")
+            if isinstance(inner, str):
+                return inner
+        return "failed"
+    payload = _extract_payload(probe.get("response"))
+    if payload is None:
+        return "no payload"
+    result_key = _PROBE_RESULT_KEYS.get(tool)
+    if result_key is None:
+        return "ok"
+    items = _as_list(payload.get(result_key))
+    count = len(items) if items is not None else 0
+    return f"{count} item(s)"
+
+
+def render_status(response: object, *, repo: str, probes: list[dict[str, object]] | None = None) -> None:
     console = console_ui.build_console()
     payload = _extract_payload(response)
     if payload is None:
@@ -201,6 +249,9 @@ def render_status(response: object, *, repo: str) -> None:
     by_type = _records_by_type_block(_records_by_type_for(payload, repo))
     if by_type is not None:
         body.extend((Text(), by_type))
+    probes_block = _probes_block(probes)
+    if probes_block is not None:
+        body.extend((Text(), probes_block))
     console.print(console_ui.main_panel(Group(*body)))
 
 

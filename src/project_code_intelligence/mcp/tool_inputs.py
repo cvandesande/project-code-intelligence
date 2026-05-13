@@ -39,6 +39,7 @@ class _SearchFilterArgs(StrictArgs):
     confidence_kind: str | None = None
     source_path: str | None = None
     symbol: str | None = None
+    parent_record_id: str | None = None
     metadata_key: str | None = None
     metadata_value: str | None = None
     metadata_contains: dict[str, object] | None = None
@@ -64,9 +65,41 @@ class GetCodeIntelRecordArgs(StrictArgs):
 class RelatedCodeIntelArgs(StrictArgs):
     record_id: str | None = None
     symbol: str | None = None
+    edge_type: str | None = None
     collection: str | None = None
     repo: str | None = None
     limit: int | None = Field(default=None, ge=1, le=100)
+    snapshot_id: int | None = Field(default=None, ge=1)
+    include_historical: bool | None = None
+
+
+class ListCodeIntelFilesArgs(StrictArgs):
+    limit: int | None = Field(default=None, ge=1, le=500)
+    collection: str | None = None
+    repo: str | None = None
+    language: str | None = None
+    file_role: str | None = None
+    content_class: str | None = None
+    source_path: str | None = None
+    is_test: bool | None = None
+    is_doc: bool | None = None
+    is_generated: bool | None = None
+    is_vendor: bool | None = None
+    is_source: bool | None = None
+    is_build: bool | None = None
+    is_config: bool | None = None
+    only_skipped: bool | None = None
+    snapshot_id: int | None = Field(default=None, ge=1)
+    include_historical: bool | None = None
+
+
+class ListCodeIntelParserFailuresArgs(StrictArgs):
+    limit: int | None = Field(default=None, ge=1, le=500)
+    collection: str | None = None
+    repo: str | None = None
+    language: str | None = None
+    parser: str | None = None
+    source_path: str | None = None
     snapshot_id: int | None = Field(default=None, ge=1)
     include_historical: bool | None = None
 
@@ -99,6 +132,8 @@ TOOL_INPUT_MODELS: dict[str, type[StrictArgs]] = {
     "search_code_intel_semantic": SearchCodeIntelSemanticArgs,
     "get_code_intel_record": GetCodeIntelRecordArgs,
     "related_code_intel": RelatedCodeIntelArgs,
+    "list_code_intel_files": ListCodeIntelFilesArgs,
+    "list_code_intel_parser_failures": ListCodeIntelParserFailuresArgs,
     "search_static_findings": SearchStaticFindingsArgs,
     "get_static_finding": GetStaticFindingArgs,
     "get_static_code_flow": GetStaticCodeFlowArgs,

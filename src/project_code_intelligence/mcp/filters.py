@@ -167,14 +167,11 @@ def code_intel_clauses(args: Json, alias: str = "") -> tuple[list[str], QueryPar
         if value:
             clauses.append(f"{column(alias, name)} = %s")
             params.append(value)
-    source_path = optional_text(args, "source_path")
-    if source_path:
-        clauses.append(f"{column(alias, 'source_path')} = %s")
-        params.append(source_path)
-    symbol = optional_text(args, "symbol")
-    if symbol:
-        clauses.append(f"{column(alias, 'symbol')} = %s")
-        params.append(symbol)
+    for name in ("source_path", "symbol", "parent_record_id"):
+        value = optional_text(args, name)
+        if value:
+            clauses.append(f"{column(alias, name)} = %s")
+            params.append(value)
     metadata_key = optional_text(args, "metadata_key")
     metadata_value = optional_text(args, "metadata_value")
     if metadata_key and metadata_value:

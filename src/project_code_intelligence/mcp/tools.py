@@ -12,6 +12,7 @@ from project_code_intelligence.mcp.filters import (
     StatusFilters,
     code_intel_clauses,
     query_with_where,
+    scoped_collection_repo_clauses,
     scoped_snapshot_clauses,
     snapshot_scope_response,
     static_finding_clauses,
@@ -279,9 +280,10 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
                     """
             SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role,
                    r.branch, r.commit_sha, r.source_path, r.language, r.file_role,
-                   r.content_class, r.record_type, r.record_id, r.title, r.summary,
-                   r.line_start, r.line_end, r.symbol, r.symbol_kind,
-                   r.confidence_kind, r.metadata, r.embedding <=> %s::vector AS distance
+                   r.content_class, r.record_type, r.record_id, r.parent_record_id,
+                   r.title, r.summary, r.line_start, r.line_end, r.symbol,
+                   r.symbol_kind, r.confidence_kind, r.confidence, r.tool, r.rule_id,
+                   r.severity, r.metadata, r.embedding <=> %s::vector AS distance
             FROM project_code_intel_records r
             """,
                     clauses,
@@ -366,6 +368,7 @@ def tool_related_code_intel(args: Json) -> Json:
     limit = require_int(args, "limit", 20, 1, 100)
     collection = scoped_collection(args)
     repo = optional_text(args, "repo")
+    edge_type = optional_text(args, "edge_type")
 
     clauses = ["TRUE"]
     params: QueryParams = []
@@ -381,6 +384,9 @@ def tool_related_code_intel(args: Json) -> Json:
     if collection:
         clauses.append("e.collection = %s")
         params.append(collection)
+    if edge_type:
+        clauses.append("e.edge_type = %s")
+        params.append(edge_type)
     snapshot_clauses, snapshot_params = scoped_snapshot_clauses(args, "e")
     clauses.extend(snapshot_clauses)
     params.extend(snapshot_params)
@@ -396,8 +402,20 @@ def tool_related_code_intel(args: Json) -> Json:
             SELECT e.id, e.snapshot_id, e.collection, e.repo, e.commit_sha,
                    e.source_record_id, e.target_record_id, e.edge_type,
                    e.source_symbol, e.target_symbol, e.source_path, e.target_path,
-                   e.confidence_kind, e.metadata
+                   e.confidence_kind, e.metadata,
+                   src.id AS source_record_db_id, src.title AS source_title,
+                   src.summary AS source_summary, src.record_type AS source_record_type,
+                   src.language AS source_language, src.line_start AS source_line_start,
+                   src.line_end AS source_line_end,
+                   tgt.id AS target_record_db_id, tgt.title AS target_title,
+                   tgt.summary AS target_summary, tgt.record_type AS target_record_type,
+                   tgt.language AS target_language, tgt.line_start AS target_line_start,
+                   tgt.line_end AS target_line_end
             FROM project_code_intel_edges e
+            LEFT JOIN project_code_intel_records src
+                ON src.snapshot_id = e.snapshot_id AND src.record_id = e.source_record_id
+            LEFT JOIN project_code_intel_records tgt
+                ON tgt.snapshot_id = e.snapshot_id AND tgt.record_id = e.target_record_id
             """,
                     clauses,
                     """
@@ -533,6 +551,99 @@ def tool_get_static_code_flow(args: Json) -> Json:
     return ok({"finding_id": finding_id, "flow_index": flow_index, "steps": rows})
 
 
+def tool_list_code_intel_files(args: Json) -> Json:
+    limit = require_int(args, "limit", 50, 1, 500)
+    clauses, params = scoped_collection_repo_clauses(args, "f")
+    for arg_name in ("language", "file_role", "content_class"):
+        value = optional_text(args, arg_name)
+        if value:
+            clauses.append(f"f.{arg_name} = %s")
+            params.append(value)
+    source_path = optional_text(args, "source_path")
+    if source_path:
+        clauses.append("f.source_path = %s")
+        params.append(source_path)
+    for arg_name in (
+        "is_test",
+        "is_doc",
+        "is_generated",
+        "is_vendor",
+        "is_source",
+        "is_build",
+        "is_config",
+    ):
+        if arg_name in args:
+            value = optional_bool(args, arg_name)
+            clauses.append(f"f.{arg_name} = %s")
+            params.append(value)
+    if optional_bool(args, "only_skipped"):
+        clauses.append("f.skipped_reason IS NOT NULL")
+    params.append(limit)
+
+    with mcp_db.connect() as conn:
+        if not code_intel_tables_exist(conn):
+            return ok({"error": "code intelligence schema is not initialized"})
+        rows = conn.execute(
+            db.query_sql(
+                query_with_where(
+                    """
+            SELECT f.id, f.snapshot_id, f.collection, f.repo, f.repo_role, f.branch,
+                   f.commit_sha, f.tree_sha, f.source_path, f.git_blob_sha, f.file_sha256,
+                   f.size_bytes, f.language, f.file_role, f.content_class,
+                   f.is_generated, f.is_vendor, f.is_test, f.is_source, f.is_build,
+                   f.is_config, f.is_doc, f.skipped_reason, f.metadata, f.created_at
+            FROM project_code_intel_files f
+            """,
+                    clauses,
+                    """
+            ORDER BY f.source_path
+            LIMIT %s
+            """,
+                )
+            ),
+            params,
+        ).fetchall()
+    return ok({**snapshot_scope_response(args), "files": rows})
+
+
+def tool_list_code_intel_parser_failures(args: Json) -> Json:
+    limit = require_int(args, "limit", 50, 1, 500)
+    clauses, params = scoped_collection_repo_clauses(args, "pf")
+    for arg_name in ("language", "parser"):
+        value = optional_text(args, arg_name)
+        if value:
+            clauses.append(f"pf.{arg_name} = %s")
+            params.append(value)
+    source_path = optional_text(args, "source_path")
+    if source_path:
+        clauses.append("pf.source_path = %s")
+        params.append(source_path)
+    params.append(limit)
+
+    with mcp_db.connect() as conn:
+        if not table_regclass_exists(conn, "project_code_intel_parser_failures"):
+            return ok({"error": "code intelligence schema is not initialized"})
+        rows = conn.execute(
+            db.query_sql(
+                query_with_where(
+                    """
+            SELECT pf.id, pf.snapshot_id, pf.collection, pf.repo, pf.commit_sha,
+                   pf.source_path, pf.language, pf.parser, pf.error, pf.metadata,
+                   pf.created_at
+            FROM project_code_intel_parser_failures pf
+            """,
+                    clauses,
+                    """
+            ORDER BY pf.source_path, pf.parser
+            LIMIT %s
+            """,
+                )
+            ),
+            params,
+        ).fetchall()
+    return ok({**snapshot_scope_response(args), "parser_failures": rows})
+
+
 ToolHandler = Callable[[Json], Json]
 ToolRegistry = dict[str, tuple[ToolDefinition, ToolHandler]]
 
@@ -543,6 +654,11 @@ TOOLS: ToolRegistry = {
     "search_code_intel_semantic": (TOOL_DEFINITIONS["search_code_intel_semantic"], tool_search_code_intel_semantic),
     "get_code_intel_record": (TOOL_DEFINITIONS["get_code_intel_record"], tool_get_code_intel_record),
     "related_code_intel": (TOOL_DEFINITIONS["related_code_intel"], tool_related_code_intel),
+    "list_code_intel_files": (TOOL_DEFINITIONS["list_code_intel_files"], tool_list_code_intel_files),
+    "list_code_intel_parser_failures": (
+        TOOL_DEFINITIONS["list_code_intel_parser_failures"],
+        tool_list_code_intel_parser_failures,
+    ),
     "search_static_findings": (TOOL_DEFINITIONS["search_static_findings"], tool_search_static_findings),
     "get_static_finding": (TOOL_DEFINITIONS["get_static_finding"], tool_get_static_finding),
     "get_static_code_flow": (TOOL_DEFINITIONS["get_static_code_flow"], tool_get_static_code_flow),
