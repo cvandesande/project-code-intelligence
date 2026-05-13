@@ -135,6 +135,7 @@ INDEXING_EVENTS: frozenset[str] = frozenset({
     "code_intel_static_inserted",
     "code_intel_preembedding_selected",
     "code_intel_embedding_selected",
+    "code_intel_sarif_discovering",
 })
 
 
@@ -233,7 +234,9 @@ class RichEmitter:
                 self.mode = mode
 
     def _capture_message(self, event: str, values: JsonObject) -> None:
-        if event in {"code_intel_db_retry", "code_intel_embedding_endpoint_retry"}:
+        if event == "code_intel_sarif_discovering":
+            self.last_message = "Looking for SARIF reports…"
+        elif event in {"code_intel_db_retry", "code_intel_embedding_endpoint_retry"}:
             reason = values.get("reason") or values.get("error") or "transient failure"
             attempt = values.get("attempt")
             attempts = values.get("attempts")

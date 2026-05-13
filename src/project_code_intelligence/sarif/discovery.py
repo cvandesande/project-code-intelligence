@@ -2,12 +2,31 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from project_code_intelligence import config, profile_context
 from project_code_intelligence.sarif.paths import relative_to_or_none
 
 SARIF_FIXTURE_MARKERS = frozenset({"fixture", "fixtures", "test", "tests"})
+PROFILE_SARIF_PRUNE_DIRS = frozenset({
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build_dir",
+    "dl",
+    "node_modules",
+    "staging_dir",
+    "target",
+    "tmp",
+    "venv",
+})
 
 
 def glob_pattern_paths(root: Path, pattern: str) -> list[Path]:
@@ -18,6 +37,41 @@ def glob_pattern_paths(root: Path, pattern: str) -> list[Path]:
         anchor = Path(pattern_path.anchor)
         return list(anchor.glob(str(pattern_path.relative_to(anchor))))
     return list(root.glob(pattern))
+
+
+def profile_recursive_sarif_base(root: Path, pattern: str) -> tuple[Path, str] | None:
+    suffix = ""
+    if pattern.endswith("/**/*.sarif"):
+        suffix = ".sarif"
+        prefix = pattern.removesuffix("/**/*.sarif")
+    elif pattern.endswith("/**/*.sarif.json"):
+        suffix = ".sarif.json"
+        prefix = pattern.removesuffix("/**/*.sarif.json")
+    elif pattern == "**/*.sarif":
+        suffix = ".sarif"
+        prefix = ""
+    elif pattern == "**/*.sarif.json":
+        suffix = ".sarif.json"
+        prefix = ""
+    else:
+        return None
+    base = Path(prefix)
+    return (base if base.is_absolute() else root / base, suffix)
+
+
+def profile_recursive_sarif_paths(root: Path, pattern: str) -> list[Path] | None:
+    recursive = profile_recursive_sarif_base(root, pattern)
+    if recursive is None:
+        return None
+    base, suffix = recursive
+    if not base.is_dir():
+        return []
+    paths: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = [name for name in dirnames if name not in PROFILE_SARIF_PRUNE_DIRS]
+        current = Path(dirpath)
+        paths.extend(current / name for name in filenames if name.endswith(suffix))
+    return paths
 
 
 def explicit_sarif_patterns(values: list[str] | None) -> list[str]:
@@ -50,7 +104,8 @@ def discover_sarif_files(
         patterns.extend((pattern, False) for pattern in profile_context.active_profile.sarif_globs(repos))
     found: dict[str, Path] = {}
     for pattern, explicit in patterns:
-        for path in glob_pattern_paths(root, pattern):
+        paths = None if explicit else profile_recursive_sarif_paths(root, pattern)
+        for path in paths if paths is not None else glob_pattern_paths(root, pattern):
             if is_sarif_file(path) and (explicit or not is_probable_sarif_fixture(path)):
                 found[str(path.resolve())] = path.resolve()
     return [found[key] for key in sorted(found)]
