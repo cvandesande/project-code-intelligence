@@ -249,31 +249,7 @@ def insert_files(conn: db.DbConnection, snapshot_id: int, files: list[IntelFile]
     return {str(row["source_path"]): row_int(row, "id") for row in rows}
 
 
-_RECORDS_INSERT_SQL = """
-    INSERT INTO project_code_intel_records (
-        snapshot_id, file_id, collection, repo, repo_role, branch, commit_sha,
-        tree_sha, source_path, file_sha256, language, file_role,
-        content_class, record_type, record_id, parent_record_id,
-        title, summary, embedding_text, display_content,
-        embedding_text_hash, display_hash, line_start, line_end,
-        symbol, symbol_kind, confidence_kind, confidence, tool,
-        rule_id, severity, analyzer, analyzer_version, parser,
-        parser_version, chunker_version, metadata, embedding
-    )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::vector)
-    ON CONFLICT (snapshot_id, record_type, record_id, embedding_text_hash)
-    DO UPDATE SET file_id = EXCLUDED.file_id,
-                  file_sha256 = EXCLUDED.file_sha256,
-                  summary = EXCLUDED.summary,
-                  display_content = EXCLUDED.display_content,
-                  display_hash = EXCLUDED.display_hash,
-                  metadata = EXCLUDED.metadata,
-                  embedding = coalesce(EXCLUDED.embedding, project_code_intel_records.embedding)
-"""
-
-_INSERT_BATCH_SIZE = 1_000
+_INSERT_BATCH_SIZE = 5_000
 
 
 def insert_records(
@@ -284,70 +260,127 @@ def insert_records(
 ) -> int:
     if not records:
         return 0
-    params: list[list[object]] = []
+    payload: list[dict[str, object]] = []
     for record in records:
         embedding_hash = sha256_text(record.embedding_text)
         display_hash = sha256_text(record.display_content)
-        params.append([
-            context.snapshot_id,
-            context.file_ids.get(record.source_path),
-            record.collection,
-            context.snapshot.repo,
-            context.snapshot.repo_role,
-            context.snapshot.branch,
-            context.snapshot.commit_sha,
-            context.snapshot.tree_sha,
-            record.source_path,
-            context.file_hashes.get(record.source_path),
-            record.language,
-            record.file_role,
-            record.content_class,
-            record.record_type,
-            record.record_id,
-            record.parent_record_id,
-            record.title,
-            record.summary,
-            record.embedding_text,
-            record.display_content,
-            embedding_hash,
-            display_hash,
-            record.line_start,
-            record.line_end,
-            record.symbol,
-            record.symbol_kind,
-            record.confidence_kind,
-            record.confidence,
-            record.tool,
-            record.rule_id,
-            record.severity,
-            record.analyzer,
-            record.analyzer_version,
-            record.parser,
-            record.parser_version,
-            record.chunker_version,
-            json.dumps(record.metadata, sort_keys=True, separators=(",", ":")),
-            record.embedding,
-        ])
-    # psycopg3 exposes executemany() on cursors, while this module otherwise
-    # uses connection.execute() for single-statement operations.
-    with context.conn.cursor() as cur:
-        for i in range(0, len(params), _INSERT_BATCH_SIZE):
-            batch = params[i : i + _INSERT_BATCH_SIZE]
-            cur.executemany(_RECORDS_INSERT_SQL, batch)
-            if progress_fn is not None:
-                progress_fn(len(batch))
+        payload.append({
+            "snapshot_id": context.snapshot_id,
+            "file_id": context.file_ids.get(record.source_path),
+            "collection": record.collection,
+            "repo": context.snapshot.repo,
+            "repo_role": context.snapshot.repo_role,
+            "branch": context.snapshot.branch,
+            "commit_sha": context.snapshot.commit_sha,
+            "tree_sha": context.snapshot.tree_sha,
+            "source_path": record.source_path,
+            "file_sha256": context.file_hashes.get(record.source_path),
+            "language": record.language,
+            "file_role": record.file_role,
+            "content_class": record.content_class,
+            "record_type": record.record_type,
+            "record_id": record.record_id,
+            "parent_record_id": record.parent_record_id,
+            "title": record.title,
+            "summary": record.summary,
+            "embedding_text": record.embedding_text,
+            "display_content": record.display_content,
+            "embedding_text_hash": embedding_hash,
+            "display_hash": display_hash,
+            "line_start": record.line_start,
+            "line_end": record.line_end,
+            "symbol": record.symbol,
+            "symbol_kind": record.symbol_kind,
+            "confidence_kind": record.confidence_kind,
+            "confidence": record.confidence,
+            "tool": record.tool,
+            "rule_id": record.rule_id,
+            "severity": record.severity,
+            "analyzer": record.analyzer,
+            "analyzer_version": record.analyzer_version,
+            "parser": record.parser,
+            "parser_version": record.parser_version,
+            "chunker_version": record.chunker_version,
+            "metadata": record.metadata,
+            "embedding": record.embedding,
+        })
+    for i in range(0, len(payload), _INSERT_BATCH_SIZE):
+        batch = payload[i : i + _INSERT_BATCH_SIZE]
+        _ = context.conn.execute(
+            """
+            INSERT INTO project_code_intel_records (
+                snapshot_id, file_id, collection, repo, repo_role, branch, commit_sha,
+                tree_sha, source_path, file_sha256, language, file_role,
+                content_class, record_type, record_id, parent_record_id,
+                title, summary, embedding_text, display_content,
+                embedding_text_hash, display_hash, line_start, line_end,
+                symbol, symbol_kind, confidence_kind, confidence, tool,
+                rule_id, severity, analyzer, analyzer_version, parser,
+                parser_version, chunker_version, metadata, embedding
+            )
+            SELECT
+                snapshot_id, file_id, collection, repo, repo_role, branch, commit_sha,
+                tree_sha, source_path, file_sha256, language, file_role,
+                content_class, record_type, record_id, parent_record_id,
+                title, summary, embedding_text, display_content,
+                embedding_text_hash, display_hash, line_start, line_end,
+                symbol, symbol_kind, confidence_kind, confidence, tool,
+                rule_id, severity, analyzer, analyzer_version, parser,
+                parser_version, chunker_version, metadata, embedding::vector
+            FROM jsonb_to_recordset(%s::jsonb) AS r(
+                snapshot_id bigint,
+                file_id bigint,
+                collection text,
+                repo text,
+                repo_role text,
+                branch text,
+                commit_sha text,
+                tree_sha text,
+                source_path text,
+                file_sha256 text,
+                language text,
+                file_role text,
+                content_class text,
+                record_type text,
+                record_id text,
+                parent_record_id text,
+                title text,
+                summary text,
+                embedding_text text,
+                display_content text,
+                embedding_text_hash text,
+                display_hash text,
+                line_start integer,
+                line_end integer,
+                symbol text,
+                symbol_kind text,
+                confidence_kind text,
+                confidence real,
+                tool text,
+                rule_id text,
+                severity text,
+                analyzer text,
+                analyzer_version text,
+                parser text,
+                parser_version text,
+                chunker_version text,
+                metadata jsonb,
+                embedding text
+            )
+            ON CONFLICT (snapshot_id, record_type, record_id, embedding_text_hash)
+            DO UPDATE SET file_id = EXCLUDED.file_id,
+                          file_sha256 = EXCLUDED.file_sha256,
+                          summary = EXCLUDED.summary,
+                          display_content = EXCLUDED.display_content,
+                          display_hash = EXCLUDED.display_hash,
+                          metadata = EXCLUDED.metadata,
+                          embedding = coalesce(EXCLUDED.embedding, project_code_intel_records.embedding)
+            """,
+            [json.dumps(batch, sort_keys=True, separators=(",", ":"))],
+        )
+        if progress_fn is not None:
+            progress_fn(len(batch))
     return len(records)
-
-
-_EDGES_INSERT_SQL = """
-    INSERT INTO project_code_intel_edges (
-        snapshot_id, collection, repo, commit_sha, source_record_id, target_record_id,
-        edge_type, source_symbol, target_symbol, source_path, target_path,
-        confidence_kind, metadata
-    )
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
-    ON CONFLICT DO NOTHING
-"""
 
 
 def insert_edges(
@@ -360,32 +393,58 @@ def insert_edges(
 ) -> int:
     if not edges:
         return 0
-    params = [
-        [
-            snapshot_id,
-            snapshot.collection,
-            snapshot.repo,
-            snapshot.commit_sha,
-            edge.source_record_id,
-            edge.target_record_id,
-            edge.edge_type,
-            edge.source_symbol,
-            edge.target_symbol,
-            edge.source_path,
-            edge.target_path,
-            edge.confidence_kind,
-            json.dumps(edge.metadata, sort_keys=True, separators=(",", ":")),
-        ]
+    payload = [
+        {
+            "snapshot_id": snapshot_id,
+            "collection": snapshot.collection,
+            "repo": snapshot.repo,
+            "commit_sha": snapshot.commit_sha,
+            "source_record_id": edge.source_record_id,
+            "target_record_id": edge.target_record_id,
+            "edge_type": edge.edge_type,
+            "source_symbol": edge.source_symbol,
+            "target_symbol": edge.target_symbol,
+            "source_path": edge.source_path,
+            "target_path": edge.target_path,
+            "confidence_kind": edge.confidence_kind,
+            "metadata": edge.metadata,
+        }
         for edge in edges
     ]
-    # psycopg3 exposes executemany() on cursors, while this module otherwise
-    # uses connection.execute() for single-statement operations.
-    with conn.cursor() as cur:
-        for i in range(0, len(params), _INSERT_BATCH_SIZE):
-            batch = params[i : i + _INSERT_BATCH_SIZE]
-            cur.executemany(_EDGES_INSERT_SQL, batch)
-            if progress_fn is not None:
-                progress_fn(len(batch))
+    for i in range(0, len(payload), _INSERT_BATCH_SIZE):
+        batch = payload[i : i + _INSERT_BATCH_SIZE]
+        _ = conn.execute(
+            """
+            INSERT INTO project_code_intel_edges (
+                snapshot_id, collection, repo, commit_sha, source_record_id, target_record_id,
+                edge_type, source_symbol, target_symbol, source_path, target_path,
+                confidence_kind, metadata
+            )
+            SELECT
+                snapshot_id, collection, repo, commit_sha, source_record_id, target_record_id,
+                edge_type, source_symbol, target_symbol, source_path, target_path,
+                confidence_kind, metadata
+            FROM jsonb_to_recordset(%s::jsonb) AS r(
+                snapshot_id bigint,
+                collection text,
+                repo text,
+                commit_sha text,
+                source_record_id text,
+                target_record_id text,
+                edge_type text,
+                source_symbol text,
+                target_symbol text,
+                source_path text,
+                target_path text,
+                confidence_kind text,
+                metadata jsonb
+            )
+            ON CONFLICT DO NOTHING
+            """,
+            [json.dumps(batch, sort_keys=True, separators=(",", ":"))],
+        )
+        if progress_fn is not None:
+            progress_fn(len(batch))
     return len(edges)
 
 
@@ -404,22 +463,25 @@ def resolve_edge_targets(conn: db.DbConnection, snapshot_id: int) -> int:
         SET target_record_id = matches.record_id,
             target_path       = matches.source_path
         FROM (
-            SELECT DISTINCT ON (e2.id)
-                   e2.id        AS edge_id,
+            SELECT e2.id AS edge_id,
                    r.record_id,
                    r.source_path
             FROM   project_code_intel_edges e2
-            JOIN   project_code_intel_records r
-                   ON  r.snapshot_id  = e2.snapshot_id
-                   AND r.symbol       = e2.target_symbol
-                   AND r.record_type  = 'symbol_definition'
-            WHERE  e2.snapshot_id         = %s
-              AND  e2.target_record_id    IS NULL
-              AND  e2.target_symbol       IS NOT NULL
-            ORDER  BY e2.id, r.source_path
+            CROSS JOIN LATERAL (
+                SELECT record_id, source_path
+                FROM   project_code_intel_records
+                WHERE  snapshot_id = e2.snapshot_id
+                  AND  symbol      = e2.target_symbol
+                  AND  record_type = 'symbol_definition'
+                ORDER  BY source_path
+                LIMIT  1
+            ) r
+            WHERE  e2.snapshot_id      = %s
+              AND  e2.target_record_id IS NULL
+              AND  e2.target_symbol    IS NOT NULL
         ) matches
-        WHERE e.id           = matches.edge_id
-          AND e.snapshot_id  = %s
+        WHERE e.id          = matches.edge_id
+          AND e.snapshot_id = %s
         RETURNING e.id
         """,
         [snapshot_id, snapshot_id],

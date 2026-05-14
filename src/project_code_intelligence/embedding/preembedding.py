@@ -179,8 +179,8 @@ def consume_preembedding_results(
                 error=str(result.error)[:240],
                 remaining_batches=len(remaining_batches),
             )
-            for batch in remaining_batches:
-                inserted += insert_records(insert_context, batch)
+            flattened = [record for batch in remaining_batches for record in batch]
+            inserted += insert_records(insert_context, flattened)
             state.consumed_batches = len(state.batches)
             return inserted
         state.processed_records += len(result.batch)
@@ -226,8 +226,8 @@ def insert_records_with_preembedding(
             records=remaining_records,
             batches=len(remaining_batches),
         )
-        for batch in remaining_batches:
-            inserted += insert_records(insert_context, batch, progress_fn=progress_fn)
+        flattened = [record for batch in remaining_batches for record in batch]
+        inserted += insert_records(insert_context, flattened, progress_fn=progress_fn)
         state.consumed_batches = len(state.batches)
     return inserted, state.embedded, state.skipped
 

@@ -19,10 +19,11 @@ from project_code_intelligence.doctor.common import (
     version_at_least,
     version_tuple,
 )
-from project_code_intelligence.doctor.types import CheckResult, GpuInfo, Status
+from project_code_intelligence.doctor.types import CheckResult, GpuInfo
+from project_code_intelligence.embedding.apple_llama_server import llama_server_is_running, looks_like_hf_model_id
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
 AMD_NPU_MIN_KERNEL = (7, 0)
 AMD_NPU_MIN_FIRMWARE = (1, 1, 0, 0)
@@ -236,28 +237,7 @@ def amd_npu_firmware_versions() -> list[str]:
 
 
 def _check_darwin_npu() -> list[CheckResult]:
-    """Check Apple Neural Engine availability on macOS arm64."""
-    if platform.machine().lower() != "arm64":
-        return [result("npu", "skip", "No supported Apple Neural Engine backend is available on this Mac.")]
-    if not coremltools_available():
-        return [
-            result(
-                "npu",
-                "skip",
-                "Apple Neural Engine requires coremltools; using Metal GPU path.",
-                "pip install coremltools transformers to enable the Core ML backend (ANE + GPU + CPU).",
-            )
-        ]
-    cores = detect_ane_cores()
-    detail = (
-        "Core ML with compute_units=ALL distributes work across ANE, GPU, and CPU. "
-        "Run pci-coreml-server --diagnose for per-operation device assignments."
-    )
-    if cores is not None and cores > 0:
-        message = f"Apple Neural Engine detected: {cores} cores, available via Core ML."
-    else:
-        message = "Apple Neural Engine is available via Core ML (coremltools installed)."
-    return [result("npu", "ok", message, detail)]
+    return [result("npu", "skip", "Apple Neural Engine is not used; embeddings run via llama.cpp Metal.")]
 
 
 def check_npu_support(env: config.Env) -> list[CheckResult]:
@@ -530,99 +510,10 @@ def check_platform(env: config.Env) -> list[CheckResult]:
         )
     ]
     llama_model = config.env_text("PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL", env=env)
-    llama_configured = bool(
-        llama_model
-        or config.env_text("PROJECT_CODE_INTELLIGENCE_LLAMA_SERVER", env=env)
-        or config.env_text("PROJECT_CODE_INTELLIGENCE_LLAMA_CPP_DIR", env=env)
-    )
     if platform.system() != "Darwin":
         return results
 
-    apple_backend = (config.env_text("PROJECT_CODE_INTELLIGENCE_APPLE_BACKEND", env=env) or "").strip().lower()
-    coreml_available = coremltools_available()
-    if apple_backend == "coreml" or (apple_backend != "metal" and coreml_available):
-        results.extend(_check_coreml(env))
-    elif llama_configured:
-        results.extend(_check_apple_metal(env, llama_model=llama_model))
-    elif coreml_available:
-        results.extend(_check_coreml(env))
-    else:
-        results.append(
-            result(
-                "apple-metal",
-                "skip",
-                "Apple Metal llama.cpp is not configured.",
-                "Set PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL for Metal, "
-                "or pip install coremltools transformers for Core ML (ANE + GPU).",
-            )
-        )
-    return results
-
-
-def coremltools_available() -> bool:
-    try:
-        __import__("coremltools")
-    except ImportError:
-        return False
-    return True
-
-
-def detect_ane_cores() -> int | None:
-    """Return the Neural Engine core count via coremltools, or None if unavailable."""
-    try:
-        compute_device = cast("object", __import__("coremltools.models.compute_device", fromlist=["MLComputeDevice"]))
-    except (ImportError, Exception):  # noqa: BLE001 - coremltools native lib may fail
-        return None
-    device_cls = cast("object | None", getattr(compute_device, "MLComputeDevice", None))
-    get_all: Callable[[], list[object]] | None = (
-        cast("Callable[[], list[object]] | None", getattr(device_cls, "get_all_compute_devices", None))
-        if device_cls is not None
-        else None
-    )
-    ane_cls = cast("type[object] | None", getattr(compute_device, "MLNeuralEngineComputeDevice", None))
-    if get_all is None or ane_cls is None:
-        return None
-    try:
-        devices = get_all()
-    except Exception:  # noqa: BLE001 - native framework may fail
-        return None
-    for device in devices:
-        if isinstance(device, ane_cls):
-            core_count = cast("object | None", getattr(device, "total_core_count", None))
-            return core_count if isinstance(core_count, int) else 0
-    return None
-
-
-def _check_coreml(env: config.Env) -> list[CheckResult]:
-    results: list[CheckResult] = []
-    cores = detect_ane_cores()
-    if cores is not None and cores > 0:
-        results.append(
-            result(
-                "apple-coreml",
-                "ok",
-                f"coremltools is available; Neural Engine has {cores} cores; Core ML backend uses ANE + GPU + CPU.",
-                "Run pci-coreml-server --diagnose for per-operation device assignments.",
-            )
-        )
-    else:
-        results.append(
-            result(
-                "apple-coreml",
-                "ok",
-                "coremltools is available; Core ML backend uses ANE + GPU + CPU.",
-                "Run pci-coreml-server --diagnose for per-operation device assignments.",
-            )
-        )
-    model_name = config.env_text("PROJECT_CODE_INTELLIGENCE_COREML_MODEL", config.DEFAULT_COREML_MODEL, env=env)
-    results.append(
-        result(
-            "apple-coreml-model",
-            "ok",
-            f"Core ML embedding model: {model_name}.",
-            "Set PROJECT_CODE_INTELLIGENCE_COREML_MODEL to override.",
-        )
-    )
+    results.extend(_check_apple_metal(env, llama_model=llama_model))
     return results
 
 
@@ -637,28 +528,41 @@ def _check_apple_metal(env: config.Env, *, llama_model: str | None) -> list[Chec
             result(
                 "apple-metal",
                 "warn",
-                "llama-server was not found; install llama.cpp on the macOS host for Apple GPU embeddings.",
-                "Recommended install path: brew install llama.cpp. "
-                "Or pip install coremltools transformers for Core ML (ANE + GPU).",
+                "llama-server was not found.",
+                "Install llama.cpp via Homebrew: brew install llama.cpp",
             )
         )
 
     if llama_model:
         model_path = Path(llama_model)
-        status: Status = "ok" if model_path.is_file() else "fail"
-        message = (
-            f"llama.cpp embedding model exists: {llama_model}"
-            if model_path.is_file()
-            else f"llama.cpp embedding model was not found: {llama_model}"
-        )
-        results.append(result("apple-metal-model", status, message))
+        if model_path.is_file():
+            results.append(result("apple-metal-model", "ok", f"llama.cpp embedding model exists: {llama_model}"))
+        elif looks_like_hf_model_id(llama_model):
+            results.append(
+                result(
+                    "apple-metal-model",
+                    "fail",
+                    f"PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL is a HuggingFace model ID, not a local path: {llama_model}",
+                    "This variable must point to a local .gguf file. "
+                    "To download a specific HuggingFace model, set "
+                    "PROJECT_CODE_INTELLIGENCE_HF_MODEL_REPO and PROJECT_CODE_INTELLIGENCE_HF_MODEL_FILE, "
+                    "then unset PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL.",
+                )
+            )
+        else:
+            results.append(
+                result("apple-metal-model", "fail", f"llama.cpp embedding model was not found: {llama_model}")
+            )
+    elif llama_server_is_running():
+        results.append(result("apple-metal-model", "ok", "llama-server is running via pci-apple-llama-server."))
     else:
         results.append(
             result(
                 "apple-metal-model",
                 "warn",
-                "PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL is not set.",
-                "Set it to a GGUF embedding model such as Qwen3-Embedding-0.6B-Q8_0.gguf.",
+                "No local embedding model is configured.",
+                "Run pci-apple-llama-server to download and start a local model, "
+                "or set PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT for a remote provider.",
             )
         )
     return results

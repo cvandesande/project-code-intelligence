@@ -12,7 +12,6 @@ from project_code_intelligence.doctor.hardware import (
     GIB,
     GPU_QWEN3_DEFAULT_MODEL,
     GPU_QWEN3_LARGE_MODEL,
-    coremltools_available,
     has_gpu_vendor,
     has_ready_npu,
     max_gpu_memory_bytes,
@@ -44,10 +43,7 @@ def default_gpu_model_detail(env: config.Env) -> str:
     model_path = Path("models") / (model_file or GPU_QWEN3_DEFAULT_MODEL)
     if model_path.is_file():
         return f"default GGUF present at {model_path}"
-    return (
-        f"default GGUF is {model_file}; Linux GPU profiles download it into ./models, "
-        "Apple users should download it for host-native llama.cpp."
-    )
+    return f"default GGUF is {model_file}; Linux GPU profiles download it into ./models."
 
 
 def check_embedding_options(
@@ -105,25 +101,15 @@ def check_embedding_options(
             )
         )
     if has_gpu_vendor(gpus, "Apple"):
-        coreml = coremltools_available()
-        if coreml:
-            results.append(
-                result(
-                    "option-gpu-apple",
-                    "ok",
-                    f"Apple embeddings: Core ML (ANE + GPU + CPU) default {config.DEFAULT_COREML_MODEL}.",
-                    "Docker is not used. Run pci-coreml-server on the macOS host.",
-                )
+        results.append(
+            result(
+                "option-gpu-apple",
+                "ok",
+                f"Apple GPU embeddings: host-native llama.cpp Metal default {config.DEFAULT_APPLE_METAL_MODEL}.",
+                "Run pci-apple-llama-server — installs llama.cpp via Homebrew and downloads the model automatically "
+                "on first run. Override with PROJECT_CODE_INTELLIGENCE_HF_MODEL_REPO/FILE.",
             )
-        else:
-            results.append(
-                result(
-                    "option-gpu-apple",
-                    "ok",
-                    f"Apple GPU embeddings: host-native llama.cpp Metal default {GPU_QWEN3_DEFAULT_MODEL}.",
-                    f"{gpu_model_detail} Docker is not used for Apple GPU embeddings.",
-                )
-            )
+        )
     if not any(gpu.vendor in {"AMD", "NVIDIA", "Apple"} for gpu in gpus):
         results.append(
             result(

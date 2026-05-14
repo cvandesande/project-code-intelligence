@@ -1,4 +1,4 @@
-"""Tests for shared embedding HTTP helpers and Core ML server embedding logic."""
+"""Tests for shared embedding HTTP helpers."""
 
 from __future__ import annotations
 
@@ -12,10 +12,6 @@ from unittest.mock import MagicMock
 if TYPE_CHECKING:
     from project_code_intelligence.models import JsonObject
 
-from project_code_intelligence.embedding.coreml_server import (
-    CoreMLEmbedder,
-    embedding_response,
-)
 from project_code_intelligence.embedding.http_common import (
     json_error,
     normalize_input,
@@ -102,47 +98,6 @@ class ParseJsonBodyTests(unittest.TestCase):
         handler = self._make_handler(body, str(len(body)))
         with self.assertRaises(TypeError):
             _ = parse_json_body(handler, max_bytes=4096)
-
-
-class CoreMLEmbeddingResponseTests(unittest.TestCase):
-    def test_embedding_response_structure(self) -> None:
-        model = MagicMock()
-        tokenizer = MagicMock()
-        embedder = CoreMLEmbedder(model=model, tokenizer=tokenizer, model_name="test-model")
-        embedder.embed = MagicMock(return_value=[[0.1, 0.2, 0.3]])
-        request: JsonObject = {"input": "test text"}
-        result = embedding_response(embedder, request)
-        self.assertEqual(result["object"], "list")
-        self.assertEqual(result["model"], "test-model")
-        data = cast("list[dict[str, object]]", result["data"])
-        self.assertEqual(len(data), 1)
-        self.assertEqual(data[0]["object"], "embedding")
-        self.assertEqual(data[0]["index"], 0)
-        self.assertEqual(data[0]["embedding"], [0.1, 0.2, 0.3])
-        usage = cast("dict[str, object]", result["usage"])
-        self.assertIn("prompt_tokens", usage)
-        self.assertIn("total_tokens", usage)
-
-    def test_embedding_response_multiple_inputs(self) -> None:
-        model = MagicMock()
-        tokenizer = MagicMock()
-        embedder = CoreMLEmbedder(model=model, tokenizer=tokenizer, model_name="test-model")
-        embedder.embed = MagicMock(return_value=[[0.1], [0.2]])
-        request: JsonObject = {"input": ["text1", "text2"]}
-        result = embedding_response(embedder, request)
-        data = cast("list[dict[str, object]]", result["data"])
-        self.assertEqual(len(data), 2)
-        self.assertEqual(data[0]["index"], 0)
-        self.assertEqual(data[1]["index"], 1)
-
-    def test_embedding_response_rejects_vector_count_mismatch(self) -> None:
-        model = MagicMock()
-        tokenizer = MagicMock()
-        embedder = CoreMLEmbedder(model=model, tokenizer=tokenizer, model_name="test-model")
-        embedder.embed = MagicMock(return_value=[[0.1]])
-        request: JsonObject = {"input": ["text1", "text2"]}
-        with self.assertRaises(ValueError):
-            _ = embedding_response(embedder, request)
 
 
 if __name__ == "__main__":

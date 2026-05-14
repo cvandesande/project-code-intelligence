@@ -79,6 +79,10 @@ def embedding_contract_from_metadata(metadata: object) -> dict[str, object] | No
     raise ValueError("snapshot embedding contract metadata is malformed")
 
 
+class EmbeddingContractMismatchError(ValueError):
+    """Raised when the DB contains embeddings from a different model than the current server."""
+
+
 def require_compatible_embedding_contract(existing: Mapping[str, object], current: Mapping[str, object]) -> None:
     existing_model = existing.get("model")
     current_model = current.get("model")
@@ -87,11 +91,10 @@ def require_compatible_embedding_contract(existing: Mapping[str, object], curren
     existing_dimensions = object_int_value(existing.get("dimensions"), "dimensions")
     current_dimensions = object_int_value(current.get("dimensions"), "dimensions")
     if existing_model != current_model or existing_dimensions != current_dimensions:
-        raise ValueError(
+        raise EmbeddingContractMismatchError(
             "existing embeddings use model "
             f"{existing_model} with {existing_dimensions} dimensions; "
-            f"current embedding model is {current_model} with {current_dimensions} dimensions. "
-            "Use the original embedding model to resume, or reset/rebuild embeddings for this snapshot."
+            f"current embedding model is {current_model} with {current_dimensions} dimensions"
         )
 
 

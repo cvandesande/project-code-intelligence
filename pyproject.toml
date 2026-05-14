@@ -34,34 +34,22 @@ dependencies = [
   "psycopg[binary]>=3.1",
   "pydantic>=2.5",
   "rich>=13.0",
-  "coremltools>=8.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
-  "transformers>=4.30; sys_platform == 'darwin' and platform_machine == 'arm64'",
-  "numpy>=1.24; sys_platform == 'darwin' and platform_machine == 'arm64'",
-  "huggingface_hub>=0.20; sys_platform == 'darwin' and platform_machine == 'arm64'",
-  "tiktoken>=0.7; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [project.scripts]
 pci-index = "project_code_intelligence.cli:index_main"
 pci-ingest-code = "project_code_intelligence.ingest_code_intel:cli_main"
 pci-llama-embed = "project_code_intelligence.embedding.llama:main"
+pci-apple-llama-server = "project_code_intelligence.embedding.apple_llama_server:main"
 pci-fastembed-server = "project_code_intelligence.embedding.fastembed_server:main"
 pci-embedding-bench = "project_code_intelligence.embedding.bench:main"
 pci-doctor = "project_code_intelligence.doctor:main"
 pci-mcp = "project_code_intelligence.server:main"
-pci-coreml-server = "project_code_intelligence.embedding.coreml_server:main"
 pci-mcp-smoke = "project_code_intelligence.cli:mcp_smoke_main"
 
 [project.optional-dependencies]
 local-embeddings = [
   "fastembed>=0.8.0",
-]
-apple-embeddings = [
-  "coremltools>=8.0",
-  "transformers>=4.30",
-  "numpy>=1.24",
-  "huggingface_hub>=0.20",
-  "tiktoken>=0.7",
 ]
 
 [dependency-groups]
@@ -150,7 +138,6 @@ ignore = [
 "src/project_code_intelligence/code_profiles/*.py" = ["PLR6301"]
 "src/project_code_intelligence/http_client.py" = ["S310"]
 "src/project_code_intelligence/embedding/fastembed_server.py" = ["A002"]
-"src/project_code_intelligence/embedding/coreml_server.py" = ["A002"]
 "src/project_code_intelligence/process.py" = ["S404", "S603"]
 # SARIF patterns may be absolute or relative and can use **; glob.glob handles
 # that mixed user-input shape more directly than Path.glob/Path.rglob.

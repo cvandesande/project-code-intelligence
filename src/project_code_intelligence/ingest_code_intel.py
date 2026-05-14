@@ -20,6 +20,7 @@ from project_code_intelligence.code_profiles import load_profile
 from project_code_intelligence.common import default_collection, parse_repos, repo_for_source_path
 from project_code_intelligence.embeddings import (
     EmbeddingBackend,
+    EmbeddingContractMismatchError,
     EmbeddingEndpointUnavailableError,
     EmbeddingRunConfig,
     abandon_preembedding,
@@ -1460,7 +1461,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_cli_args(argv)
     if args.reset_only:
         return run_reset_only(args)
-    result = run_ingest_plan(build_ingest_plan(args))
+    try:
+        result = run_ingest_plan(build_ingest_plan(args))
+    except EmbeddingContractMismatchError as exc:
+        raise EmbeddingContractMismatchError(
+            f"{exc}.\n\n"
+            "The index was built with a different embedding model than the current server.\n"
+            "To reset and re-index with the current model:\n"
+            f"  pci-index {args.root} --reset-code-intel --i-know-this-deletes-code-intel-db\n"
+            f"  pci-index {args.root}"
+        ) from None
     if args.prune_snapshots and result == 0:
         collection = args.collection or default_collection(args.root)
         repo_names = parse_repos(args.repos or "")
@@ -1487,6 +1497,7 @@ def cli_main(argv: list[str] | None = None) -> int:
         heartbeat_thread.start()
     exit_code: int | None = None
     interrupted = False
+    deferred_stderr: str | None = None
     try:
         result = main(argv)
     except SystemExit as exc:
@@ -1497,17 +1508,13 @@ def cli_main(argv: list[str] | None = None) -> int:
         interrupted = True
         exit_code = 130
         return 130
-    except EmbeddingEndpointUnavailableError as exc:
+    except (EmbeddingEndpointUnavailableError, db.DatabaseConnectionError) as exc:
         exit_code = 1
-        write_stderr(str(exc))
-        return 1
-    except db.DatabaseConnectionError as exc:
-        exit_code = 1
-        write_stderr(str(exc))
+        deferred_stderr = str(exc)
         return 1
     except (PermissionError, ValueError) as exc:
         exit_code = 1
-        write_stderr(str(exc))
+        deferred_stderr = str(exc)
         return 1
     except BaseException:
         exit_code = 1
@@ -1531,6 +1538,8 @@ def cli_main(argv: list[str] | None = None) -> int:
             metrics=runtime_state.active_metrics.snapshot(),
         )
         progress.close_emitter()
+        if deferred_stderr is not None:
+            write_stderr(deferred_stderr)
 
 
 if __name__ == "__main__":
