@@ -341,7 +341,9 @@ class McpContractTests(unittest.TestCase):
         self.assertEqual(params, [1, "project-code-intelligence"])
 
     def test_static_code_flow_fetch_is_scoped_to_configured_collection(self) -> None:
-        conn = FakeConnection()
+        # First query: existence check (returns a row so the code-flows query runs).
+        # Second query: code-flows query with collection scoping.
+        conn = QueuedConnection([FakeCursor(one={"id": 1}), FakeCursor(many=[])])
 
         with (
             patch.dict(
@@ -354,7 +356,11 @@ class McpContractTests(unittest.TestCase):
         ):
             _ = mcp_tools.tool_get_static_code_flow({"finding_id": 1})
 
-        query, params = conn.calls[0]
+        existence_query, existence_params = conn.calls[0]
+        self.assertIn("project_code_intel_static_findings", existence_query)
+        self.assertEqual(existence_params, [1])
+
+        query, params = conn.calls[1]
         self.assertIn("JOIN project_code_intel_static_findings f", query)
         self.assertIn("cf.finding_id = %s", query)
         self.assertIn("f.collection = %s", query)

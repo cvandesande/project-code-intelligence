@@ -45,6 +45,8 @@ def security_records(intel_file: IntelFile, text: str) -> list[IntelRecord]:
     for lineno, line in enumerate(lines, 1):
         window = "\n".join(lines[lineno - 1 : min(len(lines), lineno + 2)])
         for pattern, rule_id, severity, confidence_kind, summary in profile_context.active_profile.security_patterns():
+            if not profile_context.active_profile.should_apply_pattern(rule_id, intel_file.language):
+                continue
             matched = re.search(pattern, line)
             if not matched:
                 anchor = security_pattern_anchor(pattern)

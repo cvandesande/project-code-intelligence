@@ -134,6 +134,15 @@ class CodeIntelProfile:
     def security_patterns(self) -> list[SecurityPattern]:
         return COMMON_SECURITY_PATTERNS
 
+    def should_apply_pattern(self, rule_id: str, language: str) -> bool:
+        """Return False to suppress a pattern for a specific language.
+
+        Go and Kotlin use backticks as raw-string / identifier delimiters, not
+        shell substitution syntax, so shell_backtick_execution produces nothing
+        but noise on those languages.
+        """
+        return not (rule_id == "shell_backtick_execution" and language in {"go", "kotlin"})
+
     def should_scan_security(self, path: str, language: str, file_role: str) -> bool:
         del path, file_role
         return language in {
@@ -270,7 +279,12 @@ class GenericProfile(CodeIntelProfile):
         updated = dict(classification)
         parts = path.split("/")
         name = Path(path).name
-        if parts and parts[0] in {"src", "source", "lib", "cmd", "pkg", "internal"} and updated["is_source"]:
+        if (
+            parts
+            and parts[0] in {"src", "source", "lib", "cmd", "pkg", "internal"}
+            and updated["is_source"]
+            and not updated["is_test"]
+        ):
             updated["file_role"] = "source"
         elif parts and parts[0] in {"include", "headers"}:
             updated["file_role"] = "source-include"

@@ -15,6 +15,8 @@ from project_code_intelligence.storage.core import (
     parser_failure_metadata,
     prune_old_snapshots,
     replace_repos,
+    resolve_edge_targets,
+    stamp_embed_types,
 )
 from project_code_intelligence.storage.schema import (
     ensure_schema,
@@ -50,7 +52,9 @@ __all__ = [
     "previous_file_states",
     "prune_old_snapshots",
     "replace_repos",
+    "resolve_edge_targets",
     "row_int",
     "schema_migration_versions",
     "snapshot_versions_compatible",
+    "stamp_embed_types",
 ]

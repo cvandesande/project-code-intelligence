@@ -94,11 +94,12 @@ CODE_INTEL_RECORD_SELECT_LIST = """
                    r.content_class, r.record_type, r.record_id, r.parent_record_id,
                    r.title, r.summary, r.line_start, r.line_end, r.symbol,
                    r.symbol_kind, r.confidence_kind, r.confidence, r.tool,
-                   r.rule_id, r.severity, r.metadata, r.updated_at,
+                   r.rule_id, r.severity, r.updated_at,
                    r.embedding IS NOT NULL AS has_embedding,
                    NULL::real AS rank,
                    coalesce(f.is_untracked, false) AS is_untracked,
-                   coalesce(f.indexed_dirty, false) AS indexed_dirty
+                   coalesce(f.indexed_dirty, false) AS indexed_dirty,
+                   left(r.display_content, 800) AS snippet_raw
             FROM project_code_intel_records r
             LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
             """
@@ -109,11 +110,12 @@ CODE_INTEL_RECORD_SELECT_WEBSEARCH = """
                    r.content_class, r.record_type, r.record_id, r.parent_record_id,
                    r.title, r.summary, r.line_start, r.line_end, r.symbol,
                    r.symbol_kind, r.confidence_kind, r.confidence, r.tool,
-                   r.rule_id, r.severity, r.metadata, r.updated_at,
+                   r.rule_id, r.severity, r.updated_at,
                    r.embedding IS NOT NULL AS has_embedding,
                    ts_rank_cd(r.search_document, websearch_to_tsquery('english', %s)) AS rank,
                    coalesce(f.is_untracked, false) AS is_untracked,
-                   coalesce(f.indexed_dirty, false) AS indexed_dirty
+                   coalesce(f.indexed_dirty, false) AS indexed_dirty,
+                   left(r.display_content, 800) AS snippet_raw
             FROM project_code_intel_records r
             LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
             """
@@ -124,7 +126,7 @@ CODE_INTEL_RECORD_SELECT_TERMS = """
                    r.content_class, r.record_type, r.record_id, r.parent_record_id,
                    r.title, r.summary, r.line_start, r.line_end, r.symbol,
                    r.symbol_kind, r.confidence_kind, r.confidence, r.tool,
-                   r.rule_id, r.severity, r.metadata, r.updated_at,
+                   r.rule_id, r.severity, r.updated_at,
                    r.embedding IS NOT NULL AS has_embedding,
                    (
                        SELECT count(*)::real
@@ -136,12 +138,12 @@ CODE_INTEL_RECORD_SELECT_TERMS = """
                            r.symbol,
                            r.source_path,
                            r.record_id,
-                           r.display_content,
-                           r.metadata::text
+                           r.display_content
                        ) ILIKE search_terms.pattern ESCAPE '\\'
                    ) AS rank,
                    coalesce(f.is_untracked, false) AS is_untracked,
-                   coalesce(f.indexed_dirty, false) AS indexed_dirty
+                   coalesce(f.indexed_dirty, false) AS indexed_dirty,
+                   left(r.display_content, 800) AS snippet_raw
             FROM project_code_intel_records r
             LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
             """
@@ -158,8 +160,7 @@ ALL_TERMS_SEARCH_CLAUSE = """
                         r.symbol,
                         r.source_path,
                         r.record_id,
-                        r.display_content,
-                        r.metadata::text
+                        r.display_content
                     ) ILIKE search_terms.pattern ESCAPE '\\'
                 )
             )
@@ -176,11 +177,71 @@ ANY_TERMS_SEARCH_CLAUSE = """
                     r.symbol,
                     r.source_path,
                     r.record_id,
-                    r.display_content,
-                    r.metadata::text
+                    r.display_content
                 ) ILIKE search_terms.pattern ESCAPE '\\'
             )
             """
+
+
+_SNIPPET_FENCE_RE = re.compile(r"`{3,}[^\n]*\n")
+
+# Fields stripped in compact mode — per-result snapshot/git/repo metadata that is
+# constant across all results in a single-snapshot query and redundant with the
+# response envelope. Verbose mode (verbose=true) returns them.
+_COMPACT_RECORD_STRIP = frozenset({
+    "snapshot_id",
+    "collection",
+    "repo",
+    "repo_role",
+    "branch",
+    "commit_sha",
+    "tree_sha",
+    "updated_at",
+    "record_id",
+    "confidence",
+    "tool",
+    "rule_id",
+    "severity",
+})
+_COMPACT_EDGE_STRIP = frozenset({"snapshot_id", "collection", "repo", "commit_sha"})
+
+
+def _extract_snippet(raw: str | None) -> str | None:
+    """Return the first ~300 chars of code body from a display_content prefix."""
+    if not raw:
+        return None
+    m = _SNIPPET_FENCE_RE.search(raw)
+    if m:
+        code = raw[m.end() :]
+        return code[:300].rstrip() or None
+    return None
+
+
+def _compact_record(row: db.DbRow) -> dict[str, object]:
+    snippet = _extract_snippet(row.get("snippet_raw"))  # type: ignore[arg-type]
+    out = {k: v for k, v in row.items() if k not in _COMPACT_RECORD_STRIP and k != "snippet_raw"}
+    if snippet:
+        out["snippet"] = snippet
+    return out
+
+
+def _verbose_record(row: db.DbRow) -> dict[str, object]:
+    snippet = _extract_snippet(row.get("snippet_raw"))  # type: ignore[arg-type]
+    out = {k: v for k, v in row.items() if k != "snippet_raw"}
+    if snippet:
+        out["snippet"] = snippet
+    return out
+
+
+def _format_records(rows: list[db.DbRow], *, verbose: bool) -> list[dict[str, object]]:
+    fmt = _verbose_record if verbose else _compact_record
+    return [fmt(row) for row in rows]
+
+
+def _format_edges(rows: list[db.DbRow], *, verbose: bool) -> list[dict[str, object]]:
+    if verbose:
+        return [dict(row) for row in rows]
+    return [{k: v for k, v in row.items() if k not in _COMPACT_EDGE_STRIP} for row in rows]
 
 
 @dataclass(frozen=True)
@@ -322,9 +383,9 @@ def tool_code_intel_status(args: Json) -> Json:
                 query_with_where(
                     """
             SELECT s.id, s.collection, s.repo, s.repo_role, s.branch, s.commit_sha,
-                   s.tree_sha, s.dirty, s.created_at
+                   s.tree_sha, s.dirty, s.metadata, s.created_at
             FROM project_code_intel_snapshots s
-            """,
+""",
                     filters.snapshots.clauses,
                     """
             ORDER BY s.created_at DESC, s.collection, s.repo
@@ -344,6 +405,9 @@ def tool_code_intel_status(args: Json) -> Json:
             snap_dict["head_matches_snapshot"] = (
                 head_commit is not None and snap_dict.get("commit_sha") == head_commit.strip()
             )
+            snap_meta = snap_dict.get("metadata")
+            if isinstance(snap_meta, dict) and "embed_record_types" in snap_meta:
+                snap_dict["embed_record_types"] = snap_meta["embed_record_types"]
             snapshots.append(snap_dict)
         counts = conn.execute(
             db.query_sql(
@@ -365,7 +429,9 @@ def tool_code_intel_status(args: Json) -> Json:
             db.query_sql(
                 query_with_where(
                     """
-            SELECT r.collection, r.repo, r.record_type, count(*) AS count
+            SELECT r.collection, r.repo, r.record_type,
+                   count(*) AS count,
+                   count(r.embedding) AS embedded_records
             FROM project_code_intel_records r
             """,
                     filters.records.clauses,
@@ -458,12 +524,13 @@ def tool_search_code_intel_text(args: Json) -> Json:
             if not rows and len(terms) > 1:
                 strategy = "any_terms_fallback"
                 rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
+    verbose = optional_bool(args, "verbose") or False
     response: Json = {
         "query": query,
         "query_mode": query_mode,
         "query_strategy": strategy,
         **snapshot_scope_response(args),
-        "results": cast("JsonValue", rows),
+        "results": cast("JsonValue", _format_records(rows, verbose=verbose)),
     }
     if terms:
         response["terms"] = list(terms)
@@ -526,7 +593,8 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
                    r.content_class, r.record_type, r.record_id, r.parent_record_id,
                    r.title, r.summary, r.line_start, r.line_end, r.symbol,
                    r.symbol_kind, r.confidence_kind, r.confidence, r.tool, r.rule_id,
-                   r.severity, r.metadata, r.embedding <=> %s::vector AS distance
+                   r.severity, r.embedding <=> %s::vector AS distance,
+                   left(r.display_content, 800) AS snippet_raw
             FROM project_code_intel_records r
             """,
                     clauses,
@@ -538,11 +606,12 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
             ),
             query_params,
         ).fetchall()
+    verbose = optional_bool(args, "verbose") or False
     return ok({
         "query": query,
         "embedding_dimensions": embedding_dimensions,
         **snapshot_scope_response(args),
-        "results": rows,
+        "results": cast("JsonValue", _format_records(rows, verbose=verbose)),
     })
 
 
@@ -649,6 +718,8 @@ def tool_get_code_intel_record(args: Json) -> Json:
             record_projection_query(include_content=include_content, filter_collection=collection is not None),
             params,
         ).fetchone()
+    if row is None:
+        return ok({"found": False})
     return ok({"result": row})
 
 
@@ -661,6 +732,7 @@ def tool_related_code_intel(args: Json) -> Json:
     collection = scoped_collection(args)
     repo = optional_text(args, "repo")
     edge_type = optional_text(args, "edge_type")
+    confidence_kind = optional_text(args, "confidence_kind")
 
     clauses = ["TRUE"]
     params: QueryParams = []
@@ -679,6 +751,9 @@ def tool_related_code_intel(args: Json) -> Json:
     if edge_type:
         clauses.append("e.edge_type = %s")
         params.append(edge_type)
+    if confidence_kind:
+        clauses.append("e.confidence_kind = %s")
+        params.append(confidence_kind)
     snapshot_clauses, snapshot_params = scoped_snapshot_clauses(args, "e")
     clauses.extend(snapshot_clauses)
     params.extend(snapshot_params)
@@ -718,7 +793,8 @@ def tool_related_code_intel(args: Json) -> Json:
             ),
             params,
         ).fetchall()
-    return ok({**snapshot_scope_response(args), "edges": edges})
+    verbose = optional_bool(args, "verbose") or False
+    return ok({**snapshot_scope_response(args), "edges": cast("JsonValue", _format_edges(edges, verbose=verbose))})
 
 
 def tool_search_static_findings(args: Json) -> Json:
@@ -814,7 +890,7 @@ def tool_get_static_finding(args: Json) -> Json:
             finding_params,
         ).fetchone()
         if not finding:
-            return ok({"result": None})
+            return ok({"found": False})
         rule = conn.execute(
             """
             SELECT id, rule_id, name, short_description, full_description,
@@ -898,6 +974,15 @@ def tool_get_static_code_flow(args: Json) -> Json:
     with mcp_db.connect() as conn:
         if not table_regclass_exists(conn, "project_code_intel_static_code_flows"):
             return ok({"error": "static-analysis schema is not initialized"})
+        finding_exists = (
+            conn.execute(
+                "SELECT 1 FROM project_code_intel_static_findings WHERE id = %s",
+                [finding_id],
+            ).fetchone()
+            is not None
+        )
+        if not finding_exists:
+            return ok({"found": False})
         rows = conn.execute(
             db.query_sql(
                 query_with_where(
@@ -916,7 +1001,7 @@ def tool_get_static_code_flow(args: Json) -> Json:
             ),
             params,
         ).fetchall()
-    return ok({"finding_id": finding_id, "flow_index": flow_index, "steps": rows})
+    return ok({"found": True, "finding_id": finding_id, "flow_index": flow_index, "steps": rows})
 
 
 def tool_list_code_intel_files(args: Json) -> Json:
@@ -946,7 +1031,25 @@ def tool_list_code_intel_files(args: Json) -> Json:
             params.append(value)
     if optional_bool(args, "only_skipped"):
         clauses.append("f.skipped_reason IS NOT NULL")
+    include_metadata = optional_bool(args, "include_metadata")
     params.append(limit)
+
+    files_select_slim = """
+            SELECT f.id, f.snapshot_id, f.collection, f.repo, f.repo_role, f.branch,
+                   f.commit_sha, f.tree_sha, f.source_path, f.git_blob_sha, f.file_sha256,
+                   f.size_bytes, f.language, f.file_role, f.content_class,
+                   f.is_generated, f.is_vendor, f.is_test, f.is_source, f.is_build,
+                   f.is_config, f.is_doc, f.skipped_reason, f.created_at
+            FROM project_code_intel_files f
+            """
+    files_select_full = """
+            SELECT f.id, f.snapshot_id, f.collection, f.repo, f.repo_role, f.branch,
+                   f.commit_sha, f.tree_sha, f.source_path, f.git_blob_sha, f.file_sha256,
+                   f.size_bytes, f.language, f.file_role, f.content_class,
+                   f.is_generated, f.is_vendor, f.is_test, f.is_source, f.is_build,
+                   f.is_config, f.is_doc, f.skipped_reason, f.metadata, f.created_at
+            FROM project_code_intel_files f
+            """
 
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
@@ -954,14 +1057,7 @@ def tool_list_code_intel_files(args: Json) -> Json:
         rows = conn.execute(
             db.query_sql(
                 query_with_where(
-                    """
-            SELECT f.id, f.snapshot_id, f.collection, f.repo, f.repo_role, f.branch,
-                   f.commit_sha, f.tree_sha, f.source_path, f.git_blob_sha, f.file_sha256,
-                   f.size_bytes, f.language, f.file_role, f.content_class,
-                   f.is_generated, f.is_vendor, f.is_test, f.is_source, f.is_build,
-                   f.is_config, f.is_doc, f.skipped_reason, f.metadata, f.created_at
-            FROM project_code_intel_files f
-            """,
+                    files_select_full if include_metadata else files_select_slim,
                     clauses,
                     """
             ORDER BY f.source_path
