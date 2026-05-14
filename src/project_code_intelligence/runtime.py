@@ -113,6 +113,10 @@ class RuntimeMetrics:
         with self.lock:
             setattr(self, field_name, value)
 
+    def set_scan_workers_max(self, value: int) -> None:
+        with self.lock:
+            self.scan_workers = max(self.scan_workers, value)
+
     def configure_progress(self, weights: dict[str, float]) -> None:
         total = sum(value for value in weights.values() if value > 0)
         if total <= 0:

@@ -88,6 +88,24 @@ class ProgressRenderingTests(unittest.TestCase):
             "codeintel @ 127.0.0.1:5433",
         )
 
+    def test_live_progress_shows_current_repo_before_discovery_finishes(self) -> None:
+        emitter = progress.RichEmitter()
+
+        emit_without_live(
+            emitter,
+            "code_intel_plan",
+            {"collection": "product-workspace", "repos": ["service-api", "web-ui"]},
+        )
+        emit_without_live(
+            emitter,
+            "code_intel_repo_scan_started",
+            {"repo": "web-ui", "mode": "incremental"},
+        )
+
+        self.assertEqual(emitter.current_repo_row_text(), "web-ui (—) · incremental")
+        self.assertEqual(emitter.last_message, "Checking web-ui…")
+        self.assertEqual(emitter.last_event, "code_intel_repo_scan_started")
+
 
 if __name__ == "__main__":
     _ = unittest.main()

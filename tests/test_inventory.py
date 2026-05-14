@@ -8,8 +8,10 @@ from unittest.mock import patch
 from project_code_intelligence import profile_context
 from project_code_intelligence.code_profiles.base import GenericProfile
 from project_code_intelligence.inventory import (
+    DiscoveryReuse,
     classify_file,
     discover_files,
+    git_dirty_paths,
     inspect_inventory_file,
     language_for,
     language_for_read_file,
@@ -243,14 +245,105 @@ class InventoryContractTests(unittest.TestCase):
                     root,
                     snapshot_for("."),
                     max_file_bytes=1024,
-                    previous_files={"src/main.py": previous},
-                    reuse_unchanged_blobs=True,
+                    reuse=DiscoveryReuse(
+                        previous_files={"src/main.py": previous},
+                        reuse_unchanged_blobs=True,
+                    ),
                 )
 
         mocked_inspect.assert_not_called()
         self.assertEqual(len(files), 1)
         self.assertEqual(files[0].file_sha256, "previous-file-sha")
         self.assertEqual(files[0].metadata["python_functions"], ["previous"])
+
+    def test_discover_files_reuses_clean_blob_in_dirty_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clean_source = root / "src" / "clean.py"
+            dirty_source = root / "src" / "dirty.py"
+            clean_source.parent.mkdir()
+            _ = clean_source.write_text("def clean_on_disk():\n    return 1\n", encoding="utf-8")
+            _ = dirty_source.write_text("def dirty_on_disk():\n    return 1\n", encoding="utf-8")
+            previous_clean = PreviousFileState(
+                source_path="src/clean.py",
+                git_blob_sha="a" * 40,
+                file_sha256="previous-clean-sha",
+                size_bytes=25,
+                language="python",
+                file_role="source",
+                content_class="source",
+                is_generated=False,
+                is_vendor=False,
+                is_test=False,
+                is_source=True,
+                is_build=False,
+                is_config=False,
+                is_doc=False,
+                skipped_reason=None,
+                metadata={"python_functions": ["clean_previous"]},
+            )
+            previous_dirty = PreviousFileState(
+                source_path="src/dirty.py",
+                git_blob_sha="b" * 40,
+                file_sha256="previous-dirty-sha",
+                size_bytes=25,
+                language="python",
+                file_role="source",
+                content_class="source",
+                is_generated=False,
+                is_vendor=False,
+                is_test=False,
+                is_source=True,
+                is_build=False,
+                is_config=False,
+                is_doc=False,
+                skipped_reason=None,
+                metadata={"python_functions": ["dirty_previous"]},
+            )
+
+            with patch(
+                "project_code_intelligence.inventory.git_ls_files",
+                return_value=[("a" * 40, "src/clean.py"), ("b" * 40, "src/dirty.py")],
+            ):
+                files = discover_files(
+                    root,
+                    snapshot_for("."),
+                    max_file_bytes=1024,
+                    reuse=DiscoveryReuse(
+                        previous_files={"src/clean.py": previous_clean, "src/dirty.py": previous_dirty},
+                        reuse_unchanged_blobs=True,
+                        dirty_paths=frozenset({"src/dirty.py"}),
+                    ),
+                )
+
+        by_path = {item.repo_rel_path: item for item in files}
+        self.assertEqual(by_path["src/clean.py"].file_sha256, "previous-clean-sha")
+        self.assertEqual(by_path["src/clean.py"].metadata["python_functions"], ["clean_previous"])
+        self.assertNotEqual(by_path["src/dirty.py"].file_sha256, "previous-dirty-sha")
+        self.assertEqual(by_path["src/dirty.py"].metadata["python_functions"], ["dirty_on_disk"])
+
+    def test_discover_files_skips_language_metadata_dispatch_for_plain_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "README.txt").write_text("plain text\n", encoding="utf-8")
+            with (
+                patch("project_code_intelligence.inventory.git_ls_files", return_value=[("a" * 40, "README.txt")]),
+                patch("project_code_intelligence.inventory.language_metadata_for_file") as metadata_for_file,
+            ):
+                files = discover_files(root, snapshot_for("."), max_file_bytes=1024)
+
+        metadata_for_file.assert_not_called()
+        self.assertEqual(files[0].metadata["path_parts"], ["README.txt"])
+
+    def test_git_dirty_paths_parses_porcelain_paths_and_renames(self) -> None:
+        with patch(
+            "project_code_intelligence.inventory.run_git",
+            return_value=" M src/app.py\nR  old/name.py -> new/name.py\n D deleted.py\n",
+        ):
+            self.assertEqual(
+                git_dirty_paths(Path("/repo")),
+                {"src/app.py", "old/name.py", "new/name.py", "deleted.py"},
+            )
 
 
 if __name__ == "__main__":

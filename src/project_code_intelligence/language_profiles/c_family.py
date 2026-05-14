@@ -13,8 +13,9 @@ if TYPE_CHECKING:
 C_INCLUDE_RE = re.compile(r'(?m)^\s*#\s*include\s+([<"])([^>"]+)[>"]')
 C_DEFINE_RE = re.compile(r"(?m)^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)")
 C_TYPE_RE = re.compile(r"(?m)^\s*(?:typedef\s+)?(?:struct|enum|union)\s+([A-Za-z_][A-Za-z0-9_]*)")
-C_FUNCTION_RE = re.compile(r"(?m)^\s*(?:[A-Za-z_][A-Za-z0-9_]*[\w\s*]*\s+)+([A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*\{")
+C_FUNCTION_LINE_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]{0,240}\)\s*\{\s*$")
 C_CONTROL_KEYWORDS = frozenset({"if", "for", "while", "switch", "return", "sizeof"})
+MAX_C_FUNCTION_CANDIDATE_CHARS = 512
 
 C_FAMILY_METADATA_KEYS = (
     "c_family_local_includes",
@@ -26,6 +27,27 @@ C_FAMILY_METADATA_KEYS = (
 )
 
 
+def c_function_names(text: str) -> list[str]:
+    names: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if (
+            len(line) > MAX_C_FUNCTION_CANDIDATE_CHARS
+            or not line.endswith("{")
+            or "(" not in line
+            or ")" not in line
+            or line.startswith("#")
+        ):
+            continue
+        match = C_FUNCTION_LINE_RE.search(line)
+        if match is None:
+            continue
+        name = match.group(1)
+        if name not in C_CONTROL_KEYWORDS:
+            names.append(name)
+    return unique_limited(names)
+
+
 def c_family_file_metadata(_path: str, text: str) -> JsonObject:
     local_includes: list[str] = []
     system_includes: list[str] = []
@@ -35,12 +57,11 @@ def c_family_file_metadata(_path: str, text: str) -> JsonObject:
             system_includes.append(include)
         else:
             local_includes.append(include)
-    functions = [match.group(1) for match in C_FUNCTION_RE.finditer(text) if match.group(1) not in C_CONTROL_KEYWORDS]
     return compact_metadata({
         "c_family_local_includes": unique_limited(local_includes),
         "c_family_system_includes": unique_limited(system_includes),
         "c_family_defines": unique_limited(match.group(1) for match in C_DEFINE_RE.finditer(text)),
-        "c_family_declared_functions": unique_limited(functions),
+        "c_family_declared_functions": c_function_names(text),
         "c_family_types": unique_limited(match.group(1) for match in C_TYPE_RE.finditer(text)),
         "c_family_has_inline_asm": "__asm__" in text or " asm(" in text or "\tasm(" in text,
     })

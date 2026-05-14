@@ -74,6 +74,7 @@ SHELL_SERVICE_NAMES = frozenset({
     "stop",
     "stop_service",
 })
+MAX_SHELL_COMMAND_SCAN_LINE_CHARS = 4096
 
 SHELL_METADATA_KEYS = (
     "shell_shebang",
@@ -99,6 +100,8 @@ def strip_shell_word(value: str) -> str:
 
 
 def shell_command_from_line(line: str) -> str | None:
+    if len(line) > MAX_SHELL_COMMAND_SCAN_LINE_CHARS:
+        return None
     stripped = line.strip()
     if not stripped or stripped.startswith("#") or SHELL_FUNCTION_RE.match(stripped):
         return None
