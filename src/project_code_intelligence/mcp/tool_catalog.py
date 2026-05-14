@@ -49,10 +49,15 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         "supplied, must be non-empty. "
         "source_path is an exact full-path filter, not a directory prefix; pass the complete relative "
         "file path (e.g. 'agent/internal/grpc/grpc.go') to match. "
+        "Results are deduplicated by source location: when a code_chunk and a symbol_definition "
+        "cover the same lines, only the code_chunk is returned. Pass record_type='symbol_definition' "
+        "to see symbol definitions instead. "
         "Results are compact by default: per-result snapshot/git/repo metadata is omitted and a short "
         "code snippet is included inline so most navigational tasks need no follow-up call. "
         "Pass verbose=true to restore all fields (snapshot_id, collection, repo, branch, commit_sha, "
-        "tree_sha, record_id, updated_at, confidence, tool, rule_id, severity).",
+        "tree_sha, record_id, updated_at, confidence, tool, rule_id, severity). "
+        "When the auto fallback activates (query_strategy=all_terms_fallback), rank is null because "
+        "every result matched all terms equally — use fallback_reason to detect this case.",
         {
             "type": "object",
             "properties": {
@@ -141,8 +146,10 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         "Filter by edge_type ('call_candidate' for function calls, "
         "'include' for C/C++ #include relationships) when you only want one kind of "
         "relationship. For short, common names (Close, Read, Write, etc.) expect "
-        "many heuristic_candidate edges — filter by confidence_kind='confirmed' or "
-        "use a more specific record_id to reduce noise.",
+        "many heuristic_candidate edges — use a more specific record_id instead of symbol "
+        "to reduce noise. confidence_kind='confirmed' edges are only produced by "
+        "type-aware parsers; heuristic parsers (stdlib-heuristic-*) produce "
+        "heuristic_candidate edges exclusively.",
         {
             "type": "object",
             "properties": {
@@ -211,7 +218,11 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         },
     ),
     "search_static_findings": ToolDefinition(
-        "Search SARIF/static-analysis findings with exact filters.",
+        "Search SARIF/static-analysis findings with exact filters. "
+        "This tool covers SARIF-based findings only (populated by pci-index --sarif). "
+        "Heuristic security patterns detected during indexing (e.g. shell backtick usage, "
+        "insecure API calls) are stored as security_pattern records and are accessible via "
+        "search_code_intel_text with record_type='security_pattern', not through this tool.",
         {
             "type": "object",
             "properties": {
