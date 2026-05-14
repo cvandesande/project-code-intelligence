@@ -229,7 +229,7 @@ def local_embedding_startup_commands(by_name: Mapping[str, CheckResult]) -> list
     if ok_result(by_name, "option-gpu-nvidia") and ok_result(by_name, "gpu-runtime-nvidia"):
         commands.append(("nvidia", f"{engine} compose --profile nvidia up -d --build llama-cuda"))
     if ok_result(by_name, "option-gpu-apple"):
-        commands.append(("apple", "pci-apple-llama-server"))
+        commands.append(("apple", "pci-apple-embed-server"))
     return commands
 
 

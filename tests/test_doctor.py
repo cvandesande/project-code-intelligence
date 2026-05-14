@@ -425,7 +425,7 @@ class DoctorAppleTests(unittest.TestCase):
         )
 
         self.assertIn("Start Apple native embeddings", output)
-        self.assertIn("pci-apple-llama-server", output)
+        self.assertIn("pci-apple-embed-server", output)
 
 
 if __name__ == "__main__":

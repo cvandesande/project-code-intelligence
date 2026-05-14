@@ -57,8 +57,8 @@ from project_code_intelligence.doctor.types import (
     EmbeddingMode,
     GpuInfo,
 )
+from project_code_intelligence.embedding.apple_embed_server import APPLE_EMBED_SERVER_PID_FILE
 from project_code_intelligence.embedding.apple_llama_server import LLAMA_SERVER_PID_FILE
-from project_code_intelligence.embedding.apple_mlx_server import MLX_SERVER_PID_FILE
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -199,7 +199,7 @@ _DOCKER_PROFILES = (
 _DOCKER_SERVICES = ("fastembed", "lemonade-npu", "llama-rocm", "llama-cuda")
 _HOST_PROCESSES = (
     "pci-embedding-server",
-    "project_code_intelligence.embedding.apple_mlx_server",
+    "project_code_intelligence.embedding.apple_embed_server",
     "project_code_intelligence.embedding.coreml_server",
     "project_code_intelligence.embedding.fastembed_server",
 )
@@ -226,7 +226,7 @@ def _stop_pid_file(pid_file: Path) -> None:
 def _stop_pid_file_process() -> None:
     """Send SIGTERM to all host-native server processes recorded in PID files."""
     _stop_pid_file(LLAMA_SERVER_PID_FILE)
-    _stop_pid_file(MLX_SERVER_PID_FILE)
+    _stop_pid_file(APPLE_EMBED_SERVER_PID_FILE)
 
 
 def stop_embedding_services() -> int:

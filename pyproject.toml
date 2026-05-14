@@ -34,6 +34,7 @@ dependencies = [
   "psycopg[binary]>=3.1",
   "pydantic>=2.5",
   "rich>=13.0",
+  "mlx-lm>=0.20; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [project.scripts]
@@ -41,7 +42,7 @@ pci-index = "project_code_intelligence.cli:index_main"
 pci-ingest-code = "project_code_intelligence.ingest_code_intel:cli_main"
 pci-llama-embed = "project_code_intelligence.embedding.llama:main"
 pci-apple-llama-server = "project_code_intelligence.embedding.apple_llama_server:main"
-pci-apple-mlx-server = "project_code_intelligence.embedding.apple_mlx_server:main"
+pci-apple-embed-server = "project_code_intelligence.embedding.apple_embed_server:main"
 pci-fastembed-server = "project_code_intelligence.embedding.fastembed_server:main"
 pci-embedding-bench = "project_code_intelligence.embedding.bench:main"
 pci-doctor = "project_code_intelligence.doctor:main"
@@ -51,9 +52,6 @@ pci-mcp-smoke = "project_code_intelligence.cli:mcp_smoke_main"
 [project.optional-dependencies]
 local-embeddings = [
   "fastembed>=0.8.0",
-]
-apple-mlx = [
-  "sentence_transformers>=3.0",
 ]
 
 [dependency-groups]

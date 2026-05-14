@@ -20,8 +20,8 @@ from project_code_intelligence.doctor.common import (
     version_tuple,
 )
 from project_code_intelligence.doctor.types import CheckResult, GpuInfo
+from project_code_intelligence.embedding.apple_embed_server import apple_embed_model_name, apple_embed_server_is_running
 from project_code_intelligence.embedding.apple_llama_server import llama_server_is_running, looks_like_hf_model_id
-from project_code_intelligence.embedding.apple_mlx_server import mlx_model_name, mlx_server_is_running
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -238,7 +238,7 @@ def amd_npu_firmware_versions() -> list[str]:
 
 
 def _check_darwin_npu() -> list[CheckResult]:
-    return [result("npu", "skip", "Apple Neural Engine is not used; embeddings run via llama.cpp Metal.")]
+    return [result("npu", "skip", "Apple Neural Engine is not used; embeddings run via pci-apple-embed-server (MPS).")]
 
 
 def check_npu_support(env: config.Env) -> list[CheckResult]:
@@ -556,12 +556,12 @@ def _check_apple_metal(env: config.Env, *, llama_model: str | None) -> list[Chec
             )
     elif llama_server_is_running():
         results.append(result("apple-metal-model", "ok", "llama-server is running via pci-apple-llama-server."))
-    elif mlx_server_is_running():
+    elif apple_embed_server_is_running():
         results.append(
             result(
                 "apple-metal-model",
                 "ok",
-                f"MLX embedding server is running via pci-apple-mlx-server (model: {mlx_model_name()}).",
+                f"Apple embed server is running via pci-apple-embed-server (model: {apple_embed_model_name()}).",
             )
         )
     else:
@@ -570,7 +570,7 @@ def _check_apple_metal(env: config.Env, *, llama_model: str | None) -> list[Chec
                 "apple-metal-model",
                 "warn",
                 "No local embedding model is configured.",
-                "Run pci-apple-llama-server or pci-apple-mlx-server to start a local model, "
+                "Run pci-apple-embed-server or pci-apple-llama-server to start a local model, "
                 "or set PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT for a remote provider.",
             )
         )
