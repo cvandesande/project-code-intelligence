@@ -134,6 +134,8 @@ def cli_args(**overrides: object) -> CliArgs:
         "embedding_endpoint_model": "local",
         "llama_embed": False,
         "no_preembed": False,
+        "prune_snapshots": False,
+        "prune_keep": 5,
     }
     values.update(overrides)
     return CliArgs(**values)  # type: ignore[arg-type]

@@ -42,6 +42,7 @@ __all__ = [
     "previous_file_signatures",
     "previous_file_state_signature",
     "previous_file_states",
+    "prune_old_snapshots",
     "replace_repos",
     "row_int",
     "schema_migration_versions",
@@ -164,6 +165,8 @@ def insert_files(conn: db.DbConnection, snapshot_id: int, files: list[IntelFile]
             "is_config": item.is_config,
             "is_doc": item.is_doc,
             "skipped_reason": item.skipped_reason,
+            "is_untracked": item.is_untracked,
+            "indexed_dirty": item.indexed_dirty,
             "metadata": item.metadata,
         }
         for item in files
@@ -195,6 +198,8 @@ def insert_files(conn: db.DbConnection, snapshot_id: int, files: list[IntelFile]
                 is_config boolean,
                 is_doc boolean,
                 skipped_reason text,
+                is_untracked boolean,
+                indexed_dirty boolean,
                 metadata jsonb
             )
         ),
@@ -203,13 +208,13 @@ def insert_files(conn: db.DbConnection, snapshot_id: int, files: list[IntelFile]
                 snapshot_id, collection, repo, repo_role, branch, commit_sha, tree_sha,
                 source_path, git_blob_sha, file_sha256, size_bytes, language,
                 file_role, content_class, is_generated, is_vendor, is_test,
-                is_source, is_build, is_config, is_doc, skipped_reason, metadata
+                is_source, is_build, is_config, is_doc, skipped_reason, is_untracked, indexed_dirty, metadata
             )
             SELECT
                 snapshot_id, collection, repo, repo_role, branch, commit_sha, tree_sha,
                 source_path, git_blob_sha, file_sha256, size_bytes, language,
                 file_role, content_class, is_generated, is_vendor, is_test,
-                is_source, is_build, is_config, is_doc, skipped_reason, metadata
+                is_source, is_build, is_config, is_doc, skipped_reason, is_untracked, indexed_dirty, metadata
             FROM input_rows
             WHERE true
             ON CONFLICT (snapshot_id, source_path)
@@ -227,6 +232,8 @@ def insert_files(conn: db.DbConnection, snapshot_id: int, files: list[IntelFile]
                           is_config = EXCLUDED.is_config,
                           is_doc = EXCLUDED.is_doc,
                           skipped_reason = EXCLUDED.skipped_reason,
+                          is_untracked = EXCLUDED.is_untracked,
+                          indexed_dirty = EXCLUDED.indexed_dirty,
                           metadata = EXCLUDED.metadata
             RETURNING source_path, id
         )
@@ -400,3 +407,21 @@ def insert_parser_failures(
             params,
         )
     return len(failures)
+
+
+def prune_old_snapshots(conn: db.DbConnection, collection: str, repo: str, keep: int = 5) -> int:
+    rows = conn.execute(
+        """
+        DELETE FROM project_code_intel_snapshots
+        WHERE collection = %s AND repo = %s
+          AND id NOT IN (
+              SELECT id FROM project_code_intel_snapshots
+              WHERE collection = %s AND repo = %s
+              ORDER BY created_at DESC
+              LIMIT %s
+          )
+        RETURNING id
+        """,
+        [collection, repo, collection, repo, keep],
+    ).fetchall()
+    return len(rows)

@@ -278,6 +278,8 @@ class IntelFile:
     is_config: bool
     is_doc: bool
     skipped_reason: str | None
+    is_untracked: bool = False
+    indexed_dirty: bool = False
     metadata: JsonObject = field(default_factory=dict)
 
 
@@ -298,6 +300,8 @@ class PreviousFileState:
     is_config: bool
     is_doc: bool
     skipped_reason: str | None
+    is_untracked: bool = False
+    indexed_dirty: bool = False
     metadata: JsonObject = field(default_factory=dict)
 
 

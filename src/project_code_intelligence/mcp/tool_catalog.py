@@ -23,7 +23,10 @@ class ToolDefinition:
 
 TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
     "code_intel_status": ToolDefinition(
-        "Check code intelligence snapshot, file, record, edge, and embedding state.",
+        "Check code intelligence snapshot, file, record, edge, and embedding state. Snapshots include "
+        "index_age_seconds (freshness), head_commit (current HEAD), and head_matches_snapshot (whether "
+        "the index is up-to-date). File counts include untracked_files and dirty_files to indicate "
+        "uncommitted changes at index time.",
         {
             "type": "object",
             "properties": {
