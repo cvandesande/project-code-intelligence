@@ -90,8 +90,8 @@ configuration, a local ignored file, or your system secret manager.
 ## Codex
 
 Codex stores MCP config in `~/.codex/config.toml`, or in a project-scoped
-`.codex/config.toml` for trusted projects. The CLI and IDE extension share this
-configuration.
+`.codex/config.toml` for trusted projects. The CLI and the VSCode Codex
+extension share this configuration.
 
 ```toml
 [mcp_servers.project-code-intelligence]
@@ -113,7 +113,8 @@ can be omitted.
 
 Claude Code supports local, user, and project MCP scopes. Project-scoped MCP
 servers are stored in `.mcp.json`; user/local scoped servers are private to the
-user.
+user. The CLI and the `anthropic.claude-code` VSCode extension share this
+configuration.
 
 Use project-scoped `.mcp.json` only for non-secret shared configuration. Keep
 credentials in local/user configuration or environment variables.
@@ -135,6 +136,78 @@ credentials in local/user configuration or environment variables.
   }
 }
 ```
+
+## Cline
+
+The Cline VSCode extension (`saoudrizwan.claude-dev`) stores MCP server
+configuration at a user-scoped JSON file. The simplest way to edit it is the
+MCP Servers icon in the Cline panel, which opens the file. The schema uses a
+top-level `mcpServers` key.
+
+- macOS: `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json`
+- Linux: `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json`
+- Windows: `%APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\settings\cline_mcp_settings.json`
+
+```json
+{
+  "mcpServers": {
+    "project-code-intelligence": {
+      "type": "stdio",
+      "command": "/home/you/.local/bin/pci-mcp",
+      "args": [],
+      "cwd": "/home/you/src/project-code-intelligence",
+      "env": {
+        "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://host:5432/database?sslmode=prefer",
+        "PROJECT_CODE_INTELLIGENCE_DATABASE_USER": "user",
+        "PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD": "password"
+      }
+    }
+  }
+}
+```
+
+The MCP Servers panel in Cline lists running servers and the tools each
+exposes.
+
+## GitHub Copilot Chat (VSCode)
+
+Copilot Chat reads MCP server configuration from a user-scoped `mcp.json`, or
+from a workspace `.vscode/mcp.json`. Add a server with the Command Palette
+command `MCP: Add Server`, or edit the file directly. The schema uses a
+top-level `servers` key (not `mcpServers`).
+
+User-scoped file:
+
+- macOS: `~/Library/Application Support/Code/User/mcp.json`
+- Linux: `~/.config/Code/User/mcp.json`
+- Windows: `%APPDATA%\Code\User\mcp.json`
+
+```json
+{
+  "servers": {
+    "project-code-intelligence": {
+      "type": "stdio",
+      "command": "/home/you/.local/bin/pci-mcp",
+      "args": [],
+      "cwd": "/home/you/src/project-code-intelligence",
+      "env": {
+        "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://host:5432/database?sslmode=prefer",
+        "PROJECT_CODE_INTELLIGENCE_DATABASE_USER": "user",
+        "PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD": "password"
+      }
+    }
+  },
+  "inputs": []
+}
+```
+
+After saving, click the inline `Start` action above the server entry in
+`mcp.json`, or run `MCP: List Servers` from the Command Palette to view status.
+The tools appear in the Tools picker when Copilot Chat is in agent mode.
+
+For a workspace-scoped configuration that ships with the repo, place the same
+content (without secret credentials) in `.vscode/mcp.json` at the workspace
+root.
 
 ## OpenCode
 
