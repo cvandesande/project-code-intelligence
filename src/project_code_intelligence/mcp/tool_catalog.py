@@ -24,9 +24,12 @@ class ToolDefinition:
 TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
     "code_intel_status": ToolDefinition(
         "Check code intelligence snapshot, file, record, edge, and embedding state. Snapshots include "
-        "index_age_seconds (freshness), head_commit (current HEAD), and head_matches_snapshot (whether "
-        "the index is up-to-date). File counts include untracked_files and dirty_files to indicate "
-        "uncommitted changes at index time.",
+        "index_age_seconds (freshness), head_commit (current HEAD), head_matches_snapshot (whether "
+        "the index is up-to-date), and embed_record_types (the record types that were configured for "
+        "embedding when this snapshot was indexed — absent if the index ran without --embed). "
+        "File counts include untracked_files and dirty_files. "
+        "records_by_type includes embedded_records per type so you can compare against embed_record_types "
+        "to understand which types are expected to have embeddings and which are not.",
         {
             "type": "object",
             "properties": {
@@ -43,7 +46,13 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         "full-text search first, then automatically fall back to exact all-term and any-term matching "
         "when full-text search returns no results. Omit query to enumerate records by filter "
         "(e.g. parent_record_id, symbol) ordered by most recently updated. The query argument, when "
-        "supplied, must be non-empty.",
+        "supplied, must be non-empty. "
+        "source_path is an exact full-path filter, not a directory prefix; pass the complete relative "
+        "file path (e.g. 'agent/internal/grpc/grpc.go') to match. "
+        "Results are compact by default: per-result snapshot/git/repo metadata is omitted and a short "
+        "code snippet is included inline so most navigational tasks need no follow-up call. "
+        "Pass verbose=true to restore all fields (snapshot_id, collection, repo, branch, commit_sha, "
+        "tree_sha, record_id, updated_at, confidence, tool, rule_id, severity).",
         {
             "type": "object",
             "properties": {
@@ -70,12 +79,19 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "metadata_contains": {"type": "object"},
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
+                "verbose": {"type": "boolean"},
             },
             "additionalProperties": False,
         },
     ),
     "search_code_intel_semantic": ToolDefinition(
-        "Embed a query with the configured embedding backend and search embedded code intelligence records.",
+        "Embed a query with the configured embedding backend and search embedded code intelligence records. "
+        "Only record types listed in embed_record_types (visible in code_intel_status) have embeddings — "
+        "typically code_chunk and doc_section. symbol_definition records are not embedded by default, so "
+        "semantic search cannot find function/type definitions; use search_code_intel_text with the symbol "
+        "filter or source_path enumeration for those. "
+        "Results are compact by default: per-result snapshot/git/repo metadata is omitted and a short "
+        "code snippet is included inline. Pass verbose=true to restore all fields.",
         {
             "type": "object",
             "properties": {
@@ -96,6 +112,7 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "metadata_contains": {"type": "object"},
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
+                "verbose": {"type": "boolean"},
             },
             "required": ["query"],
             "additionalProperties": False,
@@ -116,20 +133,29 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
     "related_code_intel": ToolDefinition(
         "Return code intelligence graph edges related to a record id or symbol, "
         "joined with source and target record details so a single call resolves both "
-        "ends of every edge. Filter by edge_type ('call_candidate' for function calls, "
+        "ends of every edge. At least one of record_id or symbol must be provided. "
+        "For call_candidate edges: source = caller, target = callee. Querying by "
+        "record_id returns all edges where that record is source or target. Querying "
+        "by symbol matches on source_symbol or target_symbol and typically surfaces "
+        "callers of functions with that name across the whole codebase. "
+        "Filter by edge_type ('call_candidate' for function calls, "
         "'include' for C/C++ #include relationships) when you only want one kind of "
-        "relationship.",
+        "relationship. For short, common names (Close, Read, Write, etc.) expect "
+        "many heuristic_candidate edges — filter by confidence_kind='confirmed' or "
+        "use a more specific record_id to reduce noise.",
         {
             "type": "object",
             "properties": {
                 "record_id": {"type": "string"},
                 "symbol": {"type": "string"},
                 "edge_type": {"type": "string"},
+                "confidence_kind": {"type": "string"},
                 "collection": {"type": "string"},
                 "repo": {"type": "string"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100},
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
+                "verbose": {"type": "boolean"},
             },
             "additionalProperties": False,
         },
@@ -137,7 +163,10 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
     "list_code_intel_files": ToolDefinition(
         "List indexed source files filtered by language, role, content class, or skip status. "
         "Use this to discover the shape of the codebase (e.g. all test files, only Python sources, "
-        "files that were skipped during ingestion).",
+        "files that were skipped during ingestion). File-level language metadata (go_functions, "
+        "go_imports, etc.) is omitted by default; pass include_metadata=true to include it. "
+        "source_path is an exact full-path filter (e.g. 'agent/internal/grpc/grpc.go'), not a "
+        "directory prefix — passing a directory path returns no results.",
         {
             "type": "object",
             "properties": {
@@ -156,6 +185,7 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "is_build": {"type": "boolean"},
                 "is_config": {"type": "boolean"},
                 "only_skipped": {"type": "boolean"},
+                "include_metadata": {"type": "boolean"},
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
             },

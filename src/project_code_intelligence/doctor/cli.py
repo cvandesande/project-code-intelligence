@@ -207,7 +207,7 @@ def stop_embedding_services() -> int:
     # Stop Docker Compose embedding services (ignore errors if not running).
     try:
         _ = process.run_docker(
-            ["compose", *_DOCKER_PROFILES, "stop", *_DOCKER_SERVICES],
+            ["compose", *process.compose_file_args(), *_DOCKER_PROFILES, "stop", *_DOCKER_SERVICES],
             process.RunOptions(capture_output=True),
         )
         write_stdout("Stopped Docker Compose embedding services.")
@@ -234,7 +234,7 @@ def stop_database() -> int:
     """Stop the local pgvector database container and return 0 on success."""
     try:
         _ = process.run_docker(
-            ["compose", *_DOCKER_PROFILES, "stop", "pgvector"],
+            ["compose", *process.compose_file_args(), *_DOCKER_PROFILES, "stop", "pgvector"],
             process.RunOptions(capture_output=True),
         )
         write_stdout("Stopped pgvector database container.")
@@ -313,7 +313,7 @@ def clean_all() -> int:
     # 2. Stop and remove database container + volume.
     try:
         _ = process.run_docker(
-            ["compose", *_DOCKER_PROFILES, "down", "-v", "--remove-orphans"],
+            ["compose", *process.compose_file_args(), *_DOCKER_PROFILES, "down", "-v", "--remove-orphans"],
             process.RunOptions(capture_output=True),
         )
         write_stdout("Removed Docker Compose containers and volumes.")

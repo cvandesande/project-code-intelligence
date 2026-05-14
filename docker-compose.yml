@@ -2,6 +2,7 @@ services:
   pgvector:
     profiles: ["db"]
     image: pgvector/pgvector:pg18
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${PGVECTOR_DB:-codeintel}
       POSTGRES_USER: ${PGVECTOR_USER:-codeintel}

@@ -199,5 +199,36 @@ def make_code_record(intel_file: IntelFile, lines: list[tuple[int, str]], ordina
 
 def extract_referenced_symbols(text: str) -> list[str]:
     refs = [match.group(1) for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", text)]
-    keywords = {"if", "for", "while", "switch", "return", "sizeof", "defined"}
+    keywords = {
+        # C/C++
+        "if",
+        "for",
+        "while",
+        "switch",
+        "return",
+        "sizeof",
+        "defined",
+        "do",
+        "else",
+        "case",
+        "catch",
+        # Go anonymous function literals: `func() { ... }`
+        "func",
+        # JS/TS: `function() { ... }`, typeof(x), new Foo(), delete(x), void(0), throw(e), await(p)
+        "function",
+        "typeof",
+        "instanceof",
+        "new",
+        "delete",
+        "void",
+        "throw",
+        "yield",
+        "await",
+        # Rust
+        "fn",
+        "match",
+        "loop",
+        # Python
+        "lambda",
+    }
     return sorted({ref for ref in refs if ref not in keywords})[:160]

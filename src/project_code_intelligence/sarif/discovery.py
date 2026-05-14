@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from project_code_intelligence import config, profile_context
+from project_code_intelligence import config, process, profile_context
+from project_code_intelligence.git_utils import GIT_TIMEOUT_SECONDS, git_binary
 from project_code_intelligence.sarif.paths import relative_to_or_none
 
 SARIF_FIXTURE_MARKERS = frozenset({"fixture", "fixtures", "test", "tests"})
@@ -59,6 +60,34 @@ def profile_recursive_sarif_base(root: Path, pattern: str) -> tuple[Path, str] |
     return (base if base.is_absolute() else root / base, suffix)
 
 
+def _git_listed_paths_with_suffix(base: Path, suffix: str) -> list[Path] | None:
+    """Enumerate tracked + untracked files under `base` via git, returning those
+    that end with `suffix`. Returns None when `base` is not inside a git working
+    tree, the git binary is missing, or the git invocation fails — caller should
+    then fall back to filesystem walking.
+
+    `--exclude-standard` is intentionally omitted from the untracked pass: SARIF
+    reports are commonly written into gitignored output directories (`out/`,
+    `reports/`, `build/`), and we want to discover them anyway. Git's tree
+    walker is still significantly faster than Python's `os.walk` because it is
+    written in C and emits paths as strings without per-entry Path allocation.
+    """
+    binary = git_binary()
+    if binary is None:
+        return None
+    paths: list[Path] = []
+    for extra in (["ls-files"], ["ls-files", "--others"]):
+        try:
+            proc = process.run(
+                [binary, "-C", str(base), *extra],
+                process.RunOptions(check=True, capture_output=True, timeout=GIT_TIMEOUT_SECONDS),
+            )
+        except (OSError, process.CalledProcessError, process.TimeoutExpired):
+            return None
+        paths.extend(base / line for line in proc.stdout.splitlines() if line.endswith(suffix))
+    return paths
+
+
 def profile_recursive_sarif_paths(root: Path, pattern: str) -> list[Path] | None:
     recursive = profile_recursive_sarif_base(root, pattern)
     if recursive is None:
@@ -66,6 +95,9 @@ def profile_recursive_sarif_paths(root: Path, pattern: str) -> list[Path] | None
     base, suffix = recursive
     if not base.is_dir():
         return []
+    git_paths = _git_listed_paths_with_suffix(base, suffix)
+    if git_paths is not None:
+        return git_paths
     paths: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(base):
         dirnames[:] = [name for name in dirnames if name not in PROFILE_SARIF_PRUNE_DIRS]

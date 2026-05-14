@@ -13,6 +13,7 @@ import shutil
 # Centralized, shell-free subprocess boundary.
 import subprocess  # nosec B404
 from dataclasses import dataclass
+from importlib import resources as importlib_resources
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -152,6 +153,24 @@ def _audit_docker_args(args: Sequence[str]) -> None:
         if saw_volume_flag and arg.startswith(_DOCKER_DANGEROUS_VOLUME_PREFIXES):
             raise ValueError(f"docker volume mount refused by run_docker: {arg!r}")
         saw_volume_flag = arg in {"-v", "--volume"}
+
+
+def compose_file_args() -> list[str]:
+    """Return ["-f", "/path/to/docker-compose.yml"] for use in compose subcommands.
+
+    Resolves the bundled docker-compose.yml from the installed package data so
+    compose commands work regardless of the caller's current working directory.
+    Returns an empty list if the file cannot be located (callers degrade to
+    CWD-based discovery, preserving the previous behaviour).
+    """
+    try:
+        ref = importlib_resources.files("project_code_intelligence").joinpath("docker-compose.yml")
+        path = Path(str(ref))
+        if path.exists():
+            return ["-f", str(path)]
+    except (TypeError, AttributeError):
+        pass
+    return []
 
 
 def run_docker(args: Sequence[str], options: RunOptions | None = None) -> subprocess.CompletedProcess[str]:

@@ -47,6 +47,7 @@ class _SearchFilterArgs(StrictArgs):
     metadata_contains: dict[str, object] | None = None
     snapshot_id: int | None = Field(default=None, ge=1)
     include_historical: bool | None = None
+    verbose: bool | None = None
 
 
 class SearchCodeIntelTextArgs(_SearchFilterArgs):
@@ -69,11 +70,13 @@ class RelatedCodeIntelArgs(StrictArgs):
     record_id: str | None = None
     symbol: str | None = None
     edge_type: str | None = None
+    confidence_kind: str | None = None
     collection: str | None = None
     repo: str | None = None
     limit: int | None = Field(default=None, ge=1, le=100)
     snapshot_id: int | None = Field(default=None, ge=1)
     include_historical: bool | None = None
+    verbose: bool | None = None
 
 
 class ListCodeIntelFilesArgs(StrictArgs):
@@ -92,6 +95,7 @@ class ListCodeIntelFilesArgs(StrictArgs):
     is_build: bool | None = None
     is_config: bool | None = None
     only_skipped: bool | None = None
+    include_metadata: bool | None = None
     snapshot_id: int | None = Field(default=None, ge=1)
     include_historical: bool | None = None
 
