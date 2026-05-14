@@ -61,9 +61,9 @@ basename and queries by repo.
 
 | Task                                                  | Tool & arguments                                                              |
 | ----------------------------------------------------- | ----------------------------------------------------------------------------- |
-| Find where symbol `X` is used                         | `related_code_intel(symbol="X", edge_type="calls")`                           |
-| List a symbol's outgoing references                   | `related_code_intel(record_id="…", edge_type="calls")`                        |
-| What does this module import?                         | `related_code_intel(record_id="…", edge_type="imports")`                      |
+| Find where symbol `X` is used                         | `related_code_intel(symbol="X", edge_type="call_candidate")`                  |
+| List a symbol's outgoing references                   | `related_code_intel(record_id="…", edge_type="call_candidate")`               |
+| What does this C/C++ source include?                  | `related_code_intel(record_id="…", edge_type="include")`                      |
 | Enumerate all test files                              | `list_code_intel_files(is_test=true)`                                         |
 | Enumerate all Python sources, excluding generated     | `list_code_intel_files(language="python", is_generated=false)`                |
 | What couldn't be parsed?                              | `list_code_intel_parser_failures()`                                           |
