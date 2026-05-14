@@ -3,6 +3,7 @@ PYTHONPATH := src
 RUFF ?= $(if $(wildcard .venv/bin/ruff),.venv/bin/ruff,ruff)
 COVERAGE ?= $(if $(wildcard .venv/bin/coverage),.venv/bin/coverage,coverage)
 BANDIT ?= $(if $(wildcard .venv/bin/bandit),.venv/bin/bandit,bandit)
+BASEDPYRIGHT ?= $(if $(wildcard .venv/bin/basedpyright),.venv/bin/basedpyright,basedpyright)
 PIP_AUDIT ?= $(if $(wildcard .venv/bin/pip-audit),.venv/bin/pip-audit,pip-audit)
 UV_CACHE_DIR ?= .uv-cache
 # Container engine: docker preferred, podman as drop-in replacement.
@@ -67,7 +68,7 @@ coverage:
 	$(COVERAGE) report -m
 
 typecheck:
-	basedpyright --warnings
+	$(BASEDPYRIGHT) --warnings
 
 security:
 	$(BANDIT) -c pyproject.toml -r src tests scripts --severity-level all --confidence-level all
