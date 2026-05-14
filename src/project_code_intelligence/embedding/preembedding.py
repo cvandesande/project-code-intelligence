@@ -15,6 +15,8 @@ from project_code_intelligence.runtime import PreEmbeddingResult, PreEmbeddingSt
 from project_code_intelligence.storage import RecordInsertContext, insert_records
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from project_code_intelligence.embedding.types import EmbeddingRunConfig
     from project_code_intelligence.models import IntelRecord, JsonObject
 
@@ -203,11 +205,15 @@ def insert_records_with_preembedding(
     insert_context: RecordInsertContext,
     records: list[IntelRecord],
     state: PreEmbeddingState,
+    *,
+    progress_fn: Callable[[int], None] | None = None,
 ) -> tuple[int, int, int]:
     inserted = 0
     non_embedding_records = [record for record in records if id(record) not in state.selected_ids]
     for offset in range(0, len(non_embedding_records), 1000):
-        inserted += insert_records(insert_context, non_embedding_records[offset : offset + 1000])
+        inserted += insert_records(
+            insert_context, non_embedding_records[offset : offset + 1000], progress_fn=progress_fn
+        )
         inserted += consume_preembedding_results(insert_context, state, block=False)
     inserted += consume_preembedding_results(insert_context, state, block=False)
     if state.consumed_batches < len(state.batches):
@@ -221,7 +227,7 @@ def insert_records_with_preembedding(
             batches=len(remaining_batches),
         )
         for batch in remaining_batches:
-            inserted += insert_records(insert_context, batch)
+            inserted += insert_records(insert_context, batch, progress_fn=progress_fn)
         state.consumed_batches = len(state.batches)
     return inserted, state.embedded, state.skipped
 

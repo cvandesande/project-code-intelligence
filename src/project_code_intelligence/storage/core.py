@@ -23,6 +23,8 @@ from project_code_intelligence.storage.schema import (
 from project_code_intelligence.storage.static import insert_static_runs
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from project_code_intelligence.models import IntelEdge, IntelFile, IntelRecord, JsonObject, Snapshot
 
 __all__ = [
@@ -44,9 +46,11 @@ __all__ = [
     "previous_file_states",
     "prune_old_snapshots",
     "replace_repos",
+    "resolve_edge_targets",
     "row_int",
     "schema_migration_versions",
     "snapshot_versions_compatible",
+    "stamp_embed_types",
 ]
 
 
@@ -245,9 +249,38 @@ def insert_files(conn: db.DbConnection, snapshot_id: int, files: list[IntelFile]
     return {str(row["source_path"]): row_int(row, "id") for row in rows}
 
 
+_RECORDS_INSERT_SQL = """
+    INSERT INTO project_code_intel_records (
+        snapshot_id, file_id, collection, repo, repo_role, branch, commit_sha,
+        tree_sha, source_path, file_sha256, language, file_role,
+        content_class, record_type, record_id, parent_record_id,
+        title, summary, embedding_text, display_content,
+        embedding_text_hash, display_hash, line_start, line_end,
+        symbol, symbol_kind, confidence_kind, confidence, tool,
+        rule_id, severity, analyzer, analyzer_version, parser,
+        parser_version, chunker_version, metadata, embedding
+    )
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::vector)
+    ON CONFLICT (snapshot_id, record_type, record_id, embedding_text_hash)
+    DO UPDATE SET file_id = EXCLUDED.file_id,
+                  file_sha256 = EXCLUDED.file_sha256,
+                  summary = EXCLUDED.summary,
+                  display_content = EXCLUDED.display_content,
+                  display_hash = EXCLUDED.display_hash,
+                  metadata = EXCLUDED.metadata,
+                  embedding = coalesce(EXCLUDED.embedding, project_code_intel_records.embedding)
+"""
+
+_INSERT_BATCH_SIZE = 1_000
+
+
 def insert_records(
     context: RecordInsertContext,
     records: list[IntelRecord],
+    *,
+    progress_fn: Callable[[int], None] | None = None,
 ) -> int:
     if not records:
         return 0
@@ -298,36 +331,33 @@ def insert_records(
     # psycopg3 exposes executemany() on cursors, while this module otherwise
     # uses connection.execute() for single-statement operations.
     with context.conn.cursor() as cur:
-        cur.executemany(
-            """
-            INSERT INTO project_code_intel_records (
-                snapshot_id, file_id, collection, repo, repo_role, branch, commit_sha,
-                tree_sha, source_path, file_sha256, language, file_role,
-                content_class, record_type, record_id, parent_record_id,
-                title, summary, embedding_text, display_content,
-                embedding_text_hash, display_hash, line_start, line_end,
-                symbol, symbol_kind, confidence_kind, confidence, tool,
-                rule_id, severity, analyzer, analyzer_version, parser,
-                parser_version, chunker_version, metadata, embedding
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::vector)
-            ON CONFLICT (snapshot_id, record_type, record_id, embedding_text_hash)
-            DO UPDATE SET file_id = EXCLUDED.file_id,
-                          file_sha256 = EXCLUDED.file_sha256,
-                          summary = EXCLUDED.summary,
-                          display_content = EXCLUDED.display_content,
-                          display_hash = EXCLUDED.display_hash,
-                          metadata = EXCLUDED.metadata,
-                          embedding = coalesce(EXCLUDED.embedding, project_code_intel_records.embedding)
-            """,
-            params,
-        )
+        for i in range(0, len(params), _INSERT_BATCH_SIZE):
+            batch = params[i : i + _INSERT_BATCH_SIZE]
+            cur.executemany(_RECORDS_INSERT_SQL, batch)
+            if progress_fn is not None:
+                progress_fn(len(batch))
     return len(records)
 
 
-def insert_edges(conn: db.DbConnection, snapshot: Snapshot, snapshot_id: int, edges: list[IntelEdge]) -> int:
+_EDGES_INSERT_SQL = """
+    INSERT INTO project_code_intel_edges (
+        snapshot_id, collection, repo, commit_sha, source_record_id, target_record_id,
+        edge_type, source_symbol, target_symbol, source_path, target_path,
+        confidence_kind, metadata
+    )
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+    ON CONFLICT DO NOTHING
+"""
+
+
+def insert_edges(
+    conn: db.DbConnection,
+    snapshot: Snapshot,
+    snapshot_id: int,
+    edges: list[IntelEdge],
+    *,
+    progress_fn: Callable[[int], None] | None = None,
+) -> int:
     if not edges:
         return 0
     params = [
@@ -351,19 +381,50 @@ def insert_edges(conn: db.DbConnection, snapshot: Snapshot, snapshot_id: int, ed
     # psycopg3 exposes executemany() on cursors, while this module otherwise
     # uses connection.execute() for single-statement operations.
     with conn.cursor() as cur:
-        cur.executemany(
-            """
-            INSERT INTO project_code_intel_edges (
-                snapshot_id, collection, repo, commit_sha, source_record_id, target_record_id,
-                edge_type, source_symbol, target_symbol, source_path, target_path,
-                confidence_kind, metadata
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
-            ON CONFLICT DO NOTHING
-            """,
-            params,
-        )
+        for i in range(0, len(params), _INSERT_BATCH_SIZE):
+            batch = params[i : i + _INSERT_BATCH_SIZE]
+            cur.executemany(_EDGES_INSERT_SQL, batch)
+            if progress_fn is not None:
+                progress_fn(len(batch))
     return len(edges)
+
+
+def resolve_edge_targets(conn: db.DbConnection, snapshot_id: int) -> int:
+    """Fill target_record_id / target_path on edges that have only target_symbol.
+
+    call_candidate edges are created with target_symbol (the callee name) but no
+    target_record_id, because at parse time we only know the callee by name.  This
+    pass joins against symbol_definition records in the same snapshot and fills in
+    the stable record_id string.  When multiple records share the same symbol name
+    the lexicographically first source_path wins — an acknowledged heuristic.
+    """
+    rows = conn.execute(
+        """
+        UPDATE project_code_intel_edges e
+        SET target_record_id = matches.record_id,
+            target_path       = matches.source_path
+        FROM (
+            SELECT DISTINCT ON (e2.id)
+                   e2.id        AS edge_id,
+                   r.record_id,
+                   r.source_path
+            FROM   project_code_intel_edges e2
+            JOIN   project_code_intel_records r
+                   ON  r.snapshot_id  = e2.snapshot_id
+                   AND r.symbol       = e2.target_symbol
+                   AND r.record_type  = 'symbol_definition'
+            WHERE  e2.snapshot_id         = %s
+              AND  e2.target_record_id    IS NULL
+              AND  e2.target_symbol       IS NOT NULL
+            ORDER  BY e2.id, r.source_path
+        ) matches
+        WHERE e.id           = matches.edge_id
+          AND e.snapshot_id  = %s
+        RETURNING e.id
+        """,
+        [snapshot_id, snapshot_id],
+    ).fetchall()
+    return len(rows)
 
 
 def parser_failure_metadata(failure: JsonObject) -> JsonObject:
@@ -407,6 +468,22 @@ def insert_parser_failures(
             params,
         )
     return len(failures)
+
+
+def stamp_embed_types(conn: db.DbConnection, snapshot_ids: list[int], embed_types: set[str]) -> None:
+    """Record which record types were embedded for a set of snapshots.
+
+    Written as a jsonb merge so other metadata keys (e.g. embedding_contract)
+    are preserved.
+    """
+    _ = conn.execute(
+        """
+        UPDATE project_code_intel_snapshots
+        SET metadata = metadata || jsonb_build_object('embed_record_types', %s::jsonb)
+        WHERE id = ANY(%s)
+        """,
+        [json.dumps(sorted(embed_types)), snapshot_ids],
+    )
 
 
 def prune_old_snapshots(conn: db.DbConnection, collection: str, repo: str, keep: int = 5) -> int:
