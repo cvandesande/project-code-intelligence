@@ -58,9 +58,11 @@ from project_code_intelligence.doctor.types import (
     GpuInfo,
 )
 from project_code_intelligence.embedding.apple_llama_server import LLAMA_SERVER_PID_FILE
+from project_code_intelligence.embedding.apple_mlx_server import MLX_SERVER_PID_FILE
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from pathlib import Path
 
 __all__ = [
     "CheckResult",
@@ -197,27 +199,34 @@ _DOCKER_PROFILES = (
 _DOCKER_SERVICES = ("fastembed", "lemonade-npu", "llama-rocm", "llama-cuda")
 _HOST_PROCESSES = (
     "pci-embedding-server",
+    "project_code_intelligence.embedding.apple_mlx_server",
     "project_code_intelligence.embedding.coreml_server",
     "project_code_intelligence.embedding.fastembed_server",
 )
 
 
-def _stop_pid_file_process() -> None:
-    """Send SIGTERM to the llama-server recorded in the PID file, then remove it."""
+def _stop_pid_file(pid_file: Path) -> None:
+    """Send SIGTERM to the process recorded in pid_file, then remove it."""
     try:
-        pid = int(LLAMA_SERVER_PID_FILE.read_text(encoding="utf-8").strip())
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         return
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         with contextlib.suppress(OSError):
-            LLAMA_SERVER_PID_FILE.unlink()
+            pid_file.unlink()
     except OSError:
         return
     else:
         with contextlib.suppress(OSError):
-            LLAMA_SERVER_PID_FILE.unlink()
+            pid_file.unlink()
+
+
+def _stop_pid_file_process() -> None:
+    """Send SIGTERM to all host-native server processes recorded in PID files."""
+    _stop_pid_file(LLAMA_SERVER_PID_FILE)
+    _stop_pid_file(MLX_SERVER_PID_FILE)
 
 
 def stop_embedding_services() -> int:
