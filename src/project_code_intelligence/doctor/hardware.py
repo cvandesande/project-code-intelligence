@@ -21,6 +21,7 @@ from project_code_intelligence.doctor.common import (
 )
 from project_code_intelligence.doctor.types import CheckResult, GpuInfo
 from project_code_intelligence.embedding.apple_llama_server import llama_server_is_running, looks_like_hf_model_id
+from project_code_intelligence.embedding.apple_mlx_server import mlx_model_name, mlx_server_is_running
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -555,13 +556,21 @@ def _check_apple_metal(env: config.Env, *, llama_model: str | None) -> list[Chec
             )
     elif llama_server_is_running():
         results.append(result("apple-metal-model", "ok", "llama-server is running via pci-apple-llama-server."))
+    elif mlx_server_is_running():
+        results.append(
+            result(
+                "apple-metal-model",
+                "ok",
+                f"MLX embedding server is running via pci-apple-mlx-server (model: {mlx_model_name()}).",
+            )
+        )
     else:
         results.append(
             result(
                 "apple-metal-model",
                 "warn",
                 "No local embedding model is configured.",
-                "Run pci-apple-llama-server to download and start a local model, "
+                "Run pci-apple-llama-server or pci-apple-mlx-server to start a local model, "
                 "or set PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT for a remote provider.",
             )
         )
