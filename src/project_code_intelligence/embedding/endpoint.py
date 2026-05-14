@@ -90,7 +90,6 @@ def local_embedding_model_candidates(env: config.Env | None = None) -> tuple[str
         config.DEFAULT_LEMONADE_EMBEDDING_MODEL,
         config.env_text("PROJECT_CODE_INTELLIGENCE_HF_MODEL_FILE", config.DEFAULT_GPU_EMBEDDING_MODEL, env=env)
         or config.DEFAULT_GPU_EMBEDDING_MODEL,
-        config.DEFAULT_APPLE_METAL_MODEL,
     ]
     deduplicated: list[str] = []
     for value in values:

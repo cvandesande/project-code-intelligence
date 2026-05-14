@@ -399,7 +399,7 @@ class DoctorEndpointTests(unittest.TestCase):
 
 
 class DoctorAppleTests(unittest.TestCase):
-    def test_embedding_options_shows_metal_for_apple(self) -> None:
+    def test_embedding_options_shows_mlx_for_apple(self) -> None:
         results = check_embedding_options(
             env={},
             gpus=[GpuInfo(name="Apple Silicon GPU", vendor="Apple", shared_bytes=16 * 1024 * 1024 * 1024)],
@@ -408,17 +408,21 @@ class DoctorAppleTests(unittest.TestCase):
         apple = next(r for r in results if r.name == "option-gpu-apple")
 
         self.assertEqual(apple.status, "ok")
-        self.assertIn("Metal", apple.message)
+        self.assertIn("MLX", apple.message)
 
     def test_format_summary_shows_apple_metal_startup_command(self) -> None:
         output = format_summary(
             [
                 CheckResult("platform", "ok", "Python 3.13 on Darwin 25.4.0 (arm64)"),
-                CheckResult("npu", "skip", "Apple Neural Engine is not used; embeddings run via llama.cpp Metal."),
+                CheckResult(
+                    "npu", "skip", "Apple Neural Engine is not used; embeddings run via pci-apple-embed-server (MPS)."
+                ),
                 CheckResult("database", "ok", "connected to codeintel as codeintel"),
                 CheckResult("embedding-endpoint", "warn", "no endpoint configured"),
                 CheckResult(
-                    "option-gpu-apple", "ok", "Apple GPU embeddings: host-native llama.cpp Metal default demo.gguf."
+                    "option-gpu-apple",
+                    "ok",
+                    "Apple GPU embeddings: native MLX default mlx-community/Qwen3-Embedding-0.6B-8bit.",
                 ),
             ],
             color=False,
