@@ -199,7 +199,7 @@ class RichEmitter:
                 self._render(),
                 console=self.console,
                 refresh_per_second=LIVE_REFRESH_PER_SECOND,
-                transient=False,
+                transient=True,
                 redirect_stdout=False,
                 redirect_stderr=False,
             )
@@ -326,6 +326,7 @@ class RichEmitter:
             _add_row(rows, "Repository", self.current_repo_row_text())
         _add_row(rows, "Database", self.database_row_text())
         _add_live_progress_row(rows, progress)
+        _add_live_write_op_row(rows, progress)
         _add_live_files_row(rows, counts)
         _add_live_records_row(rows, counts)
         _add_live_edges_row(rows, counts)
@@ -381,6 +382,12 @@ def _add_live_progress_row(rows: Table, progress: JsonObject) -> None:
     overall = progress.get("overall_percent_estimated")
     if isinstance(overall, (int, float)):
         _add_row(rows, "Progress", f"~{overall:.0f}%")
+
+
+def _add_live_write_op_row(rows: Table, progress: JsonObject) -> None:
+    op = progress.get("db_write_op")
+    if isinstance(op, str) and op:
+        _add_row(rows, "Writing", op)
 
 
 def _add_live_files_row(rows: Table, counts: JsonObject) -> None:

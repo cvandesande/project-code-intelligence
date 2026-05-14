@@ -12,7 +12,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from project_code_intelligence import config, db, profile_context, progress
 from project_code_intelligence import runtime as runtime_state
@@ -80,19 +80,28 @@ from project_code_intelligence.storage import (
     previous_file_states,
     prune_old_snapshots,
     replace_repos,
+    resolve_edge_targets,
     snapshot_versions_compatible,
+    stamp_embed_types,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from project_code_intelligence.code_profiles.base import CodeIntelProfile
+
+_T = TypeVar("_T")
 
 MIN_CHUNK_CHARS = 100
 AUTO_SCAN_WORKERS = 0
 MAX_AUTO_SCAN_WORKERS = 8
 MIN_PARALLEL_PARSE_FILES = 64
 PARSE_CHUNKS_PER_WORKER = 8
+_DB_WRITE_BATCH_SIZE = 500
+
+
+def _chunks(items: list[_T], size: int) -> list[list[_T]]:
+    return [items[i : i + size] for i in range(0, max(len(items), 1), size)]
 
 
 def write_stdout(message: str) -> None:
@@ -905,6 +914,9 @@ def run_embed_only(plan: IngestPlan) -> int:
         )
     finally:
         runtime_state.active_metrics.complete_phase("embedding")
+    with db.connect(readonly=False) as conn:
+        stamp_embed_types(conn, snapshot_ids, plan.embed_types)
+        conn.commit()
     print_embed_only_report(plan, snapshot_ids, embedded_records)
     return 0
 
@@ -1217,6 +1229,8 @@ def insert_repo_records(
     ingest: RepoIngest,
     insert_context: RecordInsertContext,
     summary: DbUploadSummary,
+    *,
+    progress_fn: Callable[[int], None] | None = None,
 ) -> tuple[int, int, int]:
     preembedding_state = (
         start_record_preembedding(
@@ -1230,12 +1244,13 @@ def insert_repo_records(
     )
     try:
         if preembedding_state is None:
-            inserted_records = insert_records(insert_context, ingest.records)
+            inserted_records = insert_records(insert_context, ingest.records, progress_fn=progress_fn)
             return inserted_records, 0, 0
         inserted_records, preembedded, skipped = insert_records_with_preembedding(
             insert_context,
             ingest.records,
             preembedding_state,
+            progress_fn=progress_fn,
         )
         summary.preembedded_records += preembedded
         summary.preembedding_skipped += skipped
@@ -1251,26 +1266,39 @@ def upload_repo_ingest(
     summary: DbUploadSummary,
     indexes: StaticSnapshotIndexes,
 ) -> None:
+    add_progress = runtime_state.active_metrics.add_phase_done
+    if plan.embedding_requested:
+        ingest.snapshot.metadata["embed_record_types"] = sorted(plan.embed_types)
     snapshot_id = insert_snapshot(conn, ingest.snapshot)
     summary.snapshot_ids.append(snapshot_id)
     indexes.snapshot_ids_by_repo[ingest.snapshot.repo] = snapshot_id
     indexes.snapshot_by_repo[ingest.snapshot.repo] = ingest.snapshot
-    file_ids = insert_files(conn, snapshot_id, ingest.files)
+    runtime_state.active_metrics.set("db_write_op", "inserting files")
+    file_ids: dict[str, int] = {}
+    for file_batch in _chunks(ingest.files, _DB_WRITE_BATCH_SIZE):
+        ids = insert_files(conn, snapshot_id, file_batch)
+        file_ids.update(ids)
+        add_progress(len(ids))
+        runtime_state.active_metrics.add("inserted_files", len(ids))
+    runtime_state.active_metrics.set("db_write_op", None)
     file_hashes = {item.source_path: item.file_sha256 for item in ingest.files}
     insert_context = RecordInsertContext(conn, ingest.snapshot, snapshot_id, file_ids, file_hashes)
     summary.inserted_files += len(file_ids)
-    runtime_state.active_metrics.add_phase_done(len(file_ids))
-    runtime_state.active_metrics.add("inserted_files", len(file_ids))
     copy_unchanged_data(conn, ingest, snapshot_id, summary)
-    inserted_records, _preembedded, _skipped = insert_repo_records(plan, ingest, insert_context, summary)
+    runtime_state.active_metrics.set("db_write_op", "inserting records")
+    inserted_records, _preembedded, _skipped = insert_repo_records(
+        plan, ingest, insert_context, summary, progress_fn=add_progress
+    )
     summary.inserted_records += inserted_records
-    runtime_state.active_metrics.add_phase_done(inserted_records)
-    inserted_edges = insert_edges(conn, ingest.snapshot, snapshot_id, ingest.edges)
+    runtime_state.active_metrics.set("db_write_op", "inserting edges")
+    inserted_edges = insert_edges(conn, ingest.snapshot, snapshot_id, ingest.edges, progress_fn=add_progress)
+    resolved_edges = resolve_edge_targets(conn, snapshot_id)
     summary.inserted_edges += inserted_edges
-    runtime_state.active_metrics.add_phase_done(inserted_edges)
+    runtime_state.active_metrics.set("db_write_op", "inserting failures")
     inserted_failures = insert_parser_failures(conn, ingest.snapshot, snapshot_id, ingest.parser_failures)
     summary.inserted_parser_failures += inserted_failures
-    runtime_state.active_metrics.add_phase_done(inserted_failures)
+    add_progress(inserted_failures)
+    runtime_state.active_metrics.set("db_write_op", None)
     runtime_state.active_metrics.add("inserted_records", inserted_records)
     runtime_state.active_metrics.add("inserted_edges", inserted_edges)
     runtime_state.active_metrics.add("inserted_parser_failures", inserted_failures)
@@ -1284,6 +1312,7 @@ def upload_repo_ingest(
         unchanged_files=len(ingest.unchanged_paths),
         records=len(ingest.records),
         edges=len(ingest.edges),
+        resolved_edges=resolved_edges,
         copied_records=summary.copied_records,
         copied_edges=summary.copied_edges,
         copied_parser_failures=summary.copied_parser_failures,
@@ -1328,7 +1357,9 @@ def upload_ingests(plan: IngestPlan, ingests: list[RepoIngest], sarif_ingest: Sa
             for ingest in ingests:
                 upload_repo_ingest(conn, plan, ingest, summary, indexes)
             insert_static_analysis(conn, sarif_ingest, indexes.snapshot_ids_by_repo, indexes.snapshot_by_repo, summary)
+            runtime_state.active_metrics.set("db_write_op", "committing")
             conn.commit()
+            runtime_state.active_metrics.set("db_write_op", None)
     finally:
         runtime_state.active_metrics.end_phase("db_upload", "db_upload_seconds")
     return summary
@@ -1349,8 +1380,16 @@ def embed_after_upload(plan: IngestPlan, snapshot_ids: list[int]) -> int:
         runtime_state.active_metrics.complete_phase("embedding")
 
 
+def effective_ingest_mode(ingests: list[RepoIngest]) -> str:
+    modes = {ingest.mode for ingest in ingests}
+    if not modes:
+        return "full"
+    return "full" if "full" in modes else next(iter(modes))
+
+
 def print_ingest_result(
     plan: IngestPlan,
+    ingests: list[RepoIngest],
     summary: DbUploadSummary,
     embedded_records: int,
     sarif_ingest: SarifIngest,
@@ -1369,7 +1408,7 @@ def print_ingest_result(
         "copied_records": summary.copied_records,
         "copied_edges": summary.copied_edges,
         "copied_parser_failures": summary.copied_parser_failures,
-        "mode": plan.mode,
+        "mode": effective_ingest_mode(ingests),
         "profile": profile_context.active_profile.name,
         "embeddings": plan.args.embed,
         "sarif_files": [relative_to_or_none(path, plan.root) or str(path) for path in plan.sarif_files],
@@ -1413,7 +1452,7 @@ def run_ingest_plan(plan: IngestPlan) -> int:
         return 0
     summary = upload_ingests(plan, ingests, sarif_ingest)
     embedded_records = embed_after_upload(plan, summary.snapshot_ids)
-    print_ingest_result(plan, summary, embedded_records, sarif_ingest)
+    print_ingest_result(plan, ingests, summary, embedded_records, sarif_ingest)
     return 0
 
 

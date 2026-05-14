@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import math
+import os
+import resource
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -24,6 +27,38 @@ def estimate_embedding_tokens(text: str) -> int:
     if not text:
         return 0
     return max(1, math.ceil(len(text) / embedding_token_estimate_chars_per_token()))
+
+
+def _rusage_start() -> tuple[float, float]:
+    """Capture CPU (user, sys) seconds at metrics-object creation time."""
+    try:
+        u = resource.getrusage(resource.RUSAGE_SELF)
+    except OSError:
+        return 0.0, 0.0
+    else:
+        return u.ru_utime, u.ru_stime
+
+
+def _rusage_snapshot(start: tuple[float, float], wall_seconds: float, cpu_count: int) -> JsonObject | None:
+    """Return CPU/memory metrics relative to *start*, or None if unavailable."""
+    try:
+        u = resource.getrusage(resource.RUSAGE_SELF)
+    except OSError:
+        return None
+    else:
+        cpu_user = round(u.ru_utime - start[0], 3)
+        cpu_sys = round(u.ru_stime - start[1], 3)
+        cpu_efficiency = round((cpu_user + cpu_sys) / max(wall_seconds, 0.001) / cpu_count * 100, 1)
+        rss_raw = u.ru_maxrss
+        # macOS reports ru_maxrss in bytes; Linux in kilobytes
+        rss_mb = round(rss_raw / (1024 * 1024 if sys.platform == "darwin" else 1024), 1)
+        return {
+            "cpu_user_seconds": cpu_user,
+            "cpu_sys_seconds": cpu_sys,
+            "cpu_efficiency_pct": cpu_efficiency,
+            "cpu_count": cpu_count,
+            "peak_rss_mb": rss_mb,
+        }
 
 
 @dataclass
@@ -100,6 +135,10 @@ class RuntimeMetrics:
     embedding_input_tokens_reported: int = 0
     phase_done: int = 0
     phase_total: int = 0
+    db_write_op: str | None = None
+    run_start_time: float = field(default_factory=time.monotonic)
+    run_cpu_count: int = field(default_factory=lambda: os.cpu_count() or 1)
+    run_cpu_start: tuple[float, float] = field(default_factory=_rusage_start)
     progress_weights: dict[str, float] = field(
         default_factory=lambda: {"scan": 0.4, "db_upload": 0.2, "embedding": 0.4}
     )
@@ -277,8 +316,14 @@ class RuntimeMetrics:
                 "phase_percent": round(phase_fraction * 100, 2) if phase_fraction is not None else None,
                 "overall_percent_estimated": round(overall_fraction * 100, 2),
                 "overall_is_estimated": True,
+                "db_write_op": self.db_write_op,
             }
-        return {"timing": timing, "counts": counts, "token_use": token_use, "progress": progress}
+        # run_start_time / run_cpu_start / run_cpu_count are set once at __init__ — safe to read outside lock
+        out: JsonObject = {"timing": timing, "counts": counts, "token_use": token_use, "progress": progress}
+        resources = _rusage_snapshot(self.run_cpu_start, time.monotonic() - self.run_start_time, self.run_cpu_count)
+        if resources is not None:
+            out["resources"] = resources
+        return out
 
 
 active_metrics = RuntimeMetrics()
