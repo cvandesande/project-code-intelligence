@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import datetime
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
-from project_code_intelligence import config, db, embeddings
+from project_code_intelligence import config, db, embeddings, git_utils
 from project_code_intelligence.embedding import llama
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError
 from project_code_intelligence.mcp import db as mcp_db
@@ -94,8 +96,11 @@ CODE_INTEL_RECORD_SELECT_LIST = """
                    r.symbol_kind, r.confidence_kind, r.confidence, r.tool,
                    r.rule_id, r.severity, r.metadata, r.updated_at,
                    r.embedding IS NOT NULL AS has_embedding,
-                   NULL::real AS rank
+                   NULL::real AS rank,
+                   coalesce(f.is_untracked, false) AS is_untracked,
+                   coalesce(f.indexed_dirty, false) AS indexed_dirty
             FROM project_code_intel_records r
+            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
             """
 
 CODE_INTEL_RECORD_SELECT_WEBSEARCH = """
@@ -106,8 +111,11 @@ CODE_INTEL_RECORD_SELECT_WEBSEARCH = """
                    r.symbol_kind, r.confidence_kind, r.confidence, r.tool,
                    r.rule_id, r.severity, r.metadata, r.updated_at,
                    r.embedding IS NOT NULL AS has_embedding,
-                   ts_rank_cd(r.search_document, websearch_to_tsquery('english', %s)) AS rank
+                   ts_rank_cd(r.search_document, websearch_to_tsquery('english', %s)) AS rank,
+                   coalesce(f.is_untracked, false) AS is_untracked,
+                   coalesce(f.indexed_dirty, false) AS indexed_dirty
             FROM project_code_intel_records r
+            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
             """
 
 CODE_INTEL_RECORD_SELECT_TERMS = """
@@ -131,8 +139,11 @@ CODE_INTEL_RECORD_SELECT_TERMS = """
                            r.display_content,
                            r.metadata::text
                        ) ILIKE search_terms.pattern ESCAPE '\\'
-                   ) AS rank
+                   ) AS rank,
+                   coalesce(f.is_untracked, false) AS is_untracked,
+                   coalesce(f.indexed_dirty, false) AS indexed_dirty
             FROM project_code_intel_records r
+            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
             """
 
 ALL_TERMS_SEARCH_CLAUSE = """
@@ -304,7 +315,9 @@ def tool_code_intel_status(args: Json) -> Json:
             if table_regclass_exists(conn, "project_code_intel_schema_migrations")
             else []
         )
-        snapshots = conn.execute(
+        head_commit = git_utils.run_git(Path.cwd(), ["rev-parse", "HEAD"])
+        now = datetime.datetime.now(datetime.timezone.utc)
+        snapshot_rows = conn.execute(
             db.query_sql(
                 query_with_where(
                     """
@@ -321,6 +334,17 @@ def tool_code_intel_status(args: Json) -> Json:
             ),
             [*filters.snapshots.params, mcp_db.mcp_max_status_rows()],
         ).fetchall()
+        snapshots: list[Json] = []
+        for snap in snapshot_rows:
+            snap_dict: Json = cast("Json", dict(snap))
+            created = snap_dict.get("created_at")
+            if created is not None and isinstance(created, datetime.datetime):
+                snap_dict["index_age_seconds"] = int((now - created).total_seconds())
+            snap_dict["head_commit"] = head_commit
+            snap_dict["head_matches_snapshot"] = (
+                head_commit is not None and snap_dict.get("commit_sha") == head_commit.strip()
+            )
+            snapshots.append(snap_dict)
         counts = conn.execute(
             db.query_sql(
                 query_with_where(
@@ -358,7 +382,9 @@ def tool_code_intel_status(args: Json) -> Json:
                 query_with_where(
                     """
             SELECT f.collection, f.repo, count(*) AS files,
-                   count(*) FILTER (WHERE f.skipped_reason IS NOT NULL) AS skipped_files
+                   count(*) FILTER (WHERE f.skipped_reason IS NOT NULL) AS skipped_files,
+                   count(*) FILTER (WHERE f.is_untracked) AS untracked_files,
+                   count(*) FILTER (WHERE f.indexed_dirty AND NOT f.is_untracked) AS dirty_files
             FROM project_code_intel_files f
             """,
                     filters.files.clauses,
@@ -524,69 +550,81 @@ def record_projection_query(*, include_content: bool, filter_collection: bool = 
     if include_content:
         if filter_collection:
             return """
-                SELECT id, collection, repo, repo_role, branch, commit_sha, tree_sha,
-                       source_path, language, file_role, content_class,
-                       record_type, record_id, parent_record_id, title, summary,
-                       left(embedding_text, %s) AS embedding_text,
-                       coalesce(length(embedding_text), 0) > %s AS embedding_text_truncated,
-                       left(display_content, %s) AS display_content,
-                       coalesce(length(display_content), 0) > %s AS display_content_truncated,
+                SELECT r.id, r.collection, r.repo, r.repo_role, r.branch, r.commit_sha, r.tree_sha,
+                       r.source_path, r.language, r.file_role, r.content_class,
+                       r.record_type, r.record_id, r.parent_record_id, r.title, r.summary,
+                       left(r.embedding_text, %s) AS embedding_text,
+                       coalesce(length(r.embedding_text), 0) > %s AS embedding_text_truncated,
+                       left(r.display_content, %s) AS display_content,
+                       coalesce(length(r.display_content), 0) > %s AS display_content_truncated,
                        false AS content_omitted,
-                       line_start, line_end, symbol, symbol_kind, confidence_kind,
-                       confidence, tool, rule_id, severity, analyzer, analyzer_version,
-                       parser, parser_version, chunker_version, metadata, created_at,
-                       updated_at, embedding IS NOT NULL AS has_embedding
-                FROM project_code_intel_records
-                WHERE id = %s AND collection = %s
+                       r.line_start, r.line_end, r.symbol, r.symbol_kind, r.confidence_kind,
+                       r.confidence, r.tool, r.rule_id, r.severity, r.analyzer, r.analyzer_version,
+                       r.parser, r.parser_version, r.chunker_version, r.metadata, r.created_at,
+                       r.updated_at, r.embedding IS NOT NULL AS has_embedding,
+                       coalesce(f.is_untracked, false) AS is_untracked,
+                       coalesce(f.indexed_dirty, false) AS indexed_dirty
+                FROM project_code_intel_records r
+                LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
+                WHERE r.id = %s AND r.collection = %s
                 """
         return """
-            SELECT id, collection, repo, repo_role, branch, commit_sha, tree_sha,
-                   source_path, language, file_role, content_class,
-                   record_type, record_id, parent_record_id, title, summary,
-                   left(embedding_text, %s) AS embedding_text,
-                   coalesce(length(embedding_text), 0) > %s AS embedding_text_truncated,
-                   left(display_content, %s) AS display_content,
-                   coalesce(length(display_content), 0) > %s AS display_content_truncated,
+            SELECT r.id, r.collection, r.repo, r.repo_role, r.branch, r.commit_sha, r.tree_sha,
+                   r.source_path, r.language, r.file_role, r.content_class,
+                   r.record_type, r.record_id, r.parent_record_id, r.title, r.summary,
+                   left(r.embedding_text, %s) AS embedding_text,
+                   coalesce(length(r.embedding_text), 0) > %s AS embedding_text_truncated,
+                   left(r.display_content, %s) AS display_content,
+                   coalesce(length(r.display_content), 0) > %s AS display_content_truncated,
                    false AS content_omitted,
-                   line_start, line_end, symbol, symbol_kind, confidence_kind,
-                   confidence, tool, rule_id, severity, analyzer, analyzer_version,
-                   parser, parser_version, chunker_version, metadata, created_at,
-                   updated_at, embedding IS NOT NULL AS has_embedding
-            FROM project_code_intel_records
-            WHERE id = %s
+                   r.line_start, r.line_end, r.symbol, r.symbol_kind, r.confidence_kind,
+                   r.confidence, r.tool, r.rule_id, r.severity, r.analyzer, r.analyzer_version,
+                   r.parser, r.parser_version, r.chunker_version, r.metadata, r.created_at,
+                   r.updated_at, r.embedding IS NOT NULL AS has_embedding,
+                   coalesce(f.is_untracked, false) AS is_untracked,
+                   coalesce(f.indexed_dirty, false) AS indexed_dirty
+            FROM project_code_intel_records r
+            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
+            WHERE r.id = %s
             """
     if filter_collection:
         return """
-            SELECT id, collection, repo, repo_role, branch, commit_sha, tree_sha,
-                   source_path, language, file_role, content_class,
-                   record_type, record_id, parent_record_id, title, summary,
+            SELECT r.id, r.collection, r.repo, r.repo_role, r.branch, r.commit_sha, r.tree_sha,
+                   r.source_path, r.language, r.file_role, r.content_class,
+                   r.record_type, r.record_id, r.parent_record_id, r.title, r.summary,
                    NULL::text AS embedding_text,
                    false AS embedding_text_truncated,
                    NULL::text AS display_content,
                    false AS display_content_truncated,
                    true AS content_omitted,
-                   line_start, line_end, symbol, symbol_kind, confidence_kind,
-                   confidence, tool, rule_id, severity, analyzer, analyzer_version,
-                   parser, parser_version, chunker_version, metadata, created_at,
-                   updated_at, embedding IS NOT NULL AS has_embedding
-            FROM project_code_intel_records
-            WHERE id = %s AND collection = %s
+                   r.line_start, r.line_end, r.symbol, r.symbol_kind, r.confidence_kind,
+                   r.confidence, r.tool, r.rule_id, r.severity, r.analyzer, r.analyzer_version,
+                   r.parser, r.parser_version, r.chunker_version, r.metadata, r.created_at,
+                   r.updated_at, r.embedding IS NOT NULL AS has_embedding,
+                   coalesce(f.is_untracked, false) AS is_untracked,
+                   coalesce(f.indexed_dirty, false) AS indexed_dirty
+            FROM project_code_intel_records r
+            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
+            WHERE r.id = %s AND r.collection = %s
             """
     return """
-            SELECT id, collection, repo, repo_role, branch, commit_sha, tree_sha,
-                   source_path, language, file_role, content_class,
-                   record_type, record_id, parent_record_id, title, summary,
+            SELECT r.id, r.collection, r.repo, r.repo_role, r.branch, r.commit_sha, r.tree_sha,
+                   r.source_path, r.language, r.file_role, r.content_class,
+                   r.record_type, r.record_id, r.parent_record_id, r.title, r.summary,
                    NULL::text AS embedding_text,
                    false AS embedding_text_truncated,
                    NULL::text AS display_content,
                    false AS display_content_truncated,
                    true AS content_omitted,
-                   line_start, line_end, symbol, symbol_kind, confidence_kind,
-                   confidence, tool, rule_id, severity, analyzer, analyzer_version,
-                   parser, parser_version, chunker_version, metadata, created_at,
-                   updated_at, embedding IS NOT NULL AS has_embedding
-            FROM project_code_intel_records
-            WHERE id = %s
+                   r.line_start, r.line_end, r.symbol, r.symbol_kind, r.confidence_kind,
+                   r.confidence, r.tool, r.rule_id, r.severity, r.analyzer, r.analyzer_version,
+                   r.parser, r.parser_version, r.chunker_version, r.metadata, r.created_at,
+                   r.updated_at, r.embedding IS NOT NULL AS has_embedding,
+                   coalesce(f.is_untracked, false) AS is_untracked,
+                   coalesce(f.indexed_dirty, false) AS indexed_dirty
+            FROM project_code_intel_records r
+            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
+            WHERE r.id = %s
             """
 
 

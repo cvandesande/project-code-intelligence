@@ -182,7 +182,7 @@ def run_git_required(root: Path, args: list[str]) -> str:
 
 
 def git_dirty_fingerprint(root: Path) -> str | None:
-    status = run_git(root, ["status", "--porcelain=v1", "--untracked-files=no"])
+    status = run_git(root, ["status", "--porcelain=v1"])
     if not status:
         return None
     staged = run_git(root, ["diff", "--cached", "--binary"]) or ""
@@ -191,7 +191,7 @@ def git_dirty_fingerprint(root: Path) -> str | None:
 
 
 def git_dirty_paths(root: Path) -> set[str]:
-    status = run_git(root, ["status", "--porcelain=v1", "--untracked-files=no"]) or ""
+    status = run_git(root, ["status", "--porcelain=v1"]) or ""
     dirty_paths: set[str] = set()
     for line in status.splitlines():
         if len(line) < PORCELAIN_STATUS_MIN_LENGTH:
@@ -227,6 +227,22 @@ def git_ls_files(repo_root: Path) -> list[tuple[str | None, str]]:
         elif line:
             out.append((None, line.rsplit(None, 1)[-1]))
     return out
+
+
+def git_untracked_files(repo_root: Path) -> list[str]:
+    binary = git_binary()
+    if binary is None:
+        return []
+    proc = process.run(
+        [binary, "ls-files", "--others", "--exclude-standard"],
+        process.RunOptions(
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+        ),
+    )
+    return [line for line in proc.stdout.splitlines() if line]
 
 
 def shebang_language(data: bytes) -> str | None:
@@ -540,19 +556,14 @@ def discover_files(
     repo_root = root / snapshot.repo
     files: list[IntelFile] = []
     reuse_context = reuse or DiscoveryReuse(previous_files={})
+    dirty_paths = git_dirty_paths(repo_root)
     for git_blob_sha, rel_path in sorted(git_ls_files(repo_root), key=itemgetter(1)):
         abs_path = repo_root / rel_path
         if not abs_path.is_file():
             continue
         source_path = source_path_for(snapshot.repo, rel_path)
-        previous = reusable_previous_file(
-            source_path,
-            rel_path,
-            git_blob_sha,
-            reuse=reuse_context,
-        )
-        if previous is not None:
-            files.append(file_from_previous_state(snapshot, rel_path, abs_path, previous))
+        if (prev := reusable_previous_file(source_path, rel_path, git_blob_sha, reuse=reuse_context)) is not None:
+            files.append(file_from_previous_state(snapshot, rel_path, abs_path, prev))
             continue
         reason, data, size_bytes, read_ok = inspect_inventory_file(abs_path, max_file_bytes)
         language = language_for_read_file(rel_path, data, read_ok=read_ok)
@@ -563,10 +574,10 @@ def discover_files(
             reason = "unsupported_file_type"
         text = data.decode("utf-8", errors="replace") if read_ok and reason is None else None
         classified = profile_context.active_profile.classify_file(rel_path, language, classify_file(rel_path, language))
-        metadata: JsonObject = {"path_parts": rel_path.split("/")[:8]}
+        file_md: JsonObject = {"path_parts": rel_path.split("/")[:8]}
         if language_has_metadata(language):
-            metadata.update(language_metadata_for_file(rel_path, language, text))
-        metadata.update(profile_context.active_profile.file_metadata(rel_path, language, classified))
+            file_md.update(language_metadata_for_file(rel_path, language, text))
+        file_md.update(profile_context.active_profile.file_metadata(rel_path, language, classified))
         files.append(
             IntelFile(
                 collection=snapshot.collection,
@@ -583,7 +594,7 @@ def discover_files(
                 size_bytes=size_bytes,
                 language=language,
                 skipped_reason=reason,
-                metadata={key: value for key, value in metadata.items() if value},
+                metadata={key: value for key, value in file_md.items() if value},
                 file_role=classification_text(classified, "file_role"),
                 content_class=classification_text(classified, "content_class"),
                 is_generated=classification_bool(classified, "is_generated"),
@@ -593,6 +604,56 @@ def discover_files(
                 is_build=classification_bool(classified, "is_build"),
                 is_config=classification_bool(classified, "is_config"),
                 is_doc=classification_bool(classified, "is_doc"),
+                is_untracked=False,
+                indexed_dirty=rel_path in dirty_paths,
+            )
+        )
+    for rel_path in sorted(git_untracked_files(repo_root)):
+        abs_path = repo_root / rel_path
+        if not abs_path.is_file():
+            continue
+        source_path = source_path_for(snapshot.repo, rel_path)
+        reason, data, size_bytes, read_ok = inspect_inventory_file(abs_path, max_file_bytes)
+        language = language_for_read_file(rel_path, data, read_ok=read_ok)
+        if reason is None and not (
+            should_parse_text(rel_path, language, None)
+            or profile_context.active_profile.should_parse_text(rel_path, language, None)
+        ):
+            reason = "unsupported_file_type"
+        text = data.decode("utf-8", errors="replace") if read_ok and reason is None else None
+        classified = profile_context.active_profile.classify_file(rel_path, language, classify_file(rel_path, language))
+        md: JsonObject = {"path_parts": rel_path.split("/")[:8]}
+        if language_has_metadata(language):
+            md.update(language_metadata_for_file(rel_path, language, text))
+        md.update(profile_context.active_profile.file_metadata(rel_path, language, classified))
+        files.append(
+            IntelFile(
+                collection=snapshot.collection,
+                repo=snapshot.repo,
+                repo_role=snapshot.repo_role,
+                branch=snapshot.branch,
+                commit_sha=snapshot.commit_sha,
+                tree_sha=snapshot.tree_sha,
+                source_path=source_path,
+                repo_rel_path=rel_path,
+                abs_path=abs_path,
+                git_blob_sha=None,
+                file_sha256=sha256_bytes(data) if read_ok else None,
+                size_bytes=size_bytes,
+                language=language,
+                skipped_reason=reason,
+                metadata={key: value for key, value in md.items() if value},
+                file_role=classification_text(classified, "file_role"),
+                content_class=classification_text(classified, "content_class"),
+                is_generated=classification_bool(classified, "is_generated"),
+                is_vendor=classification_bool(classified, "is_vendor"),
+                is_test=classification_bool(classified, "is_test"),
+                is_source=classification_bool(classified, "is_source"),
+                is_build=classification_bool(classified, "is_build"),
+                is_config=classification_bool(classified, "is_config"),
+                is_doc=classification_bool(classified, "is_doc"),
+                is_untracked=True,
+                indexed_dirty=True,
             )
         )
     return files

@@ -78,6 +78,7 @@ from project_code_intelligence.storage import (
     latest_snapshot_info,
     previous_file_state_signature,
     previous_file_states,
+    prune_old_snapshots,
     replace_repos,
     snapshot_versions_compatible,
 )
@@ -134,6 +135,8 @@ class CliArgs:
     embedding_endpoint_model: str
     llama_embed: bool
     no_preembed: bool
+    prune_snapshots: bool
+    prune_keep: int
 
 
 @dataclass(frozen=True)
@@ -235,6 +238,8 @@ class CliNamespace(argparse.Namespace):
     embedding_endpoint_model: str
     llama_embed: bool
     no_preembed: bool
+    prune_snapshots: bool
+    prune_keep: int
 
 
 def json_int(obj: JsonObject, key: str) -> int:
@@ -597,6 +602,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable background pre-embedding while records are being inserted into Postgres.",
     )
+    _ = parser.add_argument(
+        "--prune-snapshots",
+        action="store_true",
+        help="Delete old snapshots, keeping only the N most recent per repo (see --prune-keep).",
+    )
+    _ = parser.add_argument(
+        "--prune-keep",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Number of recent snapshots to keep when --prune-snapshots is set (default: 5).",
+    )
     return parser
 
 
@@ -639,6 +656,8 @@ def parse_cli_args(argv: list[str] | None = None) -> CliArgs:
         embedding_endpoint_model=embedding_endpoint_model,
         llama_embed=parsed.llama_embed,
         no_preembed=parsed.no_preembed,
+        prune_snapshots=parsed.prune_snapshots,
+        prune_keep=parsed.prune_keep,
     )
 
 
@@ -1402,7 +1421,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_cli_args(argv)
     if args.reset_only:
         return run_reset_only(args)
-    return run_ingest_plan(build_ingest_plan(args))
+    result = run_ingest_plan(build_ingest_plan(args))
+    if args.prune_snapshots and result == 0:
+        collection = args.collection or default_collection(args.root)
+        repo_names = parse_repos(args.repos or "")
+        with db.connect() as conn:
+            for repo in repo_names:
+                deleted = prune_old_snapshots(conn, collection, repo, keep=args.prune_keep)
+                if deleted > 0:
+                    progress_event("code_intel_prune", collection=collection, repo=repo, deleted=deleted)
+    return result
 
 
 def cli_main(argv: list[str] | None = None) -> int:

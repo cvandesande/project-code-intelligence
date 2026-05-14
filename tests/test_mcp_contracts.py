@@ -317,8 +317,8 @@ class McpContractTests(unittest.TestCase):
             _ = mcp_tools.tool_get_code_intel_record({"id": 1})
 
         query, params = conn.calls[0]
-        self.assertIn("WHERE id = %s", query)
-        self.assertIn("AND collection = %s", query)
+        self.assertIn("WHERE r.id = %s", query)
+        self.assertIn("AND r.collection = %s", query)
         self.assertEqual(params, [1, "project-code-intelligence"])
 
     def test_id_static_finding_fetch_is_scoped_to_configured_collection(self) -> None:

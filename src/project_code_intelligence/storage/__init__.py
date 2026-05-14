@@ -13,6 +13,7 @@ from project_code_intelligence.storage.core import (
     insert_records,
     insert_snapshot,
     parser_failure_metadata,
+    prune_old_snapshots,
     replace_repos,
 )
 from project_code_intelligence.storage.schema import (
@@ -47,6 +48,7 @@ __all__ = [
     "previous_file_signatures",
     "previous_file_state_signature",
     "previous_file_states",
+    "prune_old_snapshots",
     "replace_repos",
     "row_int",
     "schema_migration_versions",

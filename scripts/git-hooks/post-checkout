@@ -1,0 +1,5 @@
+#!/bin/sh
+# Re-index after branch switch (arg 3 = 1 = branch checkout, not file checkout)
+[ "$3" = "1" ] || exit 0
+command -v pci-index >/dev/null 2>&1 || exit 0
+pci-index . >/dev/null 2>&1 &

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Re-index repository after each commit (background, non-blocking)
+command -v pci-index >/dev/null 2>&1 || exit 0
+pci-index . >/dev/null 2>&1 &

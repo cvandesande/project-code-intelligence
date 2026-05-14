@@ -278,6 +278,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS project_code_intel_snapshots_collection_repo_t
 CREATE INDEX IF NOT EXISTS project_code_intel_files_collection_repo_path_idx
     ON project_code_intel_files (collection, repo, source_path);
 
+ALTER TABLE project_code_intel_files
+    ADD COLUMN IF NOT EXISTS is_untracked boolean NOT NULL DEFAULT false;
+
+ALTER TABLE project_code_intel_files
+    ADD COLUMN IF NOT EXISTS indexed_dirty boolean NOT NULL DEFAULT false;
+
 CREATE INDEX IF NOT EXISTS project_code_intel_files_collection_class_idx
     ON project_code_intel_files (collection, repo, language, file_role, content_class);
 
