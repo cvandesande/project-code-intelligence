@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -104,12 +105,19 @@ class CoreMLEmbedder:
     """Wraps a Core ML model and tokenizer into an embedding pipeline."""
 
     def __init__(
-        self, model: CoreMLModel, tokenizer: CoreMLTokenizer, model_name: str, *, max_length: int | None = None
+        self,
+        model: CoreMLModel,
+        tokenizer: CoreMLTokenizer,
+        model_name: str,
+        *,
+        max_length: int | None = None,
+        first_run: bool = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.model_name = model_name
         self.max_length = max_length
+        self.first_run = first_run
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         np = _import_numpy()
@@ -168,7 +176,7 @@ def _first_output(prediction: dict[str, object], *keys: str) -> object | None:
 def _extract_embedding(prediction: dict[str, object], attention_mask: NdArray, *, np: NumpyModule) -> list[float]:
     token_embeddings = _first_output(prediction, "last_hidden_state", "hidden_states", "token_embeddings")
     if token_embeddings is None:
-        sentence_embedding = _first_output(prediction, "sentence_embedding", "embeddings")
+        sentence_embedding = _first_output(prediction, "sentence_embedding", "embeddings", "embedding")
         if sentence_embedding is not None:
             return _flatten_to_list(cast("NdArray", sentence_embedding))
         raise ValueError(f"Core ML model returned unexpected output keys: {sorted(prediction.keys())}")
@@ -212,6 +220,27 @@ _ANSI_CLEAR_TO_EOL = b"\x1b[K"
 _GLYPH_RUNNING = console_ui.STATUS_GLYPHS["running"]
 _GLYPH_OK = console_ui.STATUS_GLYPHS["ok"]
 _GLYPH_FAIL = console_ui.STATUS_GLYPHS["fail"]
+
+_COMPUTE_UNITS_ENV_VAR = "PROJECT_CODE_INTELLIGENCE_COREML_COMPUTE_UNITS"
+_VALID_COMPUTE_UNITS = frozenset({"ALL", "CPU_AND_NE", "CPU_AND_GPU", "CPU_ONLY"})
+
+
+def _coreml_compute_units_name() -> str:
+    name = (config.env_text(_COMPUTE_UNITS_ENV_VAR) or "ALL").upper()
+    if name not in _VALID_COMPUTE_UNITS:
+        raise RuntimeError(f"Unknown compute unit {name!r}. Valid values: {', '.join(sorted(_VALID_COMPUTE_UNITS))}.")
+    return name
+
+
+def _get_ct_compute_units(ct: object) -> object:
+    name = _coreml_compute_units_name()
+    compute_unit_cls = cast("object", getattr(ct, "ComputeUnit", None))
+    if compute_unit_cls is None:
+        raise RuntimeError("coremltools.ComputeUnit is not available")
+    unit = cast("object | None", getattr(compute_unit_cls, name, None))
+    if unit is None:
+        raise RuntimeError(f"coremltools.ComputeUnit.{name} is not available")
+    return unit
 
 
 def _format_status_line(glyph: str, ansi_color: bytes, text: str) -> str:
@@ -281,6 +310,19 @@ class _ProgressIndicator:
         # In plain mode, the dots are real feedback — close them with "done".
         return b". done\n"
 
+    def _failure(self) -> bytes:
+        if self._pretty:
+            return (
+                b"\r  "
+                + _ANSI_RED
+                + _GLYPH_FAIL.encode()
+                + _ANSI_RESET
+                + f" {self._label}".encode()
+                + _ANSI_CLEAR_TO_EOL
+                + b"\n"
+            )
+        return b". failed\n"
+
     def __enter__(self) -> _ProgressIndicator:
         # Duplicate the real stderr before redirecting fd 2 to /dev/null.
         saved_fd = os.dup(2)
@@ -297,7 +339,7 @@ class _ProgressIndicator:
             _ = os.write(saved_fd, intro)
             try:
                 while True:
-                    time.sleep(0.5)
+                    time.sleep(3.0)
                     _ = os.write(saved_fd, tick)
             except (KeyboardInterrupt, SystemExit):
                 pass
@@ -306,15 +348,16 @@ class _ProgressIndicator:
             self._child_pid = pid
         return self
 
-    def __exit__(self, *_args: object) -> None:
+    def __exit__(self, exc_type: type[BaseException] | None, *_args: object) -> None:
         # Stop the child process.
         if self._child_pid is not None:
             os.kill(self._child_pid, signal.SIGTERM)
             _ = os.waitpid(self._child_pid, 0)
             self._child_pid = None
-        # Write the completion line and restore stderr.
+        # Write the completion or failure line and restore stderr.
         if self._saved_stderr is not None:
-            _ = os.write(self._saved_stderr, self._completion())
+            line = self._failure() if exc_type is not None else self._completion()
+            _ = os.write(self._saved_stderr, line)
             _ = os.dup2(self._saved_stderr, 2)
             os.close(self._saved_stderr)
             self._saved_stderr = None
@@ -345,45 +388,58 @@ def load_coreml_embedder(model_name: str) -> CoreMLEmbedder:
             "python -m pip install -e '.[apple-embeddings]'."
         ) from exc
 
-    compute_unit_cls = cast("object", getattr(ct, "ComputeUnit", None))
-    if compute_unit_cls is None:
-        raise RuntimeError("coremltools.ComputeUnit is not available")
-    compute_all = cast("object", getattr(compute_unit_cls, "ALL", None))
-    if compute_all is None:
-        raise RuntimeError("coremltools.ComputeUnit.ALL is not available")
-
+    compute_units = _get_ct_compute_units(ct)
     cache_dir = config.env_text("PROJECT_CODE_INTELLIGENCE_COREML_CACHE_DIR")
-    with _ProgressIndicator("Resolving model"):
-        model_path = _resolve_model_path(model_name, huggingface_hub=huggingface_hub, cache_dir=cache_dir)
+    with _ProgressIndicator("Downloading model"):
+        model_path, first_run = _resolve_model_path(model_name, huggingface_hub=huggingface_hub, cache_dir=cache_dir)
 
     ct_models = cast("object", getattr(ct, "models", None))
     ml_model_cls = cast("Callable[..., CoreMLModel] | None", getattr(ct_models, "MLModel", None) if ct_models else None)
     if ml_model_cls is None:
         raise RuntimeError("coremltools.models.MLModel is not available")
-    with _ProgressIndicator("Compiling model"):
-        model = ml_model_cls(model_path, compute_units=compute_all)
+    compile_label = "Compiling model (one-time setup)" if first_run else "Compiling model"
+    with _ProgressIndicator(compile_label):
+        model = ml_model_cls(model_path, compute_units=compute_units)
     max_length = _detect_max_length(model)
 
-    tokenizer_name = config.env_text("PROJECT_CODE_INTELLIGENCE_COREML_TOKENIZER", model_name)
+    with _ProgressIndicator("Loading tokenizer"):
+        tokenizer = _load_tokenizer(transformers, model_name)
+
+    return CoreMLEmbedder(
+        model=model, tokenizer=tokenizer, model_name=model_name, max_length=max_length, first_run=first_run
+    )
+
+
+def _load_tokenizer(transformers: object, model_name: str) -> CoreMLTokenizer:
+    explicit = config.env_text("PROJECT_CODE_INTELLIGENCE_COREML_TOKENIZER")
+    name = explicit or model_name
     auto_tokenizer = cast("object", getattr(transformers, "AutoTokenizer", None))
     if auto_tokenizer is None:
         raise RuntimeError("transformers.AutoTokenizer is not available")
     from_pretrained = cast("Callable[..., CoreMLTokenizer] | None", getattr(auto_tokenizer, "from_pretrained", None))
     if from_pretrained is None:
         raise RuntimeError("transformers.AutoTokenizer.from_pretrained is not available")
-    with _ProgressIndicator("Loading tokenizer"):
-        tokenizer = from_pretrained(tokenizer_name)
+    try:
+        return from_pretrained(name)
+    except (ValueError, OSError) as exc:
+        if explicit:
+            raise
+        raise RuntimeError(
+            f"Could not load tokenizer from {name!r}. "
+            "CoreML conversion repos often omit tokenizer files. "
+            "Set PROJECT_CODE_INTELLIGENCE_COREML_TOKENIZER to the original "
+            "base model (e.g. 'Qwen/Qwen3-Embedding-4B') and retry."
+        ) from exc
 
-    return CoreMLEmbedder(model=model, tokenizer=tokenizer, model_name=model_name, max_length=max_length)
 
-
-def _resolve_model_path(model_name: str, *, huggingface_hub: object, cache_dir: str | None) -> str:
+def _resolve_model_path(model_name: str, *, huggingface_hub: object, cache_dir: str | None) -> tuple[str, bool]:
+    """Return (path, is_fresh) where is_fresh flags a first-time model setup."""
     if Path(model_name).exists():
-        return model_name
+        return model_name, False
     for suffix in (".mlpackage", ".mlmodelc"):
         candidate = Path(model_name + suffix)
         if candidate.exists():
-            return str(candidate)
+            return str(candidate), False
 
     snapshot_download = cast("Callable[..., str] | None", getattr(huggingface_hub, "snapshot_download", None))
     if snapshot_download is None:
@@ -395,10 +451,9 @@ def _resolve_model_path(model_name: str, *, huggingface_hub: object, cache_dir: 
         kwargs["local_dir"] = cache_dir
     local_dir = snapshot_download(**kwargs)
     local_path = Path(local_dir)
-    for suffix in (".mlpackage", ".mlmodelc"):
-        candidates = sorted(local_path.rglob(f"*{suffix}"))
-        if candidates:
-            return str(candidates[0])
+    found, fresh = _find_mlpackage_or_modelc(local_path, cache_dir=cache_dir)
+    if found:
+        return found, fresh
 
     # Some repos have the mlpackage at the root (Manifest.json + Data/).
     # Download the full repo and check for this layout.
@@ -421,23 +476,53 @@ def _is_mlpackage_dir(path: Path) -> bool:
     return (path / "Manifest.json").is_file() and (path / "Data").is_dir()
 
 
-def _materialize_mlpackage(source: Path, *, cache_dir: str | None) -> str:
-    """Copy an mlpackage from the HF cache to a named .mlpackage directory.
+def _find_mlpackage_or_modelc(local_path: Path, *, cache_dir: str | None) -> tuple[str | None, bool]:
+    """Return (path, is_fresh) for the first .mlpackage or .mlmodelc found under local_path."""
+    candidates = sorted(local_path.rglob("*.mlpackage"))
+    if candidates:
+        return _materialize_mlpackage(candidates[0], cache_dir=cache_dir)
+    candidates = sorted(local_path.rglob("*.mlmodelc"))
+    # .mlmodelc is pre-compiled; first_run=False regardless of whether it was just downloaded
+    return (str(candidates[0]), False) if candidates else (None, False)
 
-    HuggingFace stores downloads with symlinks into a blob store which
-    coremltools' compiler cannot follow. Copying the files into a
-    conventionally-named directory resolves this.
+
+def _default_model_cache_dir() -> Path:
+    return Path.home() / ".cache" / "project-code-intelligence" / "models"
+
+
+def _hardlink_or_copy(src: str, dst: str) -> None:
+    """Hardlink src→dst (instant, no extra disk space); fall back to copy."""
+    try:
+        os.link(src, dst)
+    except OSError:
+        _ = shutil.copy2(src, dst)
+
+
+def _materialize_mlpackage(source: Path, *, cache_dir: str | None) -> tuple[str, bool]:
+    """Resolve HF blob-store symlinks in an mlpackage into a real file tree.
+
+    HuggingFace stores downloads with relative symlinks into a blob store.
+    coremltools copies the mlpackage to a temp directory for compilation; the
+    relative symlink paths no longer resolve from there, so weight.bin appears
+    missing.  This function creates a symlink-free copy (using hardlinks when
+    source and dest share a filesystem, so no extra disk space is used).
+
+    Returns (path, is_fresh) where is_fresh is True when the materialized copy
+    was just created (i.e. this is a first-time setup for this model).
     """
-    dest_parent = Path(cache_dir) if cache_dir else source.parent
-    dest = dest_parent / (source.name + ".mlpackage")
+    # source may already end in .mlpackage (nested layout) or be a bare directory
+    stem = source.stem if source.suffix == ".mlpackage" else source.name
+    dest_parent = Path(cache_dir) if cache_dir else _default_model_cache_dir()
+    dest_parent.mkdir(parents=True, exist_ok=True)
+    dest = dest_parent / f"{stem}.mlpackage"
     if dest.exists() and _is_mlpackage_dir(dest):
-        return str(dest)
-    dest_tmp = dest.with_suffix(".mlpackage.tmp")
+        return str(dest), False
+    dest_tmp = dest.parent / (dest.name + ".tmp")
     if dest_tmp.exists():
         shutil.rmtree(dest_tmp)
-    _ = shutil.copytree(source, dest_tmp, symlinks=False)
+    _ = shutil.copytree(source, dest_tmp, symlinks=False, copy_function=_hardlink_or_copy)
     _ = dest_tmp.rename(dest)
-    return str(dest)
+    return str(dest), True
 
 
 def _detect_max_length(model: CoreMLModel) -> int | None:
@@ -555,7 +640,7 @@ def diagnose() -> int:
     _ = sys.stderr.write("\nCompute plan analysis:\n")
     huggingface_hub = import_module("huggingface_hub")
     cache_dir = config.env_text("PROJECT_CODE_INTELLIGENCE_COREML_CACHE_DIR")
-    model_path = _resolve_model_path(model_name, huggingface_hub=huggingface_hub, cache_dir=cache_dir)
+    model_path, _ = _resolve_model_path(model_name, huggingface_hub=huggingface_hub, cache_dir=cache_dir)
     print_compute_plan(model_path)
 
     _ = sys.stderr.write("\nInference benchmark:\n")
@@ -591,7 +676,27 @@ def _daemonize() -> int | None:
     if pid > 0:
         # Parent: wait for the child to signal readiness then exit.
         os.close(ready_write_fd)
-        _ = os.read(ready_read_fd, 1)  # blocks until child writes or pipe breaks
+        try:
+            _ = os.read(ready_read_fd, 1)  # blocks until child writes or pipe breaks
+        except KeyboardInterrupt:
+            os.close(ready_read_fd)
+            # Kill the child and all its descendants (including dot-printing grandchildren
+            # forked by _ProgressIndicator). The child calls setsid() right after fork,
+            # placing itself and grandchildren in a new process group. Guard against the
+            # race where setsid() hasn't fired yet by only using killpg when the group
+            # differs from the parent's.
+            try:
+                pgid = os.getpgid(pid)
+                if pgid != os.getpgrp():
+                    os.killpg(pgid, signal.SIGTERM)
+                else:
+                    os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+            with contextlib.suppress(ChildProcessError):
+                _ = os.waitpid(pid, 0)
+            _ = sys.stderr.write("\n")
+            raise SystemExit(130) from None
         os.close(ready_read_fd)
         return None
     # Child: detach from the controlling terminal but keep stderr for
@@ -610,6 +715,39 @@ def _silence_stderr() -> None:
     devnull = os.open(os.devnull, os.O_RDWR)
     _ = os.dup2(devnull, sys.stderr.fileno())
     os.close(devnull)
+
+
+def _show_compute_plan(model_name: str) -> None:
+    """Load and print the CoreML compute plan for model_name to stderr."""
+    with _ProgressIndicator("Loading compute plan"):
+        huggingface_hub = import_module("huggingface_hub")
+        cache_dir = config.env_text("PROJECT_CODE_INTELLIGENCE_COREML_CACHE_DIR")
+        model_path, _ = _resolve_model_path(model_name, huggingface_hub=huggingface_hub, cache_dir=cache_dir)
+        compute_plan_text = format_compute_plan(model_path)
+    if compute_plan_text:
+        _ = sys.stderr.write(compute_plan_text)
+        _ = sys.stderr.flush()
+
+
+def _run_warmup(embedder: CoreMLEmbedder) -> int:
+    """Run a single warmup inference, returning 0 on success or 1 on failure."""
+    warmup_label = (
+        "Warming up model (one-time: triggers GPU/ANE compilation, may take several minutes)"
+        if embedder.first_run
+        else "Warming up model"
+    )
+    try:
+        with _ProgressIndicator(warmup_label):
+            _ = embedder.embed(["warmup"])
+    except (RuntimeError, ValueError, OSError) as exc:
+        _ = sys.stderr.write(_format_status_line(_GLYPH_FAIL, _ANSI_RED, f"Model warmup failed: {exc}"))
+        _ = sys.stderr.write(
+            _format_dim_line(f"Try: export {_COMPUTE_UNITS_ENV_VAR}=CPU_AND_NE  (or CPU_AND_GPU / CPU_ONLY)")
+        )
+        return 1
+    if embedder.first_run:
+        _ = sys.stderr.write(_format_dim_line("Model compiled and cached. Future starts will be fast."))
+    return 0
 
 
 def serve(*, foreground: bool = False) -> int:
@@ -631,25 +769,27 @@ def serve(*, foreground: bool = False) -> int:
     # Load the model in the process that will actually serve requests.
     # Core ML's Objective-C/Metal/ANE runtime handles do not survive fork().
     model_name = coreml_model_name()
+    units_name = _coreml_compute_units_name()
     _ = sys.stderr.write(
         _format_status_line(
             _GLYPH_RUNNING,
             _ANSI_CYAN,
-            f"Loading Core ML model {model_name} (compute_units=ALL, ANE + GPU + CPU)",
+            f"Loading Core ML model {model_name} (compute_units={units_name})",
         )
     )
     _ = sys.stderr.flush()
     embedder = load_coreml_embedder(model_name)
 
-    # Log the compute plan so users can see ANE/GPU/CPU scheduling at startup.
-    with _ProgressIndicator("Loading compute plan"):
-        huggingface_hub = import_module("huggingface_hub")
-        cache_dir = config.env_text("PROJECT_CODE_INTELLIGENCE_COREML_CACHE_DIR")
-        model_path = _resolve_model_path(model_name, huggingface_hub=huggingface_hub, cache_dir=cache_dir)
-        compute_plan_text = format_compute_plan(model_path)
-    if compute_plan_text:
-        _ = sys.stderr.write(compute_plan_text)
-        _ = sys.stderr.flush()
+    # Load the compute plan BEFORE the warmup: _ProgressIndicator uses os.fork()
+    # internally, and Apple's Metal/ANE framework is not fork-safe once the first
+    # inference has been run.  All forks must happen before ANE is initialized.
+    _show_compute_plan(model_name)
+
+    # Warmup probe: first inference triggers ANE JIT compilation; catch failures
+    # here so clients never receive a broken server.
+    rc = _run_warmup(embedder)
+    if rc != 0:
+        return rc
 
     host = config.env_text("PROJECT_CODE_INTELLIGENCE_COREML_HOST", DEFAULT_COREML_HOST) or DEFAULT_COREML_HOST
     port = config.env_int("PROJECT_CODE_INTELLIGENCE_COREML_PORT", DEFAULT_COREML_PORT, minimum=1)
