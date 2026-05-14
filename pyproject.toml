@@ -41,7 +41,6 @@ dependencies = [
 pci-index = "project_code_intelligence.cli:index_main"
 pci-ingest-code = "project_code_intelligence.ingest_code_intel:cli_main"
 pci-llama-embed = "project_code_intelligence.embedding.llama:main"
-pci-apple-llama-server = "project_code_intelligence.embedding.apple_llama_server:main"
 pci-apple-embed-server = "project_code_intelligence.embedding.apple_embed_server:main"
 pci-fastembed-server = "project_code_intelligence.embedding.fastembed_server:main"
 pci-embedding-bench = "project_code_intelligence.embedding.bench:main"
@@ -146,4 +145,6 @@ ignore = [
 "src/project_code_intelligence/sarif/discovery.py" = ["PTH207"]
 # Test doubles mimic third-party interfaces and may not need instance state.
 "tests/test_ingest_code_intel.py" = ["PLR6301"]
+# Override of BaseHTTPRequestHandler.log_message must keep the name "format".
+"tests/test_apple_embed_server.py" = ["A002"]
 "typings/**/*.pyi" = ["ANN401"]

@@ -58,7 +58,6 @@ from project_code_intelligence.doctor.types import (
     GpuInfo,
 )
 from project_code_intelligence.embedding.apple_embed_server import APPLE_EMBED_SERVER_PID_FILE
-from project_code_intelligence.embedding.apple_llama_server import LLAMA_SERVER_PID_FILE
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -225,7 +224,6 @@ def _stop_pid_file(pid_file: Path) -> None:
 
 def _stop_pid_file_process() -> None:
     """Send SIGTERM to all host-native server processes recorded in PID files."""
-    _stop_pid_file(LLAMA_SERVER_PID_FILE)
     _stop_pid_file(APPLE_EMBED_SERVER_PID_FILE)
 
 

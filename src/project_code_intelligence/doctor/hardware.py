@@ -21,7 +21,6 @@ from project_code_intelligence.doctor.common import (
 )
 from project_code_intelligence.doctor.types import CheckResult, GpuInfo
 from project_code_intelligence.embedding.apple_embed_server import apple_embed_model_name, apple_embed_server_is_running
-from project_code_intelligence.embedding.apple_llama_server import llama_server_is_running, looks_like_hf_model_id
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -510,68 +509,29 @@ def check_platform(env: config.Env) -> list[CheckResult]:
             f"Python {platform.python_version()} on {platform.system()} {platform.release()} ({platform.machine()})",
         )
     ]
-    llama_model = config.env_text("PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL", env=env)
     if platform.system() != "Darwin":
         return results
 
-    results.extend(_check_apple_metal(env, llama_model=llama_model))
+    results.extend(_check_apple_metal(env))
     return results
 
 
-def _check_apple_metal(env: config.Env, *, llama_model: str | None) -> list[CheckResult]:
-    results: list[CheckResult] = []
-    llama_server = config.env_text("PROJECT_CODE_INTELLIGENCE_LLAMA_SERVER", "llama-server", env=env) or "llama-server"
-    resolved_llama_server = shutil.which(llama_server) if Path(llama_server).name == llama_server else llama_server
-    if resolved_llama_server and Path(resolved_llama_server).exists():
-        results.append(result("apple-metal", "ok", f"llama-server found at {resolved_llama_server}"))
-    else:
-        results.append(
-            result(
-                "apple-metal",
-                "warn",
-                "llama-server was not found.",
-                "Install llama.cpp via Homebrew: brew install llama.cpp",
-            )
-        )
-
-    if llama_model:
-        model_path = Path(llama_model)
-        if model_path.is_file():
-            results.append(result("apple-metal-model", "ok", f"llama.cpp embedding model exists: {llama_model}"))
-        elif looks_like_hf_model_id(llama_model):
-            results.append(
-                result(
-                    "apple-metal-model",
-                    "fail",
-                    f"PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL is a HuggingFace model ID, not a local path: {llama_model}",
-                    "This variable must point to a local .gguf file. "
-                    "To download a specific HuggingFace model, set "
-                    "PROJECT_CODE_INTELLIGENCE_HF_MODEL_REPO and PROJECT_CODE_INTELLIGENCE_HF_MODEL_FILE, "
-                    "then unset PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL.",
-                )
-            )
-        else:
-            results.append(
-                result("apple-metal-model", "fail", f"llama.cpp embedding model was not found: {llama_model}")
-            )
-    elif llama_server_is_running():
-        results.append(result("apple-metal-model", "ok", "llama-server is running via pci-apple-llama-server."))
-    elif apple_embed_server_is_running():
-        results.append(
+def _check_apple_metal(env: config.Env) -> list[CheckResult]:
+    _ = env
+    if apple_embed_server_is_running():
+        return [
             result(
                 "apple-metal-model",
                 "ok",
                 f"Apple embed server is running via pci-apple-embed-server (model: {apple_embed_model_name()}).",
             )
+        ]
+    return [
+        result(
+            "apple-metal-model",
+            "warn",
+            "No local embedding model is configured.",
+            "Run pci-apple-embed-server to start a local model, "
+            "or set PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT for a remote provider.",
         )
-    else:
-        results.append(
-            result(
-                "apple-metal-model",
-                "warn",
-                "No local embedding model is configured.",
-                "Run pci-apple-embed-server or pci-apple-llama-server to start a local model, "
-                "or set PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT for a remote provider.",
-            )
-        )
-    return results
+    ]

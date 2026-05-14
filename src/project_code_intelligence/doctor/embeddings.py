@@ -105,9 +105,9 @@ def check_embedding_options(
             result(
                 "option-gpu-apple",
                 "ok",
-                f"Apple GPU embeddings: host-native llama.cpp Metal default {config.DEFAULT_APPLE_METAL_MODEL}.",
-                "Run pci-apple-llama-server — installs llama.cpp via Homebrew and downloads the model automatically "
-                "on first run. Override with PROJECT_CODE_INTELLIGENCE_HF_MODEL_REPO/FILE.",
+                f"Apple GPU embeddings: native MLX default {config.DEFAULT_APPLE_EMBED_MODEL}.",
+                "Run pci-apple-embed-server to start the native MLX embedding server. "
+                "Override the model with PROJECT_CODE_INTELLIGENCE_APPLE_EMBED_MODEL.",
             )
         )
     if not any(gpu.vendor in {"AMD", "NVIDIA", "Apple"} for gpu in gpus):
