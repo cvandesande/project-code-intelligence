@@ -1,103 +1,33 @@
-# Agent Instructions
+# Code Intelligence Guide for AI Assistants
 
-This repository is indexed by the `project-code-intelligence` MCP server. Use
-that index as the first move for any task that involves understanding,
-searching, or reasoning about the codebase. A single MCP call typically
-replaces dozens of file reads or `grep` invocations and surfaces
-relationships (edges) that text search alone cannot.
+This project has a `project-code-intelligence` MCP server attached. Before you decide it's just a fancier grep, read this.
 
-The MCP index is a navigation aid, not a source of truth. Verify important
-behavior against the working tree before editing or reporting findings.
+## The actual problem it solves
 
-## Code-Intelligence MCP Tools
+When you work through a codebase without tooling, you read files to find what you need. The waste isn't in the reading itself — it's in everything you load that turns out not to matter. You open a file because it might have what you're looking for. Sometimes it does, often it doesn't. That speculative loading is where token cost quietly accumulates.
 
-Discovery and navigation:
+The index inverts this. Instead of reading to find, you query to decide what's worth reading. The expensive part (loading file content into context) becomes the last step, not the first.
 
-- **`code_intel_status`** — Start here. Inspect indexed repositories, snapshots,
-  record types, languages, embedding coverage, and static-analysis findings.
-  The `embedded_records` count tells you whether semantic search is usable
-  for this repo (must be > 0).
-- **`list_code_intel_files`** — Enumerate indexed source files filtered by
-  `language`, `file_role`, `content_class`, `is_test`, `is_doc`,
-  `is_generated`, `is_vendor`, `is_source`, `is_build`, `is_config`, or
-  `only_skipped`. Best way to learn the shape of the codebase before
-  searching.
-- **`list_code_intel_parser_failures`** — Files the indexer could not parse.
-  Call this before claiming you have reviewed "all of X" so you can report
-  honestly what is and is not in the index.
+## Where this actually pays off
 
-Search:
+**Large and generated files.** Every serious codebase has files that exist to be consumed by machines, not read by people — protobuf-generated code, auto-generated clients, ORM models, build artifacts that got committed. These files can be hundreds of kilobytes. You rarely need more than one function from them. Without the index, you either read a huge slice or run multiple greps and still end up loading more than you need. With the index, you query for the symbol and get a 20-line snippet. That's not a marginal improvement on a single lookup.
 
-- **`search_code_intel_text`** — Keyword/symbol/file/language/record-type/
-  metadata search. Use before filesystem search. The default mode tries
-  PostgreSQL full-text search first, then exact multi-term fallbacks when
-  full-text search misses. Supports `parent_record_id` for class→methods or
-  function→inner-symbol navigation.
-- **`search_code_intel_semantic`** — Embedding-based similarity. Only useful
-  when `code_intel_status` reports `embedded_records > 0` for the repo.
-  Supports the same filters as text search, including `parent_record_id`.
+**Not knowing what you're looking for.** Grep requires you to already know the word. Semantic search doesn't. "Find code that handles connection retry backoff" or "where does TLS configuration get assembled" are questions grep can't answer without you already knowing the answer. The semantic search isn't perfect, but it replaces three or four speculative file reads with one targeted query.
 
-Record and relationship lookup:
+**Getting oriented.** Understanding the shape of an unfamiliar codebase — what languages, what's generated vs. hand-written, what's tested, where the entry points are — normally costs a lot of exploratory reading. `code_intel_status` and `list_code_intel_files` with filters make this cheap. Use them at the start of any non-trivial task.
 
-- **`get_code_intel_record`** — Full record including display content when a
-  search result needs more than the summary.
-- **`related_code_intel`** — Graph edges around a `record_id` or `symbol`,
-  with the source and target record bodies joined into the result so a
-  single call resolves both ends of every edge. Filter by `edge_type`
-  (`imports`, `calls`, `inherits`, etc.) when you only want one kind of
-  relationship.
+**Finding callers.** `related_code_intel` can answer "what calls this function?" across the whole codebase in one round-trip, with file paths, line numbers, and snippets. The alternative is grep plus reading each match in context.
 
-Static analysis (when SARIF has been ingested):
+## How to use the snippet field
 
-- **`search_static_findings`**, **`get_static_finding`**,
-  **`get_static_code_flow`** — SARIF/static-analysis review.
+The snippet in search results is not the answer. It's what you use to decide if you need the answer. "Is this the right function?" can be resolved from a snippet. "What exactly does this do, and does it handle the edge case I care about?" still requires reading the actual code. Don't skip the read when you actually need to understand something — use the snippet to avoid reads when you don't.
 
-Repo names are the stable identifiers the MCP returns (`openwrt`,
-`project-code-intelligence`, etc.), not filesystem paths. The same
-convention applies to `pci-mcp-smoke <path>`, which resolves the path to a
-basename and queries by repo.
+## What it won't do well
 
-## Common Tasks
+Call graph edges are heuristic — they're inferred from symbol co-occurrence, not proven by a type checker or linker. They're useful for navigating to candidates, not for asserting definitive caller/callee relationships. Treat them as "probably calls" and verify in source when correctness matters.
 
-| Task                                                  | Tool & arguments                                                              |
-| ----------------------------------------------------- | ----------------------------------------------------------------------------- |
-| Find where symbol `X` is used                         | `related_code_intel(symbol="X", edge_type="call_candidate")`                  |
-| List a symbol's outgoing references                   | `related_code_intel(record_id="…", edge_type="call_candidate")`               |
-| What does this C/C++ source include?                  | `related_code_intel(record_id="…", edge_type="include")`                      |
-| Enumerate all test files                              | `list_code_intel_files(is_test=true)`                                         |
-| Enumerate all Python sources, excluding generated     | `list_code_intel_files(language="python", is_generated=false)`                |
-| What couldn't be parsed?                              | `list_code_intel_parser_failures()`                                           |
-| All methods of a class                                | `search_code_intel_text(parent_record_id="<class_record_id>")`                |
-| Find a symbol by name                                 | `search_code_intel_text(symbol="my_function")`                                |
-| Conceptual search (e.g. "auth token refresh")         | `search_code_intel_semantic(query="…")` after confirming embeddings are on   |
-| Records skipped during ingestion                      | `list_code_intel_files(only_skipped=true)`                                    |
+Text search falls back through multiple strategies when full-text search finds nothing. The results are still useful, but the relevance ranking becomes less reliable. If text search returns noise, try semantic search instead — they use different mechanisms and one often succeeds where the other struggles.
 
-## Working With This Repository
+## The rule
 
-- Prefer targeted changes that match the existing architecture and style.
-- Keep generated files, local database dumps, SARIF reports, embedding caches,
-  model files, and private environment files out of version control.
-- Do not publish code-intelligence database dumps for private repositories.
-- Run the repository's documented checks before reporting completion.
-
-## Suggested Workflow
-
-1. Call `code_intel_status` for the repo you're working in. Note
-   `embedded_records` (semantic search is only useful when > 0) and any
-   non-empty `parser_failures` count.
-2. If `parser_failures > 0`, call `list_code_intel_parser_failures` and keep
-   the list in mind so you can disclose coverage gaps later.
-3. Use `list_code_intel_files` and the search tools to locate the relevant
-   records, files, or symbols. Prefer the most specific filter that fits the
-   question.
-4. Use `related_code_intel` to navigate the graph instead of re-searching by
-   string — it returns both ends of each edge inline.
-5. Open the current files from the working tree before editing. The index
-   may be stale relative to uncommitted changes.
-6. Make the smallest coherent change.
-7. Run the relevant tests or checks documented by the repository.
-8. When reporting "I've reviewed all of X", explicitly mention any parser
-   failures or skipped files that fall inside X's scope.
-
-Give a confidence level with architectural recommendations, and push back when
-a proposed change would add avoidable complexity or leak private project data.
+Before reading a file, ask whether the index can tell you if it's worth reading. Before grepping speculatively across the codebase, ask whether a semantic query would get you there faster. The index doesn't replace reading code — it replaces the part where you're not sure what to read yet.

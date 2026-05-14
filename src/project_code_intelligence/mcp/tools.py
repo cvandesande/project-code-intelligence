@@ -184,6 +184,7 @@ ANY_TERMS_SEARCH_CLAUSE = """
 
 
 _SNIPPET_FENCE_RE = re.compile(r"`{3,}[^\n]*\n")
+_SNIPPET_CLOSE_FENCE_RE = re.compile(r"\n`{3,}[^\n]*$")
 
 # Fields stripped in compact mode — per-result snapshot/git/repo metadata that is
 # constant across all results in a single-snapshot query and redundant with the
@@ -206,6 +207,41 @@ _COMPACT_RECORD_STRIP = frozenset({
 _COMPACT_EDGE_STRIP = frozenset({"snapshot_id", "collection", "repo", "commit_sha"})
 
 
+_RECORD_TYPE_DEDUP_PRIORITY: dict[str, int] = {"code_chunk": 0, "symbol_definition": 1}
+
+
+def _dedup_by_location(rows: list[db.DbRow]) -> list[db.DbRow]:
+    """Keep one record per (source_path, line_start, line_end), preferring code_chunk.
+
+    Records without line numbers are never deduplicated.
+    Two passes: first find the winning record_type per location, then filter to keep
+    only the first occurrence of the winner (preserving rank order).
+    """
+    best: dict[tuple[object, object, object], str] = {}
+    for row in rows:
+        line_start = row.get("line_start")
+        if line_start is None:
+            continue
+        key = (row.get("source_path"), line_start, row.get("line_end"))
+        rtype = str(row.get("record_type") or "")
+        prev = best.get(key)
+        if prev is None or _RECORD_TYPE_DEDUP_PRIORITY.get(rtype, 99) < _RECORD_TYPE_DEDUP_PRIORITY.get(prev, 99):
+            best[key] = rtype
+    seen: set[tuple[object, object, object]] = set()
+    result: list[db.DbRow] = []
+    for row in rows:
+        line_start = row.get("line_start")
+        if line_start is None:
+            result.append(row)
+            continue
+        key = (row.get("source_path"), line_start, row.get("line_end"))
+        rtype = str(row.get("record_type") or "")
+        if key not in seen and rtype == best[key]:
+            seen.add(key)
+            result.append(row)
+    return result
+
+
 def _extract_snippet(raw: str | None) -> str | None:
     """Return the first ~300 chars of code body from a display_content prefix."""
     if not raw:
@@ -213,7 +249,7 @@ def _extract_snippet(raw: str | None) -> str | None:
     m = _SNIPPET_FENCE_RE.search(raw)
     if m:
         code = raw[m.end() :]
-        return code[:300].rstrip() or None
+        return _SNIPPET_CLOSE_FENCE_RE.sub("", code[:300]).rstrip() or None
     return None
 
 
@@ -296,15 +332,28 @@ def run_text_search_query(
         require_all = plan.strategy in {"all_terms", "all_terms_fallback"}
         patterns = [like_pattern_for_term(term) for term in plan.terms]
         clauses.append(ALL_TERMS_SEARCH_CLAUSE if require_all else ANY_TERMS_SEARCH_CLAUSE)
-        query_sql = query_with_where(
-            CODE_INTEL_RECORD_SELECT_TERMS,
-            clauses,
-            """
+        if plan.strategy == "all_terms_fallback":
+            # Every result matches all terms so rank = count(terms) = constant — not a useful signal.
+            # Use NULL rank and sort by recency instead.
+            query_sql = query_with_where(
+                CODE_INTEL_RECORD_SELECT_LIST,
+                clauses,
+                """
+            ORDER BY r.updated_at DESC
+            LIMIT %s
+            """,
+            )
+            params = [*filter_params, patterns, plan.limit]
+        else:
+            query_sql = query_with_where(
+                CODE_INTEL_RECORD_SELECT_TERMS,
+                clauses,
+                """
             ORDER BY rank DESC, r.updated_at DESC
             LIMIT %s
             """,
-        )
-        params = [patterns, *filter_params, patterns, plan.limit]
+            )
+            params = [patterns, *filter_params, patterns, plan.limit]
     else:
         query_sql = query_with_where(
             CODE_INTEL_RECORD_SELECT_LIST,
@@ -479,6 +528,12 @@ def tool_code_intel_status(args: Json) -> Json:
             filters.edges.params,
         ).fetchall()
         static_runs, static_findings = static_status_rows(conn, filters)
+    actual_record_types = {str(row["record_type"]) for row in by_type}
+    for snap_dict in snapshots:
+        if "embed_record_types" in snap_dict:
+            snap_dict["embed_record_types"] = [
+                t for t in cast("list[str]", snap_dict["embed_record_types"]) if t in actual_record_types
+            ]
     return ok({
         "schema_present": True,
         "schema_versions": schema_versions,
@@ -493,37 +548,51 @@ def tool_code_intel_status(args: Json) -> Json:
     })
 
 
+def _execute_text_search(
+    conn: db.DbConnection,
+    args: Json,
+    terms: tuple[str, ...],
+    limit: int,
+) -> tuple[list[db.DbRow], SearchQueryStrategy, str | None]:
+    query = optional_text(args, "query")
+    query_mode = search_query_mode(args)
+    strategy: SearchQueryStrategy = "list"
+    fallback_reason: str | None = None
+    if not query:
+        rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
+    elif query_mode == "websearch":
+        strategy = "websearch"
+        rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
+    elif query_mode == "all_terms":
+        strategy = "all_terms"
+        rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
+    elif query_mode == "any_terms":
+        strategy = "any_terms"
+        rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
+    else:
+        strategy = "websearch"
+        rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
+        if not rows and len(terms) > 1:
+            fallback_reason = "websearch returned no results for a multi-term query"
+            strategy = "all_terms_fallback"
+            rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
+        if not rows and len(terms) > 1:
+            strategy = "any_terms_fallback"
+            rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
+    return rows, strategy, fallback_reason
+
+
 def tool_search_code_intel_text(args: Json) -> Json:
     query = optional_text(args, "query")
     query_mode = search_query_mode(args)
     terms = tuple(search_terms(query)) if query else ()
     limit = require_int(args, "limit", 10, 1, 50)
-    strategy: SearchQueryStrategy = "list"
-    fallback_reason: str | None = None
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
-        if not query:
-            rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
-        elif query_mode == "websearch":
-            strategy = "websearch"
-            rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
-        elif query_mode == "all_terms":
-            strategy = "all_terms"
-            rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
-        elif query_mode == "any_terms":
-            strategy = "any_terms"
-            rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
-        else:
-            strategy = "websearch"
-            rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
-            if not rows and len(terms) > 1:
-                fallback_reason = "websearch returned no results for a multi-term query"
-                strategy = "all_terms_fallback"
-                rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
-            if not rows and len(terms) > 1:
-                strategy = "any_terms_fallback"
-                rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
+        rows, strategy, fallback_reason = _execute_text_search(conn, args, terms, limit)
+    if not optional_text(args, "record_type"):
+        rows = _dedup_by_location(rows)
     verbose = optional_bool(args, "verbose") or False
     response: Json = {
         "query": query,
@@ -734,7 +803,7 @@ def tool_related_code_intel(args: Json) -> Json:
     edge_type = optional_text(args, "edge_type")
     confidence_kind = optional_text(args, "confidence_kind")
 
-    clauses = ["TRUE"]
+    clauses = ["TRUE", "(e.target_record_id IS NULL OR e.source_record_id != e.target_record_id)"]
     params: QueryParams = []
     if record_id:
         clauses.append("(e.source_record_id = %s OR e.target_record_id = %s)")
