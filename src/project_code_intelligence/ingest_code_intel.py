@@ -31,7 +31,7 @@ from project_code_intelligence.embeddings import (
     start_record_preembedding,
 )
 from project_code_intelligence.git_utils import workspace_root
-from project_code_intelligence.inventory import discover_files, make_snapshot
+from project_code_intelligence.inventory import DiscoveryReuse, discover_files, make_snapshot
 from project_code_intelligence.models import (
     DEFAULT_EMBED_RECORD_TYPES,
     IntelEdge,
@@ -89,7 +89,7 @@ if TYPE_CHECKING:
 
 MIN_CHUNK_CHARS = 100
 AUTO_SCAN_WORKERS = 0
-MAX_AUTO_SCAN_WORKERS = 4
+MAX_AUTO_SCAN_WORKERS = 8
 MIN_PARALLEL_PARSE_FILES = 64
 PARSE_CHUNKS_PER_WORKER = 8
 
@@ -194,6 +194,14 @@ class DbUploadSummary:
 class StaticSnapshotIndexes:
     snapshot_ids_by_repo: dict[str, int] = field(default_factory=dict)
     snapshot_by_repo: dict[str, Snapshot] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RepoChangeState:
+    previous_snapshot_id: int | None
+    changed_paths: set[str]
+    unchanged_paths: set[str]
+    deleted_paths: set[str]
 
 
 class CliNamespace(argparse.Namespace):
@@ -361,7 +369,15 @@ def parse_changed_files(
         if intel_file.source_path in changed_paths
     ]
     workers = resolve_scan_workers(config.scan_workers, len(tasks))
-    runtime_state.active_metrics.set("scan_workers", workers)
+    runtime_state.active_metrics.set_scan_workers_max(workers)
+    progress_event(
+        "code_intel_parse_started",
+        repo=config.repo,
+        files=len(files),
+        changed_files=len(changed_paths),
+        unchanged_files=len(files) - len(changed_paths),
+        workers=workers,
+    )
     if workers > 1 and len(tasks) > 1:
         results = parallel_parse_results(tasks, workers=workers, profile_name=config.profile_name)
     else:
@@ -379,58 +395,100 @@ def previous_signatures_from_states(previous_files: dict[str, PreviousFileState]
     return {source_path: previous_file_state_signature(state) for source_path, state in previous_files.items()}
 
 
+def snapshot_dirty_paths(snapshot: Snapshot) -> set[str]:
+    value = snapshot.metadata.get("dirty_paths")
+    if not isinstance(value, list):
+        return set()
+    return {item for item in value if isinstance(item, str)}
+
+
+def repo_change_state(
+    files: list[IntelFile],
+    previous_signatures: dict[str, str],
+    *,
+    mode: str,
+    previous_snapshot_id: int | None,
+) -> RepoChangeState:
+    current_signatures = {item.source_path: file_signature(item) for item in files}
+    unchanged_paths: set[str] = {
+        path for path, signature in current_signatures.items() if previous_signatures.get(path) == signature
+    }
+    deleted_paths = set(previous_signatures) - set(current_signatures)
+    if mode != "incremental":
+        return RepoChangeState(
+            previous_snapshot_id=None,
+            changed_paths=set(current_signatures),
+            unchanged_paths=set(),
+            deleted_paths=set(),
+        )
+    return RepoChangeState(
+        previous_snapshot_id=previous_snapshot_id,
+        changed_paths=set(current_signatures) - unchanged_paths,
+        unchanged_paths=unchanged_paths,
+        deleted_paths=deleted_paths,
+    )
+
+
+def count_reused_unchanged_files(files: list[IntelFile], previous_files: dict[str, PreviousFileState]) -> int:
+    return sum(
+        1
+        for item in files
+        if (previous := previous_files.get(item.source_path)) is not None
+        and previous.git_blob_sha == item.git_blob_sha
+        and previous_file_state_signature(previous) == file_signature(item)
+    )
+
+
 def ingest_repo(config: RepoIngestConfig) -> RepoIngest:
+    progress_event("code_intel_repo_scan_started", repo=config.repo, mode=config.mode)
     started = time.monotonic()
     snapshot = make_snapshot(config.root, config.repo, config.collection)
     runtime_state.active_metrics.add("scan_git_seconds", time.monotonic() - started)
-    previous_snapshot_id = config.previous_snapshot_id
     previous_files = config.previous_files or {}
     previous_signatures = previous_signatures_from_states(previous_files)
-    reuse_unchanged_blobs = config.mode == "incremental" and not snapshot.dirty and bool(previous_files)
+    progress_event(
+        "code_intel_repo_discovery_started",
+        repo=config.repo,
+        mode=config.mode,
+        dirty=snapshot.dirty,
+    )
     started = time.monotonic()
     files = discover_files(
         config.root,
         snapshot,
         config.max_file_bytes,
-        previous_files=previous_files,
-        reuse_unchanged_blobs=reuse_unchanged_blobs,
+        reuse=DiscoveryReuse(
+            previous_files=previous_files,
+            reuse_unchanged_blobs=config.mode == "incremental" and bool(previous_files),
+            dirty_paths=frozenset(snapshot_dirty_paths(snapshot)),
+        ),
     )
     runtime_state.active_metrics.add("scan_discovery_seconds", time.monotonic() - started)
     if config.limit_files is not None:
         files = files[: config.limit_files]
     runtime_state.active_metrics.add_phase_total(len(files))
-    current_signatures = {item.source_path: file_signature(item) for item in files}
-    unchanged_paths: set[str] = {
-        path for path, signature in current_signatures.items() if previous_signatures.get(path) == signature
-    }
-    deleted_paths: set[str] = set(previous_signatures) - set(current_signatures)
-    if config.mode != "incremental":
-        previous_snapshot_id = None
-        unchanged_paths = set[str]()
-        deleted_paths = set[str]()
-    changed_paths: set[str] = set(current_signatures) - unchanged_paths
-    reused_unchanged_files = sum(
-        1
-        for item in files
-        if reuse_unchanged_blobs
-        and (previous := previous_files.get(item.source_path)) is not None
-        and previous.git_blob_sha == item.git_blob_sha
+    changes = repo_change_state(
+        files,
+        previous_signatures,
+        mode=config.mode,
+        previous_snapshot_id=config.previous_snapshot_id,
     )
+    reused_unchanged_files = count_reused_unchanged_files(files, previous_files)
     runtime_state.active_metrics.add("reused_unchanged_files", reused_unchanged_files)
     progress_event(
         "code_intel_discovered",
         repo=config.repo,
         files=len(files),
-        changed_files=len(changed_paths),
-        unchanged_files=len(unchanged_paths),
-        deleted_files=len(deleted_paths),
+        changed_files=len(changes.changed_paths),
+        unchanged_files=len(changes.unchanged_paths),
+        deleted_files=len(changes.deleted_paths),
         mode=config.mode,
         commit_sha=snapshot.commit_sha,
         tree_sha=snapshot.tree_sha,
         reused_unchanged_files=reused_unchanged_files,
     )
     started = time.monotonic()
-    records, edges, failures = parse_changed_files(files, changed_paths, config=config)
+    records, edges, failures = parse_changed_files(files, changes.changed_paths, config=config)
     runtime_state.active_metrics.add("scan_parse_seconds", time.monotonic() - started)
     return RepoIngest(
         snapshot=snapshot,
@@ -439,10 +497,10 @@ def ingest_repo(config: RepoIngestConfig) -> RepoIngest:
         edges=edges,
         parser_failures=failures,
         mode=config.mode,
-        previous_snapshot_id=previous_snapshot_id,
-        changed_paths=changed_paths,
-        unchanged_paths=unchanged_paths,
-        deleted_paths=deleted_paths,
+        previous_snapshot_id=changes.previous_snapshot_id,
+        changed_paths=changes.changed_paths,
+        unchanged_paths=changes.unchanged_paths,
+        deleted_paths=changes.deleted_paths,
     )
 
 

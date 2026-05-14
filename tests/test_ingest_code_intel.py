@@ -453,6 +453,7 @@ class ParserAndRuntimeTests(unittest.TestCase):
         self.assertEqual(resolve_scan_workers(0, 63), 1)
         self.assertGreaterEqual(resolve_scan_workers(0, 64), 1)
         self.assertEqual(resolve_scan_workers(8, 3), 3)
+        self.assertEqual(resolve_scan_workers(0, 10_000), 8)
 
     def test_reset_only_requires_reset_flag(self) -> None:
         with self.assertRaises(ValueError):

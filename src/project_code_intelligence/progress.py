@@ -126,7 +126,11 @@ SHORT_EVENT_LABELS: dict[str, str] = {
 }
 INDEXING_EVENTS: frozenset[str] = frozenset({
     "code_intel_plan",
+    "code_intel_repo_scan_started",
+    "code_intel_repo_discovery_started",
     "code_intel_discovered",
+    "code_intel_parse_started",
+    "code_intel_scan_workers_started",
     "code_intel_parsed",
     "code_intel_inserted",
     "code_intel_preembedded",
@@ -218,7 +222,13 @@ class RichEmitter:
             if isinstance(database, str) and database:
                 self.database = database
             return
-        if event == "code_intel_discovered":
+        if event in {
+            "code_intel_repo_scan_started",
+            "code_intel_repo_discovery_started",
+            "code_intel_discovered",
+            "code_intel_parse_started",
+            "code_intel_scan_workers_started",
+        }:
             repo_value = values.get("repo")
             if isinstance(repo_value, str):
                 self.repo = repo_value
@@ -234,7 +244,21 @@ class RichEmitter:
                 self.mode = mode
 
     def _capture_message(self, event: str, values: JsonObject) -> None:
-        if event == "code_intel_sarif_discovering":
+        if event == "code_intel_repo_scan_started":
+            repo = values.get("repo")
+            self.last_message = f"Checking {repo}…" if isinstance(repo, str) else "Checking repository…"
+        elif event == "code_intel_repo_discovery_started":
+            repo = values.get("repo")
+            self.last_message = (
+                f"Discovering tracked files in {repo}…" if isinstance(repo, str) else "Discovering tracked files…"
+            )
+        elif event in {"code_intel_parse_started", "code_intel_scan_workers_started"}:
+            workers = _coerce_int(values.get("workers"))
+            changed = _coerce_int(values.get("changed_files")) or _coerce_int(values.get("files"))
+            worker_text = f" with {workers} worker{'s' if workers != 1 else ''}" if workers else ""
+            plural = "s" if changed != 1 else ""
+            self.last_message = f"Parsing {_format_count(changed)} changed file{plural}{worker_text}…"
+        elif event == "code_intel_sarif_discovering":
             self.last_message = "Looking for SARIF reports…"
         elif event in {"code_intel_db_retry", "code_intel_embedding_endpoint_retry"}:
             reason = values.get("reason") or values.get("error") or "transient failure"
@@ -243,8 +267,18 @@ class RichEmitter:
             attempt_text = f" ({attempt}/{attempts})" if attempt and attempts else ""
             self.last_message = f"{event.replace('code_intel_', '').replace('_', ' ')}{attempt_text}: {reason}"
 
-    @staticmethod
-    def _phase_label() -> tuple[console_ui.PillKind, str]:
+    def _phase_label(self) -> tuple[console_ui.PillKind, str]:
+        event_labels = {
+            "code_intel_repo_scan_started": "CHECKING",
+            "code_intel_repo_discovery_started": "DISCOVERING",
+            "code_intel_discovered": "PARSING",
+            "code_intel_parse_started": "PARSING",
+            "code_intel_scan_workers_started": "PARSING",
+            "code_intel_sarif_discovering": "SARIF",
+        }
+        label = event_labels.get(self.last_event)
+        if label is not None:
+            return "running", label
         metrics = runtime_state.active_metrics.snapshot()
         progress = metrics.get("progress", {})
         if isinstance(progress, dict):
@@ -295,6 +329,7 @@ class RichEmitter:
         _add_live_files_row(rows, counts)
         _add_live_records_row(rows, counts)
         _add_live_edges_row(rows, counts)
+        _add_live_workers_row(rows, counts, progress)
         _add_live_embeddings_row(rows, counts)
         _add_row(rows, "Elapsed", _format_seconds(time.monotonic() - self.started_at))
         _add_live_eta_row(rows, progress, counts, timing)
@@ -372,6 +407,15 @@ def _add_live_edges_row(rows: Table, counts: JsonObject) -> None:
     if not edges:
         return
     _add_row(rows, "Edges", f"{_format_count(edges)} generated")
+
+
+def _add_live_workers_row(rows: Table, counts: JsonObject, progress: JsonObject) -> None:
+    if progress.get("phase") != "scan":
+        return
+    workers = _coerce_int(counts.get("scan_workers"))
+    if workers <= 1:
+        return
+    _add_row(rows, "Workers", f"{workers} parser processes")
 
 
 def _add_live_embeddings_row(rows: Table, counts: JsonObject) -> None:

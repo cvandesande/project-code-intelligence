@@ -27,6 +27,15 @@ static int demo_run(struct demo_state *state) {
         self.assertEqual(metadata["c_family_types"], ["demo_state"])
         self.assertEqual(metadata["c_family_declared_functions"], ["demo_run"])
 
+    def test_c_family_metadata_skips_oversized_function_candidates(self) -> None:
+        metadata = language_metadata_for_file(
+            "src/pathological.c",
+            "c",
+            "static int demo_run(void) {\n" + ("very_long_identifier_" * 80) + "(not_a_function_candidate) {\n",
+        )
+
+        self.assertEqual(metadata["c_family_declared_functions"], ["demo_run"])
+
     def test_csharp_metadata_extracts_usings_namespaces_types_methods_and_attributes(self) -> None:
         metadata = language_metadata_for_file(
             "src/Demo.cs",
@@ -353,6 +362,15 @@ See `Docs <https://example.invalid>`_.
         self.assertEqual(rst["doc_headings"], ["Demo Guide"])
         self.assertEqual(rst["doc_links"], ["https://example.invalid"])
         self.assertEqual(rst["doc_fenced_languages"], ["shell"])
+
+    def test_document_metadata_bounds_link_scanning_on_oversized_lines(self) -> None:
+        metadata = language_metadata_for_file(
+            "docs/pathological.md",
+            "doc",
+            ("[" * 100_000) + "\nSee [API](api.md).\n",
+        )
+
+        self.assertEqual(metadata["doc_links"], ["api.md"])
 
     def test_xml_and_sql_metadata_extracts_structural_facts(self) -> None:
         xml = language_metadata_for_file(
@@ -830,6 +848,15 @@ stop() {
         self.assertEqual(metadata["shell_sources"], ["/lib/functions.sh"])
         self.assertEqual(metadata["shell_exports"], ["DEMO_FLAG"])
         self.assertEqual(metadata["shell_commands"], ["procd_open_instance", "uci", "killall"])
+
+    def test_shell_metadata_skips_oversized_command_lines(self) -> None:
+        metadata = language_metadata_for_file(
+            "scripts/pathological.sh",
+            "shell",
+            ("echo " + ("x" * 100_000)) + "\n./normal-command\n",
+        )
+
+        self.assertEqual(metadata["shell_commands"], ["normal-command"])
 
     def test_language_metadata_keys_are_registered_for_embedding_metadata(self) -> None:
         keys = language_metadata_keys()

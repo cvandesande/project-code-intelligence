@@ -17,6 +17,7 @@ MARKDOWN_FENCE_RE = re.compile(r"(?m)^```+([A-Za-z0-9_+.-]+)?")
 RST_HEADING_RE = re.compile(r"(?m)^(.+)\n[=\-~^`:#*+]{3,}\s*$")
 RST_LINK_RE = re.compile(r"`[^`<]+<([^>]+)>`_")
 RST_CODE_BLOCK_RE = re.compile(r"(?m)^\s*\.\.\s+code-block::\s+([A-Za-z0-9_+.-]+)")
+MAX_DOC_LINK_SCAN_LINE_CHARS = 8192
 
 DOC_METADATA_KEYS = (
     "doc_headings",
@@ -25,15 +26,33 @@ DOC_METADATA_KEYS = (
 )
 
 
+def bounded_line_slices(text: str, max_chars: int = MAX_DOC_LINK_SCAN_LINE_CHARS) -> list[str]:
+    return [line[:max_chars] for line in text.splitlines()]
+
+
+def markdown_links(text: str) -> list[str]:
+    links: list[str] = []
+    for line in bounded_line_slices(text):
+        links.extend(match.group(1).strip() for match in MARKDOWN_LINK_RE.finditer(line))
+    return links
+
+
+def rst_links(text: str) -> list[str]:
+    links: list[str] = []
+    for line in bounded_line_slices(text):
+        links.extend(match.group(1).strip() for match in RST_LINK_RE.finditer(line))
+    return links
+
+
 def doc_file_metadata(path: str, text: str) -> JsonObject:
     suffix = Path(path).suffix.lower()
     if suffix == ".rst":
         headings = [match.group(1).strip() for match in RST_HEADING_RE.finditer(text)]
-        links = [match.group(1).strip() for match in RST_LINK_RE.finditer(text)]
+        links = rst_links(text)
         code_languages = [match.group(1).strip() for match in RST_CODE_BLOCK_RE.finditer(text)]
     else:
         headings = [match.group(1).strip() for match in MARKDOWN_HEADING_RE.finditer(text)]
-        links = [match.group(1).strip() for match in MARKDOWN_LINK_RE.finditer(text)]
+        links = markdown_links(text)
         code_languages = [match.group(1).strip() for match in MARKDOWN_FENCE_RE.finditer(text) if match.group(1)]
     return compact_metadata({
         "doc_headings": unique_limited(headings),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from operator import itemgetter
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -10,7 +11,7 @@ from typing import TYPE_CHECKING
 from project_code_intelligence import process, profile_context
 from project_code_intelligence.common import sha256_bytes, sha256_text, source_path_for
 from project_code_intelligence.git_utils import GIT_TIMEOUT_SECONDS, git_binary, run_git
-from project_code_intelligence.language_profiles import language_metadata_for_file
+from project_code_intelligence.language_profiles import language_has_metadata, language_metadata_for_file
 from project_code_intelligence.models import (
     BINARY_SUFFIXES,
     CHUNKER_VERSION,
@@ -57,6 +58,8 @@ SHELL_SUFFIXES = frozenset({
 })
 BOOT_SCRIPT_SUFFIXES = frozenset({".bootscript", ".scr"})
 LINKER_SCRIPT_SUFFIXES = frozenset({".ld", ".lds"})
+PORCELAIN_STATUS_MIN_LENGTH = 4
+PORCELAIN_STATUS_PATH_OFFSET = 3
 BUILD_FILE_NAMES = frozenset({
     ".bazelrc",
     "cargo.toml",
@@ -164,6 +167,13 @@ LANGUAGE_SUFFIXES = (
 )
 
 
+@dataclass(frozen=True)
+class DiscoveryReuse:
+    previous_files: Mapping[str, PreviousFileState]
+    reuse_unchanged_blobs: bool = False
+    dirty_paths: frozenset[str] = frozenset()
+
+
 def run_git_required(root: Path, args: list[str]) -> str:
     value = run_git(root, args)
     if value is None:
@@ -178,6 +188,22 @@ def git_dirty_fingerprint(root: Path) -> str | None:
     staged = run_git(root, ["diff", "--cached", "--binary"]) or ""
     unstaged = run_git(root, ["diff", "--binary"]) or ""
     return sha256_text(status + "\n" + staged + "\n" + unstaged)
+
+
+def git_dirty_paths(root: Path) -> set[str]:
+    status = run_git(root, ["status", "--porcelain=v1", "--untracked-files=no"]) or ""
+    dirty_paths: set[str] = set()
+    for line in status.splitlines():
+        if len(line) < PORCELAIN_STATUS_MIN_LENGTH:
+            continue
+        path_text = line[PORCELAIN_STATUS_PATH_OFFSET:]
+        if " -> " in path_text:
+            old_path, new_path = path_text.split(" -> ", 1)
+            dirty_paths.add(old_path)
+            dirty_paths.add(new_path)
+        else:
+            dirty_paths.add(path_text)
+    return dirty_paths
 
 
 def git_ls_files(repo_root: Path) -> list[tuple[str | None, str]]:
@@ -413,14 +439,14 @@ def file_from_previous_state(
 
 def reusable_previous_file(
     source_path: str,
+    repo_rel_path: str,
     git_blob_sha: str | None,
-    previous_files: Mapping[str, PreviousFileState],
     *,
-    reuse_unchanged_blobs: bool,
+    reuse: DiscoveryReuse,
 ) -> PreviousFileState | None:
-    if not reuse_unchanged_blobs or git_blob_sha is None:
+    if not reuse.reuse_unchanged_blobs or git_blob_sha is None or repo_rel_path in reuse.dirty_paths:
         return None
-    previous = previous_files.get(source_path)
+    previous = reuse.previous_files.get(source_path)
     if previous is None or previous.git_blob_sha != git_blob_sha:
         return None
     return previous
@@ -478,6 +504,7 @@ def make_snapshot(root: Path, repo: str, collection: str) -> Snapshot:
     base_tree_sha = run_git_required(repo_root, ["rev-parse", f"{commit}^{{tree}}"])
     commit_time = run_git_required(repo_root, ["log", "-1", "--format=%cI", commit])
     dirty_fingerprint = git_dirty_fingerprint(repo_root)
+    dirty_paths = git_dirty_paths(repo_root) if dirty_fingerprint else set[str]()
     tree_sha = base_tree_sha
     if dirty_fingerprint:
         tree_sha = f"{base_tree_sha}:dirty:{dirty_fingerprint[:16]}"
@@ -498,6 +525,7 @@ def make_snapshot(root: Path, repo: str, collection: str) -> Snapshot:
             "base_tree_sha": base_tree_sha,
             "commit_time": commit_time,
             "dirty_fingerprint": dirty_fingerprint,
+            "dirty_paths": sorted(dirty_paths),
         },
     )
 
@@ -507,12 +535,11 @@ def discover_files(
     snapshot: Snapshot,
     max_file_bytes: int,
     *,
-    previous_files: Mapping[str, PreviousFileState] | None = None,
-    reuse_unchanged_blobs: bool = False,
+    reuse: DiscoveryReuse | None = None,
 ) -> list[IntelFile]:
     repo_root = root / snapshot.repo
     files: list[IntelFile] = []
-    previous_by_source_path = previous_files or {}
+    reuse_context = reuse or DiscoveryReuse(previous_files={})
     for git_blob_sha, rel_path in sorted(git_ls_files(repo_root), key=itemgetter(1)):
         abs_path = repo_root / rel_path
         if not abs_path.is_file():
@@ -520,9 +547,9 @@ def discover_files(
         source_path = source_path_for(snapshot.repo, rel_path)
         previous = reusable_previous_file(
             source_path,
+            rel_path,
             git_blob_sha,
-            previous_by_source_path,
-            reuse_unchanged_blobs=reuse_unchanged_blobs,
+            reuse=reuse_context,
         )
         if previous is not None:
             files.append(file_from_previous_state(snapshot, rel_path, abs_path, previous))
@@ -536,11 +563,10 @@ def discover_files(
             reason = "unsupported_file_type"
         text = data.decode("utf-8", errors="replace") if read_ok and reason is None else None
         classified = profile_context.active_profile.classify_file(rel_path, language, classify_file(rel_path, language))
-        metadata = {
-            "path_parts": rel_path.split("/")[:8],
-            **language_metadata_for_file(rel_path, language, text),
-            **profile_context.active_profile.file_metadata(rel_path, language, classified),
-        }
+        metadata: JsonObject = {"path_parts": rel_path.split("/")[:8]}
+        if language_has_metadata(language):
+            metadata.update(language_metadata_for_file(rel_path, language, text))
+        metadata.update(profile_context.active_profile.file_metadata(rel_path, language, classified))
         files.append(
             IntelFile(
                 collection=snapshot.collection,

@@ -65,6 +65,11 @@ LANGUAGE_PROFILES: tuple[LanguageProfile, ...] = (
     WEB_PROFILE,
     ZIG_PROFILE,
 )
+LANGUAGE_METADATA_LANGUAGES = frozenset(language for profile in LANGUAGE_PROFILES for language in profile.languages)
+
+
+def language_has_metadata(language: str) -> bool:
+    return language in LANGUAGE_METADATA_LANGUAGES
 
 
 def language_metadata_for_file(path: str, language: str, text: str | None) -> JsonObject:
