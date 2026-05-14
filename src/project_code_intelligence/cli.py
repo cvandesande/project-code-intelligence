@@ -239,6 +239,58 @@ def _path_to_repo(path: str) -> str:
     return resolved.name or "."
 
 
+def _path_is_current_directory(path: str) -> bool:
+    return Path(path).expanduser().resolve(strict=False) == Path.cwd().resolve()
+
+
+def _mcp_response_payload(response: object) -> dict[str, object] | None:
+    outer = console_ui.as_object(response)
+    result = console_ui.as_object(outer.get("result"))
+    content = console_ui.as_list(result.get("content")) or []
+    first = console_ui.as_object(content[0] if content else None)
+    text = first.get("text")
+    payload: object | None = None
+    if isinstance(text, str):
+        try:
+            payload = cast("object", json.loads(text))
+        except json.JSONDecodeError:
+            return None
+    return console_ui.as_dict(payload)
+
+
+def _mcp_response_has_error(response: object) -> bool:
+    value = console_ui.as_dict(response)
+    if value is not None and "error" in value:
+        return True
+    return _mcp_payload_error(response) is not None
+
+
+def _mcp_payload_error(response: object) -> str | None:
+    payload = _mcp_response_payload(response)
+    if payload is None:
+        return None
+    error = payload.get("error")
+    if isinstance(error, str):
+        return error
+    if error:
+        return json.dumps(error, sort_keys=True, separators=(",", ":"))
+    return None
+
+
+def _status_repos(response: object) -> list[str]:
+    payload = _mcp_response_payload(response)
+    if payload is None:
+        return []
+    snapshots = console_ui.as_list(payload.get("snapshots")) or []
+    repos: list[str] = []
+    for snapshot in snapshots:
+        item = console_ui.as_dict(snapshot)
+        repo = item.get("repo") if item is not None else None
+        if isinstance(repo, str) and repo not in repos:
+            repos.append(repo)
+    return repos
+
+
 def _run_mcp_call(tool_name: str, arguments: dict[str, object], request_id: int = 1) -> tuple[int, object | None, str]:
     params: dict[str, object] = {"name": tool_name, "arguments": arguments}
     request: dict[str, object] = {"jsonrpc": "2.0", "id": request_id, "method": "tools/call", "params": params}
@@ -255,6 +307,19 @@ def _run_mcp_call(tool_name: str, arguments: dict[str, object], request_id: int 
     return 0, response_value, proc.stderr or ""
 
 
+def _resolve_smoke_target_repos(repo_paths: list[str], status_response: object) -> list[str]:
+    requested_repos = [_path_to_repo(path) for path in repo_paths]
+    available_repos = _status_repos(status_response)
+    if (
+        len(repo_paths) == 1
+        and _path_is_current_directory(repo_paths[0])
+        and requested_repos[0] not in available_repos
+        and available_repos
+    ):
+        return available_repos
+    return requested_repos
+
+
 # Tools the smoke run exercises, in order. Each entry is (tool name, kwargs).
 # Read-only by design — we never trigger a write_tool here.
 # `related_code_intel` requires a record_id or symbol; "main" is a reasonable
@@ -268,31 +333,43 @@ _SMOKE_TOOLS: tuple[tuple[str, dict[str, object]], ...] = (
 )
 
 
-def _run_smoke_probes(primary_repo: str) -> tuple[list[dict[str, object]], int]:
+def _run_smoke_probes(repos: list[str]) -> tuple[list[dict[str, object]], int]:
     """Run a short read-only sequence against the MCP server. Returns (probes, exit_code)."""
     probes: list[dict[str, object]] = []
     exit_code = 0
-    for index, (tool_name, base_args) in enumerate(_SMOKE_TOOLS, start=2):
-        arguments: dict[str, object] = {"repo": primary_repo, **base_args}
-        return_code, response, stderr_text = _run_mcp_call(tool_name, arguments, request_id=index)
-        if stderr_text:
-            _ = sys.stderr.write(stderr_text)
-        probe: dict[str, object] = {"tool": tool_name, "arguments": arguments}
-        if return_code != 0:
-            probe["status"] = "fail"
-            probe["error"] = f"MCP server exited with code {return_code}"
+    request_id = 2
+    for repo in repos:
+        for tool_name, base_args in _SMOKE_TOOLS:
+            arguments: dict[str, object] = {"repo": repo, **base_args}
+            return_code, response, stderr_text = _run_mcp_call(tool_name, arguments, request_id=request_id)
+            request_id += 1
+            if stderr_text:
+                _ = sys.stderr.write(stderr_text)
+            probe: dict[str, object] = {"repo": repo, "tool": tool_name, "arguments": arguments}
+            if return_code != 0:
+                probe["status"] = "fail"
+                probe["error"] = f"MCP server exited with code {return_code}"
+                probes.append(probe)
+                exit_code = max(exit_code, return_code)
+                continue
+            response_obj = cast("object", response)
+            if isinstance(response_obj, dict) and "error" in cast("dict[object, object]", response_obj):
+                probe["status"] = "fail"
+                probe["response"] = response_obj
+                probes.append(probe)
+                exit_code = 1
+                continue
+            payload_error = _mcp_payload_error(cast("object", response_obj))
+            if payload_error is not None:
+                probe["status"] = "fail"
+                probe["error"] = payload_error
+                probe["response"] = response_obj
+                probes.append(probe)
+                exit_code = 1
+                continue
+            probe["status"] = "ok"
+            probe["response"] = response_obj
             probes.append(probe)
-            exit_code = max(exit_code, return_code)
-            continue
-        if isinstance(response, dict) and "error" in cast("dict[object, object]", response):
-            probe["status"] = "fail"
-            probe["response"] = response
-            probes.append(probe)
-            exit_code = 1
-            continue
-        probe["status"] = "ok"
-        probe["response"] = response
-        probes.append(probe)
     return probes, exit_code
 
 
@@ -302,11 +379,8 @@ def mcp_smoke_main(argv: list[str] | None = None) -> int:
     if not parsed.repo_paths:
         parser.error("one or more repository paths are required; use . for the current directory")
 
-    repos = [_path_to_repo(path) for path in parsed.repo_paths]
-    primary_repo = repos[0]
-    arguments: dict[str, object] = {"repo": primary_repo}
-
-    return_code, response, stderr_text = _run_mcp_call("code_intel_status", arguments)
+    return_code, response, stderr_text = _run_mcp_call("code_intel_status", {})
+    status_response: object = response
     if stderr_text:
         _ = sys.stderr.write(stderr_text)
     if return_code != 0:
@@ -314,21 +388,22 @@ def mcp_smoke_main(argv: list[str] | None = None) -> int:
 
     use_pretty = console_ui.should_emit_pretty(sys.stdout, force=False if parsed.json else None)
 
-    has_error = isinstance(response, dict) and "error" in cast("dict[object, object]", response)
-    response_for_render = cast("object", response)
-    if has_error:
+    if _mcp_response_has_error(status_response):
         if use_pretty:
-            mcp_smoke_render.render_error(response_for_render)
+            mcp_smoke_render.render_error(status_response)
         else:
-            _ = sys.stdout.write(json.dumps(response) + "\n")
+            _ = sys.stdout.write(json.dumps(status_response) + "\n")
         return 1
 
-    probes, probe_exit = _run_smoke_probes(primary_repo)
+    target_repos = _resolve_smoke_target_repos(parsed.repo_paths, status_response)
+    primary_repo = target_repos[0]
+
+    probes, probe_exit = _run_smoke_probes(target_repos)
 
     if use_pretty:
-        mcp_smoke_render.render_status(response_for_render, repo=primary_repo, probes=probes)
+        mcp_smoke_render.render_status(status_response, repo=primary_repo, probes=probes)
     else:
-        payload: dict[str, object] = {"status": response, "probes": probes}
+        payload: dict[str, object] = {"repos": target_repos, "status": status_response, "probes": probes}
         _ = sys.stdout.write(json.dumps(payload) + "\n")
     return probe_exit
 

@@ -152,6 +152,13 @@ def handle_jsonrpc_value(request_value: object) -> tuple[JsonValue, Json | list[
     return request_id, handle_request(request)
 
 
+def request_id_from_jsonrpc_value(request_value: object) -> JsonValue:
+    if not isinstance(request_value, dict):
+        return None
+    request = cast("JsonObject", request_value)
+    return request.get("id")
+
+
 def error_message(exc: BaseException) -> str:
     if isinstance(exc, (TypeError, ValueError, PermissionError, json.JSONDecodeError, UnicodeDecodeError)):
         return str(exc)
@@ -180,6 +187,7 @@ def main() -> int:
         request_id: JsonValue = None
         try:
             request_value = cast("object", json.loads(line))
+            request_id = request_id_from_jsonrpc_value(request_value)
             request_id, response = handle_jsonrpc_value(request_value)
             if response is not None:
                 write_response(response)

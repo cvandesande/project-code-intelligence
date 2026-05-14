@@ -42,7 +42,7 @@ from project_code_intelligence.mcp.filters import (
     static_finding_clauses,
 )
 from project_code_intelligence.models import IntelFile, JsonValue, Snapshot
-from project_code_intelligence.parsers import go_records, python_records
+from project_code_intelligence.parsers import go_records, make_records, python_records
 from project_code_intelligence.records import line_for_offset_with_index, line_offsets, line_window_records
 from project_code_intelligence.runtime import RuntimeMetrics
 from project_code_intelligence.sarif import (
@@ -437,6 +437,34 @@ class ParserAndRuntimeTests(unittest.TestCase):
         symbols = {record.symbol for record in records if record.record_type == "symbol_definition"}
 
         self.assertIn("Map", symbols)
+
+    def test_make_records_include_top_level_package_pins_when_blocks_exist(self) -> None:
+        text = "\n".join([
+            "include $(TOPDIR)/rules.mk",
+            "",
+            "PKG_SOURCE_VERSION:=c7e364d5fbdfc44e19ec86c80142d2fdf498c702",
+            "PKG_MIRROR_HASH:=3a9e5f3489d1d1abcf514332946ef55fda0c4bb9c51e8f4f9d51ef50f0fd8b56",
+            "",
+            "define KernelPackage/ask-cdx",
+            "  TITLE:=ASK CDX driver",
+            "endef",
+        ])
+        previous_profile = profile_context.active_profile
+        try:
+            profile_context.set_active_profile(load_profile("generic"))
+            records, _edges = make_records(fixture_file("package/kernel/ask-cdx/Makefile", "make"), text, 2400, 0)
+        finally:
+            profile_context.set_active_profile(previous_profile)
+
+        source_version_records = [
+            record
+            for record in records
+            if record.record_type == "make_assignment" and record.symbol == "PKG_SOURCE_VERSION"
+        ]
+        self.assertEqual(len(source_version_records), 1)
+        rendered_records = "\n".join(record.display_content for record in records)
+        self.assertIn("c7e364d5fbdfc44e19ec86c80142d2fdf498c702", rendered_records)
+        self.assertIn("3a9e5f3489d1d1abcf514332946ef55fda0c4bb9c51e8f4f9d51ef50f0fd8b56", rendered_records)
 
     def test_small_line_window_limit_is_rejected(self) -> None:
         with self.assertRaises(ValueError):

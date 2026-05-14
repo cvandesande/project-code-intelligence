@@ -36,11 +36,19 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         },
     ),
     "search_code_intel_text": ToolDefinition(
-        "Search or list code intelligence records with optional PostgreSQL full-text search and exact filters.",
+        "Search or list code intelligence records. By default, plain multi-term searches use PostgreSQL "
+        "full-text search first, then automatically fall back to exact all-term and any-term matching "
+        "when full-text search returns no results.",
         {
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
+                "query_mode": {
+                    "type": "string",
+                    "enum": ["auto", "websearch", "all_terms", "any_terms"],
+                    "description": "Defaults to auto. Use websearch for PostgreSQL full-text only, "
+                    "all_terms when every extracted term must match, or any_terms for broad fallback search.",
+                },
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                 "collection": {"type": "string"},
                 "repo": {"type": "string"},
@@ -186,10 +194,16 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         },
     ),
     "get_static_finding": ToolDefinition(
-        "Fetch one SARIF/static-analysis finding with rule, locations, and code-flow steps.",
+        "Fetch one SARIF/static-analysis finding with compact rule and location details. "
+        "Set include_code_flows, include_raw, or include_run_metadata for larger diagnostic payloads.",
         {
             "type": "object",
-            "properties": {"id": {"type": "integer"}},
+            "properties": {
+                "id": {"type": "integer"},
+                "include_raw": {"type": "boolean"},
+                "include_run_metadata": {"type": "boolean"},
+                "include_code_flows": {"type": "boolean"},
+            },
             "required": ["id"],
             "additionalProperties": False,
         },

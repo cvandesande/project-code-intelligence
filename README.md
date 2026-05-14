@@ -84,7 +84,7 @@ ready`, index a Git repository:
 cd /path/to/repo-to-index
 pci-index . --dry-run
 pci-index .
-pci-mcp-smoke
+pci-mcp-smoke .
 ```
 
 After indexing, configure your assistant to run `pci-mcp`. See MCP Setup below.
@@ -136,6 +136,11 @@ If indexing is interrupted, rerun the same command. `pci-index .` reuses the
 same snapshot when the Git tree is unchanged, keeps compatible existing
 embeddings, and fills in records that are still missing embeddings. In normal
 incremental mode it only reparses changed files.
+
+When upgrading this tool, reindex if release notes or local changes mention a
+parser, chunker, schema, or profile version bump. Those changes affect the
+records stored in Postgres, so old snapshots may not contain newly indexed
+metadata such as Makefile package pins.
 
 Text-only indexing is available as a fallback for bootstrap, debugging, or
 privacy-sensitive environments:

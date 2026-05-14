@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
 from project_code_intelligence import config, db, embeddings
 from project_code_intelligence.embedding import llama
@@ -29,7 +32,218 @@ from project_code_intelligence.mcp.protocol import (
     scoped_collection,
 )
 from project_code_intelligence.mcp.tool_catalog import TOOL_DEFINITIONS, ToolDefinition
-from project_code_intelligence.storage import schema_migration_versions
+from project_code_intelligence.storage import row_int, schema_migration_versions
+
+if TYPE_CHECKING:
+    from project_code_intelligence.models import JsonValue
+
+
+STATIC_FINDING_COMPACT_KEYS = (
+    "id",
+    "snapshot_id",
+    "collection",
+    "repo",
+    "commit_sha",
+    "finding_key",
+    "rule_id",
+    "level",
+    "kind",
+    "message",
+    "baseline_state",
+    "primary_source_path",
+    "primary_uri",
+    "line_start",
+    "line_end",
+    "column_start",
+    "column_end",
+    "tool_name",
+    "tool_version",
+    "automation_id",
+    "sarif_path",
+    "created_at",
+)
+
+STATIC_RULE_COMPACT_KEYS = (
+    "id",
+    "rule_id",
+    "name",
+    "short_description",
+    "full_description",
+    "default_level",
+    "help_uri",
+)
+
+SearchQueryMode: TypeAlias = Literal["auto", "websearch", "all_terms", "any_terms"]
+SearchQueryStrategy: TypeAlias = Literal[
+    "list",
+    "websearch",
+    "all_terms",
+    "all_terms_fallback",
+    "any_terms",
+    "any_terms_fallback",
+]
+
+SEARCH_TERM_RE = re.compile(r"[A-Za-z0-9_./:+@-]+")
+SEARCH_OPERATOR_WORDS = frozenset({"and", "or", "not"})
+
+CODE_INTEL_RECORD_SELECT_LIST = """
+            SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role, r.branch,
+                   r.commit_sha, r.tree_sha, r.source_path, r.language, r.file_role,
+                   r.content_class, r.record_type, r.record_id, r.parent_record_id,
+                   r.title, r.summary, r.line_start, r.line_end, r.symbol,
+                   r.symbol_kind, r.confidence_kind, r.confidence, r.tool,
+                   r.rule_id, r.severity, r.metadata, r.updated_at,
+                   r.embedding IS NOT NULL AS has_embedding,
+                   NULL::real AS rank
+            FROM project_code_intel_records r
+            """
+
+CODE_INTEL_RECORD_SELECT_WEBSEARCH = """
+            SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role, r.branch,
+                   r.commit_sha, r.tree_sha, r.source_path, r.language, r.file_role,
+                   r.content_class, r.record_type, r.record_id, r.parent_record_id,
+                   r.title, r.summary, r.line_start, r.line_end, r.symbol,
+                   r.symbol_kind, r.confidence_kind, r.confidence, r.tool,
+                   r.rule_id, r.severity, r.metadata, r.updated_at,
+                   r.embedding IS NOT NULL AS has_embedding,
+                   ts_rank_cd(r.search_document, websearch_to_tsquery('english', %s)) AS rank
+            FROM project_code_intel_records r
+            """
+
+CODE_INTEL_RECORD_SELECT_TERMS = """
+            SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role, r.branch,
+                   r.commit_sha, r.tree_sha, r.source_path, r.language, r.file_role,
+                   r.content_class, r.record_type, r.record_id, r.parent_record_id,
+                   r.title, r.summary, r.line_start, r.line_end, r.symbol,
+                   r.symbol_kind, r.confidence_kind, r.confidence, r.tool,
+                   r.rule_id, r.severity, r.metadata, r.updated_at,
+                   r.embedding IS NOT NULL AS has_embedding,
+                   (
+                       SELECT count(*)::real
+                       FROM unnest(%s::text[]) AS search_terms(pattern)
+                       WHERE concat_ws(
+                           ' ',
+                           r.title,
+                           r.summary,
+                           r.symbol,
+                           r.source_path,
+                           r.record_id,
+                           r.display_content,
+                           r.metadata::text
+                       ) ILIKE search_terms.pattern ESCAPE '\\'
+                   ) AS rank
+            FROM project_code_intel_records r
+            """
+
+ALL_TERMS_SEARCH_CLAUSE = """
+            NOT EXISTS (
+                SELECT 1
+                FROM unnest(%s::text[]) AS search_terms(pattern)
+                WHERE NOT (
+                    concat_ws(
+                        ' ',
+                        r.title,
+                        r.summary,
+                        r.symbol,
+                        r.source_path,
+                        r.record_id,
+                        r.display_content,
+                        r.metadata::text
+                    ) ILIKE search_terms.pattern ESCAPE '\\'
+                )
+            )
+            """
+
+ANY_TERMS_SEARCH_CLAUSE = """
+            EXISTS (
+                SELECT 1
+                FROM unnest(%s::text[]) AS search_terms(pattern)
+                WHERE concat_ws(
+                    ' ',
+                    r.title,
+                    r.summary,
+                    r.symbol,
+                    r.source_path,
+                    r.record_id,
+                    r.display_content,
+                    r.metadata::text
+                ) ILIKE search_terms.pattern ESCAPE '\\'
+            )
+            """
+
+
+@dataclass(frozen=True)
+class TextSearchPlan:
+    query: str | None
+    strategy: SearchQueryStrategy
+    terms: tuple[str, ...]
+    limit: int
+
+
+def search_query_mode(args: Json) -> SearchQueryMode:
+    value = optional_text(args, "query_mode") or "auto"
+    if value in {"auto", "websearch", "all_terms", "any_terms"}:
+        return cast("SearchQueryMode", value)
+    raise McpProtocolError("query_mode must be one of: auto, websearch, all_terms, any_terms")
+
+
+def search_terms(query: str) -> list[str]:
+    terms: list[str] = []
+    for match in SEARCH_TERM_RE.finditer(query):
+        term = match.group(0)
+        if term.lower() in SEARCH_OPERATOR_WORDS:
+            continue
+        if term not in terms:
+            terms.append(term)
+    return terms[:16]
+
+
+def like_pattern_for_term(term: str) -> str:
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def run_text_search_query(
+    conn: db.DbConnection,
+    args: Json,
+    plan: TextSearchPlan,
+) -> list[db.DbRow]:
+    clauses, filter_params = code_intel_clauses(args, "r")
+    if plan.query and plan.strategy == "websearch":
+        clauses.append("r.search_document @@ websearch_to_tsquery('english', %s)")
+        query_sql = query_with_where(
+            CODE_INTEL_RECORD_SELECT_WEBSEARCH,
+            clauses,
+            """
+            ORDER BY rank DESC, r.updated_at DESC
+            LIMIT %s
+            """,
+        )
+        params: QueryParams = [plan.query, *filter_params, plan.query, plan.limit]
+    elif plan.query and plan.strategy in {"all_terms", "all_terms_fallback", "any_terms", "any_terms_fallback"}:
+        require_all = plan.strategy in {"all_terms", "all_terms_fallback"}
+        patterns = [like_pattern_for_term(term) for term in plan.terms]
+        clauses.append(ALL_TERMS_SEARCH_CLAUSE if require_all else ANY_TERMS_SEARCH_CLAUSE)
+        query_sql = query_with_where(
+            CODE_INTEL_RECORD_SELECT_TERMS,
+            clauses,
+            """
+            ORDER BY rank DESC, r.updated_at DESC
+            LIMIT %s
+            """,
+        )
+        params = [patterns, *filter_params, patterns, plan.limit]
+    else:
+        query_sql = query_with_where(
+            CODE_INTEL_RECORD_SELECT_LIST,
+            clauses,
+            """
+            ORDER BY r.updated_at DESC
+            LIMIT %s
+            """,
+        )
+        params = [*filter_params, plan.limit]
+    return conn.execute(db.query_sql(query_sql), params).fetchall()
 
 
 def code_intel_tables_exist(conn: db.DbConnection) -> bool:
@@ -189,58 +403,47 @@ def tool_code_intel_status(args: Json) -> Json:
 
 def tool_search_code_intel_text(args: Json) -> Json:
     query = optional_text(args, "query")
+    query_mode = search_query_mode(args)
+    terms = tuple(search_terms(query)) if query else ()
     limit = require_int(args, "limit", 10, 1, 50)
-    clauses, filter_params = code_intel_clauses(args, "r")
-    if query:
-        clauses.append("r.search_document @@ websearch_to_tsquery('english', %s)")
-        query_sql = query_with_where(
-            """
-            SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role, r.branch,
-                   r.commit_sha, r.tree_sha, r.source_path, r.language, r.file_role,
-                   r.content_class, r.record_type, r.record_id, r.parent_record_id,
-                   r.title, r.summary, r.line_start, r.line_end, r.symbol,
-                   r.symbol_kind, r.confidence_kind, r.confidence, r.tool,
-                   r.rule_id, r.severity, r.metadata, r.updated_at,
-                   r.embedding IS NOT NULL AS has_embedding,
-                   ts_rank_cd(r.search_document, websearch_to_tsquery('english', %s)) AS rank
-            FROM project_code_intel_records r
-            """,
-            clauses,
-            """
-            ORDER BY rank DESC, r.updated_at DESC
-            LIMIT %s
-            """,
-        )
-        params = [query, *filter_params, query, limit]
-    else:
-        query_sql = query_with_where(
-            """
-            SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role, r.branch,
-                   r.commit_sha, r.tree_sha, r.source_path, r.language, r.file_role,
-                   r.content_class, r.record_type, r.record_id, r.parent_record_id,
-                   r.title, r.summary, r.line_start, r.line_end, r.symbol,
-                   r.symbol_kind, r.confidence_kind, r.confidence, r.tool,
-                   r.rule_id, r.severity, r.metadata, r.updated_at,
-                   r.embedding IS NOT NULL AS has_embedding,
-                   NULL::real AS rank
-            FROM project_code_intel_records r
-            """,
-            clauses,
-            """
-            ORDER BY r.updated_at DESC
-            LIMIT %s
-            """,
-        )
-        params = [*filter_params, limit]
-
+    strategy: SearchQueryStrategy = "list"
+    fallback_reason: str | None = None
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
-        rows = conn.execute(
-            db.query_sql(query_sql),
-            params,
-        ).fetchall()
-    return ok({"query": query, **snapshot_scope_response(args), "results": rows})
+        if not query:
+            rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
+        elif query_mode == "websearch":
+            strategy = "websearch"
+            rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
+        elif query_mode == "all_terms":
+            strategy = "all_terms"
+            rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
+        elif query_mode == "any_terms":
+            strategy = "any_terms"
+            rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
+        else:
+            strategy = "websearch"
+            rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
+            if not rows and len(terms) > 1:
+                fallback_reason = "websearch returned no results for a multi-term query"
+                strategy = "all_terms_fallback"
+                rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
+            if not rows and len(terms) > 1:
+                strategy = "any_terms_fallback"
+                rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
+    response: Json = {
+        "query": query,
+        "query_mode": query_mode,
+        "query_strategy": strategy,
+        **snapshot_scope_response(args),
+        "results": cast("JsonValue", rows),
+    }
+    if terms:
+        response["terms"] = list(terms)
+    if fallback_reason:
+        response["fallback_reason"] = fallback_reason
+    return ok(response)
 
 
 def vector_literal_dimensions(vector: str) -> int:
@@ -513,10 +716,40 @@ def tool_search_static_findings(args: Json) -> Json:
     return ok({**snapshot_scope_response(args), "results": rows})
 
 
+def row_to_json(row: db.DbRow | None) -> Json | None:
+    if row is None:
+        return None
+    return {key: cast("JsonValue", value) for key, value in row.items()}
+
+
+def compact_row(row: db.DbRow | None, keys: tuple[str, ...]) -> Json | None:
+    if row is None:
+        return None
+    result: Json = {}
+    for key in keys:
+        if key in row:
+            result[key] = cast("JsonValue", row[key])
+    return result
+
+
+def static_finding_warnings(finding: db.DbRow) -> list[object]:
+    run_metadata = finding.get("run_metadata")
+    if not isinstance(run_metadata, dict):
+        return []
+    run_metadata_obj = cast("dict[object, object]", run_metadata)
+    raw_warnings = run_metadata_obj.get("code_intel_warnings")
+    if not isinstance(raw_warnings, list):
+        return []
+    return list(cast("list[object]", raw_warnings))
+
+
 def tool_get_static_finding(args: Json) -> Json:
     finding_id = args.get("id")
     if not isinstance(finding_id, int):
         raise McpProtocolTypeError("id must be an integer")
+    include_raw = optional_bool(args, "include_raw")
+    include_run_metadata = optional_bool(args, "include_run_metadata")
+    include_code_flows = optional_bool(args, "include_code_flows")
     collection = scoped_collection({})
     finding_clauses = ["f.id = %s"]
     finding_params: QueryParams = [finding_id]
@@ -564,18 +797,48 @@ def tool_get_static_finding(args: Json) -> Json:
             """,
             [finding_id],
         ).fetchall()
-        code_flows = conn.execute(
-            """
-            SELECT id, flow_index, thread_index, step_index, source_path, uri,
-                   message, line_start, line_end, column_start, column_end,
-                   importance, properties
-            FROM project_code_intel_static_code_flows
-            WHERE finding_id = %s
-            ORDER BY flow_index, thread_index, step_index, id
-            """,
-            [finding_id],
-        ).fetchall()
-    return ok({"finding": finding, "rule": rule, "locations": locations, "code_flows": code_flows})
+        if include_code_flows:
+            code_flow_rows = conn.execute(
+                """
+                SELECT id, flow_index, thread_index, step_index, source_path, uri,
+                       message, line_start, line_end, column_start, column_end,
+                       importance, properties
+                FROM project_code_intel_static_code_flows
+                WHERE finding_id = %s
+                ORDER BY flow_index, thread_index, step_index, id
+                """,
+                [finding_id],
+            ).fetchall()
+            code_flow_count = len(code_flow_rows)
+        else:
+            code_flow_rows = []
+            code_flow_count_row = conn.execute(
+                """
+                SELECT count(*) AS code_flow_steps
+                FROM project_code_intel_static_code_flows
+                WHERE finding_id = %s
+                """,
+                [finding_id],
+            ).fetchone()
+            code_flow_count = 0 if code_flow_count_row is None else row_int(code_flow_count_row, "code_flow_steps")
+
+    result: Json = {
+        "finding": compact_row(finding, STATIC_FINDING_COMPACT_KEYS),
+        "rule": compact_row(rule, STATIC_RULE_COMPACT_KEYS),
+        "locations": cast("JsonValue", locations),
+        "code_flow_steps": code_flow_count,
+        "warnings": cast("JsonValue", static_finding_warnings(finding)),
+    }
+    if include_code_flows:
+        result["code_flows"] = cast("JsonValue", code_flow_rows)
+    if include_raw:
+        result["raw"] = {
+            "finding": cast("JsonValue", row_to_json(finding)),
+            "rule": cast("JsonValue", row_to_json(rule)),
+        }
+    if include_run_metadata:
+        result["run_metadata"] = cast("JsonValue", finding.get("run_metadata"))
+    return ok(result)
 
 
 def tool_get_static_code_flow(args: Json) -> Json:

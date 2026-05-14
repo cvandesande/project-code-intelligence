@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence import db, profile_context
 from project_code_intelligence.code_profiles.base import GenericProfile
-from project_code_intelligence.models import IntelFile, IntelRecord, JsonObject, Snapshot
+from project_code_intelligence.models import PARSER_VERSION, IntelFile, IntelRecord, JsonObject, Snapshot
 from project_code_intelligence.storage import (
     RecordInsertContext,
     file_signature,
@@ -33,7 +33,7 @@ def snapshot_fixture() -> Snapshot:
         metadata={
             "schema_version": "code-intel-schema-v2",
             "chunker_version": "code-intel-v1",
-            "parser_version": "stdlib-heuristic-v11",
+            "parser_version": PARSER_VERSION,
             "profile_name": "generic",
             "profile_version": "v1",
         },

@@ -202,11 +202,13 @@ def _probes_block(probes: list[dict[str, object]] | None) -> Group | None:
     sub.add_column(overflow="fold")
     for probe in probes:
         tool = str(probe.get("tool", "?"))
+        repo = probe.get("repo")
+        label = f"{repo}: {tool}" if isinstance(repo, str) else tool
         status = str(probe.get("status", "?"))
         glyph_kind: console_ui.PillKind = "ok" if status == "ok" else "fail"
         glyph = Text(console_ui.STATUS_GLYPHS[glyph_kind], style={"ok": "green", "fail": "red"}[glyph_kind])
         detail = _probe_detail(probe, tool)
-        sub.add_row(glyph, Text(tool, style="dim"), Text(detail))
+        sub.add_row(glyph, Text(label, style="dim"), Text(detail))
     return Group(Text("MCP tool probes", style="bold"), sub)
 
 
@@ -263,5 +265,8 @@ def render_error(response: object) -> None:
         error = _as_dict(outer.get("error"))
         if error is not None and isinstance(error.get("message"), str):
             message = str(error["message"])
+    payload = _extract_payload(response)
+    if payload is not None and isinstance(payload.get("error"), str):
+        message = str(payload["error"])
     body = Group(console_ui.header_row("pci-mcp", "fail", "ERROR"), Text(), Text(message, style="red"))
     console.print(console_ui.main_panel(body))
