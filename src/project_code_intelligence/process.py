@@ -49,6 +49,16 @@ class RunOptions:
     check: bool = False
 
 
+@dataclass(frozen=True)
+class PopenOptions:
+    cwd: Path | None = None
+    env: Mapping[str, str] | None = None
+    stdout: int | TextIO | None = None
+    stderr: int | TextIO | None = None
+    stdin: int | TextIO | None = None
+    start_new_session: bool = False
+
+
 def run(command: Sequence[str], options: RunOptions | None = None) -> subprocess.CompletedProcess[str]:
     options = options or RunOptions()
     if not command:
@@ -69,6 +79,27 @@ def run(command: Sequence[str], options: RunOptions | None = None) -> subprocess
         stderr=options.stderr,
         timeout=options.timeout,
         check=options.check,
+        shell=False,
+    )
+
+
+def popen(command: Sequence[str], options: PopenOptions | None = None) -> subprocess.Popen[str]:
+    opts = options or PopenOptions()
+    if not command:
+        msg = "subprocess command must not be empty"
+        raise ValueError(msg)
+    if any(not part for part in command):
+        msg = "subprocess command arguments must be non-empty strings"
+        raise ValueError(msg)
+    return subprocess.Popen(  # nosec B603
+        list(command),
+        cwd=opts.cwd,
+        env=dict(opts.env) if opts.env is not None else None,
+        stdout=opts.stdout,
+        stderr=opts.stderr,
+        stdin=opts.stdin,
+        text=True,
+        start_new_session=opts.start_new_session,
         shell=False,
     )
 

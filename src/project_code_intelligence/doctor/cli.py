@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import json
 import os
+import signal
 import sys
 
 # Suppress "PyTorch was not found" advisory from transformers; the doctor only
@@ -56,7 +57,7 @@ from project_code_intelligence.doctor.types import (
     EmbeddingMode,
     GpuInfo,
 )
-from project_code_intelligence.embedding.coreml_lifecycle import DEFAULT_PID_DIR, PID_FILE_NAME, stop_server
+from project_code_intelligence.embedding.apple_llama_server import LLAMA_SERVER_PID_FILE
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -195,11 +196,28 @@ _DOCKER_PROFILES = (
 )
 _DOCKER_SERVICES = ("fastembed", "lemonade-npu", "llama-rocm", "llama-cuda")
 _HOST_PROCESSES = (
-    "pci-coreml-server",
     "pci-embedding-server",
     "project_code_intelligence.embedding.coreml_server",
     "project_code_intelligence.embedding.fastembed_server",
 )
+
+
+def _stop_pid_file_process() -> None:
+    """Send SIGTERM to the llama-server recorded in the PID file, then remove it."""
+    try:
+        pid = int(LLAMA_SERVER_PID_FILE.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        with contextlib.suppress(OSError):
+            LLAMA_SERVER_PID_FILE.unlink()
+    except OSError:
+        return
+    else:
+        with contextlib.suppress(OSError):
+            LLAMA_SERVER_PID_FILE.unlink()
 
 
 def stop_embedding_services() -> int:
@@ -214,18 +232,15 @@ def stop_embedding_services() -> int:
     except FileNotFoundError:
         write_stdout("docker not found; skipping Docker Compose services.")
 
-    # Stop Core ML server via PID file (preferred), then fall back to pkill.
-    if stop_server():
-        write_stdout("Stopped Core ML embedding server via PID file.")
-    else:
-        # Fall back to pkill for servers started without PID file support.
-        with contextlib.suppress(FileNotFoundError):
-            for proc_name in _HOST_PROCESSES:
-                _ = process.run(
-                    ["pkill", "-f", proc_name],
-                    process.RunOptions(capture_output=True),
-                )
-        write_stdout("Sent stop signals to host-native embedding processes.")
+    _stop_pid_file_process()
+
+    with contextlib.suppress(FileNotFoundError):
+        for proc_name in _HOST_PROCESSES:
+            _ = process.run(
+                ["pkill", "-f", proc_name],
+                process.RunOptions(capture_output=True),
+            )
+    write_stdout("Sent stop signals to host-native embedding processes.")
 
     return 0
 
@@ -292,7 +307,6 @@ def clean_all() -> int:
     ]
     if summary:
         lines.append(f"  - {summary.upper() if 'contains' in summary else summary}")
-    lines.append("  - Remove PID files from ~/.cache/project-code-intelligence")
     write_stdout("\n".join(lines))
 
     if summary and "contains" in summary:
@@ -319,12 +333,6 @@ def clean_all() -> int:
         write_stdout("Removed Docker Compose containers and volumes.")
     except FileNotFoundError:
         write_stdout("docker not found; skipping Docker Compose removal.")
-
-    # 3. Remove PID files.
-    pid_file = DEFAULT_PID_DIR / PID_FILE_NAME
-    if pid_file.exists():
-        pid_file.unlink()
-        write_stdout(f"Removed {pid_file}")
 
     write_stdout("Clean complete.")
     return 0

@@ -130,8 +130,6 @@ def check_label(name: str) -> str:
     if gpu_match:
         return f"GPU {gpu_match.group(1)}"
     return {
-        "apple-coreml": "Apple Core ML",
-        "apple-coreml-model": "Apple Core ML model",
         "apple-metal": "Apple Metal",
         "apple-metal-model": "Apple embedding model",
         "configuration": "Configuration",
@@ -209,8 +207,7 @@ def active_embedding_profile(by_name: Mapping[str, CheckResult]) -> tuple[str, s
         (
             "apple",
             "Apple",
-            ok_result(by_name, "option-gpu-apple")
-            and (ok_result(by_name, "apple-coreml") or "qwen" in model or ".gguf" in model),
+            ok_result(by_name, "option-gpu-apple") and (".gguf" in model or "nomic" in model or "qwen" in model),
         ),
         ("gpu", "GPU", "qwen" in model or ".gguf" in model),
     ]
@@ -232,10 +229,7 @@ def local_embedding_startup_commands(by_name: Mapping[str, CheckResult]) -> list
     if ok_result(by_name, "option-gpu-nvidia") and ok_result(by_name, "gpu-runtime-nvidia"):
         commands.append(("nvidia", f"{engine} compose --profile nvidia up -d --build llama-cuda"))
     if ok_result(by_name, "option-gpu-apple"):
-        if ok_result(by_name, "apple-coreml"):
-            commands.append(("apple", "pci-coreml-server"))
-        else:
-            commands.append(("apple", "pci-embedding-server"))
+        commands.append(("apple", "pci-apple-llama-server"))
     return commands
 
 
@@ -354,9 +348,7 @@ def _active_path_section(by_name: Mapping[str, CheckResult]) -> Group | None:
     if endpoint is None or endpoint.status != "ok":
         return None
     profile, label = active_embedding_profile(by_name)
-    if profile == "apple" and ok_result(by_name, "apple-coreml"):
-        label = "Apple Core ML"
-    elif profile == "apple":
+    if profile == "apple":
         label = "Apple Metal"
     url = embedding_config_endpoint(by_name)
     header = Table.grid(expand=True)
@@ -366,8 +358,6 @@ def _active_path_section(by_name: Mapping[str, CheckResult]) -> Group | None:
     pieces: list[RenderableType] = [header]
     if url:
         pieces.append(Text(f"  {url}", overflow="fold"))
-    if profile == "apple" and ok_result(by_name, "apple-coreml"):
-        pieces.append(Text("  ⓘ pci-coreml-server --diagnose for scheduling", style="dim"))
     return Group(*pieces)
 
 
@@ -433,7 +423,7 @@ def _next_steps(
 ) -> list[tuple[str, str]]:
     engine = process.container_engine_name()
     db_names = {"database", "database-config", "pgvector", "schema", "schema-version"}
-    embedding_names = {"embedding-endpoint", "embedding-config", "embedding"}
+    embedding_names = {"embedding-endpoint", "embedding-config", "embedding", "apple-metal", "apple-metal-model"}
     issue_names = {item.name for item in issues}
     steps: list[tuple[str, str]] = []
     if issue_names & db_names:

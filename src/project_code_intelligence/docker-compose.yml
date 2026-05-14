@@ -1,3 +1,5 @@
+name: project-code-intelligence
+
 services:
   pgvector:
     profiles: ["db"]

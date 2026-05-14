@@ -42,6 +42,7 @@ from project_code_intelligence.embedding.preembedding import (
 )
 from project_code_intelligence.embedding.store import (
     EMBEDDING_CONTRACT_METADATA_KEY,
+    EmbeddingContractMismatchError,
     database_retries,
     embed_db_records,
     embedding_contract,
@@ -74,6 +75,7 @@ from project_code_intelligence.embedding.types import (
 __all__ = [
     "EMBEDDING_CONTRACT_METADATA_KEY",
     "EmbeddingBackend",
+    "EmbeddingContractMismatchError",
     "EmbeddingEndpointUnavailable",
     "EmbeddingEndpointUnavailableError",
     "EmbeddingRow",

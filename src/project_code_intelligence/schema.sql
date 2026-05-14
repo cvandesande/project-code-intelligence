@@ -350,6 +350,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS project_code_intel_edges_collection_unique_idx
         coalesce(target_path, '')
     );
 
+-- Speeds up resolve_edge_targets: lookup symbol_definition records by (snapshot_id, symbol).
+CREATE INDEX IF NOT EXISTS project_code_intel_records_snapshot_symbol_def_idx
+    ON project_code_intel_records (snapshot_id, symbol)
+    WHERE record_type = 'symbol_definition' AND symbol IS NOT NULL;
+
+-- Speeds up resolve_edge_targets: find unresolved edges by target_symbol within a snapshot.
+CREATE INDEX IF NOT EXISTS project_code_intel_edges_snapshot_unresolved_idx
+    ON project_code_intel_edges (snapshot_id, target_symbol)
+    WHERE target_record_id IS NULL AND target_symbol IS NOT NULL;
+
 DROP TRIGGER IF EXISTS project_code_intel_records_touch_updated_at
     ON project_code_intel_records;
 

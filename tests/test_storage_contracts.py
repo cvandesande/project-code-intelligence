@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 from project_code_intelligence import db, profile_context
 from project_code_intelligence.code_profiles.base import GenericProfile
@@ -16,9 +16,6 @@ from project_code_intelligence.storage import (
     row_int,
     snapshot_versions_compatible,
 )
-
-if TYPE_CHECKING:
-    from types import TracebackType
 
 
 def snapshot_fixture() -> Snapshot:
@@ -97,33 +94,15 @@ def record_fixture() -> IntelRecord:
     )
 
 
-class FakeCursor:
-    def __init__(self) -> None:
-        self.sql: str | None = None
-        self.params: list[list[object]] = []
-
-    def __enter__(self) -> FakeCursor:
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        del exc_type, exc, traceback
-
-    def executemany(self, sql: str, params: list[list[object]]) -> None:
-        self.sql = sql
-        self.params = params
-
-
 class FakeConnection:
     def __init__(self) -> None:
-        self.cursor_obj = FakeCursor()
+        self.sql: str | None = None
+        self.params: list[object] = []
 
-    def cursor(self) -> FakeCursor:
-        return self.cursor_obj
+    def execute(self, sql: str, params: list[object] | None = None) -> FakeConnection:
+        self.sql = sql
+        self.params = params or []
+        return self
 
 
 class StorageContractTests(unittest.TestCase):
@@ -180,17 +159,18 @@ class StorageContractTests(unittest.TestCase):
         inserted = insert_records(context, [record_fixture()])
 
         self.assertEqual(inserted, 1)
-        self.assertEqual(len(fake.cursor_obj.params), 1)
-        payload = fake.cursor_obj.params[0]
-        metadata_value = cast("object", json.loads(cast("str", payload[36])))
-        if not isinstance(metadata_value, dict):
-            self.fail("record metadata payload should decode to an object")
-        self.assertEqual(payload[0], 7)
-        self.assertEqual(payload[1], 9)
-        self.assertEqual(payload[8], "src/main.py")
-        self.assertEqual(metadata_value, {"a": 1, "b": 2})
-        self.assertEqual(payload[37], "[0.1,0.2]")
-        self.assertIn("ON CONFLICT", fake.cursor_obj.sql or "")
+        self.assertEqual(len(fake.params), 1)
+        batch = cast("list[dict[str, object]]", json.loads(cast("str", fake.params[0])))
+        self.assertIsInstance(batch, list)
+        self.assertEqual(len(batch), 1)
+        row = batch[0]
+        self.assertIsInstance(row, dict)
+        self.assertEqual(row["snapshot_id"], 7)
+        self.assertEqual(row["file_id"], 9)
+        self.assertEqual(row["source_path"], "src/main.py")
+        self.assertEqual(row["metadata"], {"a": 1, "b": 2})
+        self.assertEqual(row["embedding"], "[0.1,0.2]")
+        self.assertIn("ON CONFLICT", fake.sql or "")
 
 
 if __name__ == "__main__":
