@@ -38,11 +38,13 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
     "search_code_intel_text": ToolDefinition(
         "Search or list code intelligence records. By default, plain multi-term searches use PostgreSQL "
         "full-text search first, then automatically fall back to exact all-term and any-term matching "
-        "when full-text search returns no results.",
+        "when full-text search returns no results. Omit query to enumerate records by filter "
+        "(e.g. parent_record_id, symbol) ordered by most recently updated. The query argument, when "
+        "supplied, must be non-empty.",
         {
             "type": "object",
             "properties": {
-                "query": {"type": "string"},
+                "query": {"type": "string", "minLength": 1},
                 "query_mode": {
                     "type": "string",
                     "enum": ["auto", "websearch", "all_terms", "any_terms"],
@@ -111,8 +113,9 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
     "related_code_intel": ToolDefinition(
         "Return code intelligence graph edges related to a record id or symbol, "
         "joined with source and target record details so a single call resolves both "
-        "ends of every edge. Filter by edge_type (e.g. 'imports', 'calls', 'inherits') "
-        "when you only want one kind of relationship.",
+        "ends of every edge. Filter by edge_type ('call_candidate' for function calls, "
+        "'include' for C/C++ #include relationships) when you only want one kind of "
+        "relationship.",
         {
             "type": "object",
             "properties": {

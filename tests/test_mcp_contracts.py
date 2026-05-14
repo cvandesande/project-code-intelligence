@@ -190,6 +190,12 @@ class McpTextSearchTests(unittest.TestCase):
         self.assertEqual(payload["results"], [])
         self.assertEqual(len(conn.calls), 1)
 
+    def test_text_search_rejects_empty_query_string(self) -> None:
+        definition = TOOL_DEFINITIONS["search_code_intel_text"]
+        with self.assertRaises(McpProtocolError) as ctx:
+            validate_tool_arguments(definition, {"query": ""})
+        self.assertIn("query", str(ctx.exception))
+
 
 class McpContractTests(unittest.TestCase):
     def test_mcp_defaults_collection_from_process_cwd(self) -> None:

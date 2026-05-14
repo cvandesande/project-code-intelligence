@@ -50,7 +50,7 @@ class _SearchFilterArgs(StrictArgs):
 
 
 class SearchCodeIntelTextArgs(_SearchFilterArgs):
-    query: str | None = None
+    query: str | None = Field(default=None, min_length=1)
     query_mode: Literal["auto", "websearch", "all_terms", "any_terms"] | None = None
     limit: int | None = Field(default=None, ge=1, le=50)
 
