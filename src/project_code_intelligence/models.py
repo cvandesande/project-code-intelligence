@@ -20,7 +20,7 @@ JsonObject: TypeAlias = dict[str, JsonValue]
 
 SCHEMA_VERSION = "code-intel-schema-v2"
 CHUNKER_VERSION = "code-intel-v1"
-PARSER_VERSION = "stdlib-heuristic-v11"
+PARSER_VERSION = "stdlib-heuristic-v12"
 SOURCE_TYPE = "code_intel"
 
 DEFAULT_EMBED_RECORD_TYPES = {

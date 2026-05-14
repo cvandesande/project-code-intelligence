@@ -11,6 +11,8 @@ contract exposed via `tools/list`; the models below mirror them.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -49,6 +51,7 @@ class _SearchFilterArgs(StrictArgs):
 
 class SearchCodeIntelTextArgs(_SearchFilterArgs):
     query: str | None = None
+    query_mode: Literal["auto", "websearch", "all_terms", "any_terms"] | None = None
     limit: int | None = Field(default=None, ge=1, le=50)
 
 
@@ -119,6 +122,9 @@ class SearchStaticFindingsArgs(StrictArgs):
 
 class GetStaticFindingArgs(StrictArgs):
     id: int
+    include_raw: bool | None = None
+    include_run_metadata: bool | None = None
+    include_code_flows: bool | None = None
 
 
 class GetStaticCodeFlowArgs(StrictArgs):

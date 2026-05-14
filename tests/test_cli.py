@@ -1,13 +1,30 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 from project_code_intelligence import cli
+
+
+def mcp_response(payload: dict[str, object]) -> dict[str, object]:
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(payload),
+                }
+            ]
+        },
+    }
 
 
 class CliWrapperTests(unittest.TestCase):
@@ -224,3 +241,87 @@ class CliWrapperTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 2)
         ingest_main.assert_not_called()
+
+    def test_mcp_smoke_current_workspace_probes_available_repos(self) -> None:
+        calls: list[tuple[str, dict[str, object], int]] = []
+
+        def fake_mcp_call(
+            tool_name: str, arguments: dict[str, object], request_id: int = 1
+        ) -> tuple[int, object | None, str]:
+            calls.append((tool_name, arguments, request_id))
+            if tool_name == "code_intel_status":
+                return (
+                    0,
+                    mcp_response({
+                        "schema_present": True,
+                        "snapshots": [
+                            {"repo": "openwrt", "id": 1},
+                            {"repo": "ask-cmm", "id": 2},
+                        ],
+                    }),
+                    "",
+                )
+            return 0, mcp_response({"results": [], "edges": [], "files": [], "parser_failures": []}), ""
+
+        with tempfile.TemporaryDirectory() as directory:
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(directory)
+                stdout = io.StringIO()
+                with (
+                    patch("project_code_intelligence.cli._run_mcp_call", side_effect=fake_mcp_call),
+                    patch("sys.stdout", stdout),
+                ):
+                    status = cli.mcp_smoke_main(["--json", "."])
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(status, 0)
+        self.assertEqual(calls[0], ("code_intel_status", {}, 1))
+        probe_repos = [args["repo"] for tool, args, _request_id in calls[1:] if tool == "search_code_intel_text"]
+        self.assertEqual(probe_repos, ["openwrt", "ask-cmm"])
+
+        payload = cast("dict[str, object]", json.loads(stdout.getvalue()))
+        self.assertEqual(payload["repos"], ["openwrt", "ask-cmm"])
+
+    def test_mcp_smoke_fails_on_status_payload_error(self) -> None:
+        def fake_mcp_call(
+            tool_name: str, arguments: dict[str, object], request_id: int = 1
+        ) -> tuple[int, object | None, str]:
+            del tool_name, arguments, request_id
+            return 0, mcp_response({"error": "code intelligence schema is not initialized"}), ""
+
+        stdout = io.StringIO()
+        with (
+            patch("project_code_intelligence.cli._run_mcp_call", side_effect=fake_mcp_call),
+            patch("sys.stdout", stdout),
+        ):
+            status = cli.mcp_smoke_main(["--json", "."])
+
+        self.assertEqual(status, 1)
+        payload = cast("dict[str, object]", json.loads(stdout.getvalue()))
+        result = cast("dict[str, object]", payload["result"])
+        content = cast("list[dict[str, object]]", result["content"])
+        self.assertIn("code intelligence schema is not initialized", str(content[0]["text"]))
+
+    def test_mcp_smoke_fails_on_probe_payload_error(self) -> None:
+        def fake_mcp_call(
+            tool_name: str, arguments: dict[str, object], request_id: int = 1
+        ) -> tuple[int, object | None, str]:
+            del arguments, request_id
+            if tool_name == "code_intel_status":
+                return 0, mcp_response({"schema_present": True, "snapshots": [{"repo": "repo-a", "id": 1}]}), ""
+            return 0, mcp_response({"error": "semantic search requires an embedding endpoint"}), ""
+
+        stdout = io.StringIO()
+        with (
+            patch("project_code_intelligence.cli._run_mcp_call", side_effect=fake_mcp_call),
+            patch("sys.stdout", stdout),
+        ):
+            status = cli.mcp_smoke_main(["--json", "repo-a"])
+
+        self.assertEqual(status, 1)
+        payload = cast("dict[str, object]", json.loads(stdout.getvalue()))
+        probes = cast("list[dict[str, object]]", payload["probes"])
+        self.assertEqual(probes[0]["status"], "fail")
+        self.assertEqual(probes[0]["error"], "semantic search requires an embedding endpoint")

@@ -17,7 +17,7 @@ Installed console scripts are public:
 | `pci-ingest-code` | Lower-level ingest command used by `pci-index`; useful for advanced scripting. |
 | `pci-doctor` | Detects database, embedding endpoint, CPU, GPU, and NPU readiness. |
 | `pci-mcp` | stdio MCP server entry point. |
-| `pci-mcp-smoke` | Basic MCP status smoke check. |
+| `pci-mcp-smoke` | Basic MCP status and tool smoke check. Requires one or more repo paths, such as `pci-mcp-smoke .`. |
 | `pci-fastembed-server` | Small OpenAI-compatible FastEmbed server for local CPU embeddings. |
 | `pci-llama-embed` | llama.cpp embedding CLI helper. |
 | `pci-embedding-bench` | Embedding endpoint benchmark helper. |
@@ -66,12 +66,12 @@ Public tool names:
 | Tool | Purpose |
 | --- | --- |
 | `code_intel_status` | Inspect schema, snapshots, files, records, edges, and embedding state. |
-| `search_code_intel_text` | Full-text search or filtered listing of indexed records. |
+| `search_code_intel_text` | Text search or filtered listing of indexed records. Default `query_mode=auto` uses PostgreSQL full-text search first, then exact multi-term fallbacks when needed. |
 | `search_code_intel_semantic` | Semantic search using the configured embedding endpoint. |
 | `get_code_intel_record` | Fetch one record by numeric ID. Content is omitted unless `include_content` is true. |
 | `related_code_intel` | Follow candidate relationships by record ID or symbol. |
 | `search_static_findings` | Search SARIF/static-analysis findings. |
-| `get_static_finding` | Fetch one SARIF/static-analysis finding with rule, locations, and code flows. |
+| `get_static_finding` | Fetch one SARIF/static-analysis finding with compact rule and location details. Pass `include_code_flows`, `include_raw`, or `include_run_metadata` for larger diagnostic payloads. |
 | `get_static_code_flow` | Fetch ordered code-flow steps for one finding. |
 
 Tool schemas are defined in `project_code_intelligence.mcp.tool_catalog`.

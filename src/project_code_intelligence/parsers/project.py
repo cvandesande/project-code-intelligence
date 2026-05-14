@@ -25,6 +25,9 @@ if TYPE_CHECKING:
     from project_code_intelligence.models import IntelEdge, IntelFile, IntelRecord, JsonObject
 
 
+MAKE_ASSIGNMENT_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_./+-]*)\s*([:+?]?=)\s*(.*)$")
+
+
 def kconfig_block_starts(text: str) -> list[int]:
     starts = [match.start() for match in re.finditer(r"(?m)^\s*(?:menuconfig|config|choice|menu|comment)\b", text)]
     return [*starts, len(text)]
@@ -124,6 +127,85 @@ def split_by_make_blocks(text: str) -> list[tuple[str, str | None, int, int, str
     return blocks
 
 
+def top_level_make_assignments(
+    text: str, chunks: list[tuple[str, str | None, int, int, str]]
+) -> list[tuple[str, str, str, int, str]]:
+    block_lines = {
+        line_no for _kind, _name, line_start, line_end, _body in chunks for line_no in range(line_start, line_end + 1)
+    }
+    assignments: list[tuple[str, str, str, int, str]] = []
+    for line_no, line in enumerate(text.splitlines(), 1):
+        if line_no in block_lines:
+            continue
+        match = MAKE_ASSIGNMENT_RE.match(line)
+        if not match:
+            continue
+        name, operator, value = match.groups()
+        assignments.append((name, operator, value.strip(), line_no, line))
+    return assignments
+
+
+def make_assignment_records(
+    intel_file: IntelFile,
+    assignments: list[tuple[str, str, str, int, str]],
+    pkg_meta: JsonObject,
+) -> list[IntelRecord]:
+    if not assignments:
+        return []
+    records: list[IntelRecord] = []
+    body = "\n".join(raw for _name, _operator, _value, _line_no, raw in assignments)
+    assignment_values = {name: value for name, _operator, value, _line_no, _raw in assignments[:100]}
+    assignment_names = list(assignment_values)
+    records.append(
+        make_record(
+            intel_file,
+            RecordSpec(
+                record_type="make_metadata",
+                record_id=f"{intel_file.source_path}::make::top-level-assignments",
+                title=f"Top-level Makefile assignments in {intel_file.source_path}",
+                summary="Top-level Makefile assignments: " + ", ".join(assignment_names[:20]),
+                body=body,
+                line_start=assignments[0][3],
+                line_end=assignments[-1][3],
+                metadata={
+                    **common_extracts(body),
+                    **pkg_meta,
+                    "make_block_kind": "top_level_assignments",
+                    "make_assignment_names": assignment_names,
+                    "make_assignments": assignment_values,
+                },
+            ),
+        )
+    )
+    for name, operator, value, line_no, raw in assignments:
+        records.append(
+            make_record(
+                intel_file,
+                RecordSpec(
+                    record_type="make_assignment",
+                    record_id=f"{intel_file.source_path}::make-assignment::{name}::{line_no:06d}",
+                    title=f"Makefile assignment {name} in {intel_file.source_path}:{line_no}",
+                    summary=f"{name} {operator} {value[:160]}",
+                    body=raw,
+                    line_start=line_no,
+                    line_end=line_no,
+                    symbol=name,
+                    symbol_kind="make_variable",
+                    metadata={
+                        **common_extracts(raw),
+                        **pkg_meta,
+                        "make_block_kind": "top_level_assignment",
+                        "make_variable": name,
+                        "make_operator": operator,
+                        "make_value": value,
+                    },
+                    confidence_kind="high_confidence_fact",
+                ),
+            )
+        )
+    return records
+
+
 def make_records(
     intel_file: IntelFile, text: str, max_chars: int, overlap_lines: int
 ) -> tuple[list[IntelRecord], list[IntelEdge]]:
@@ -133,6 +215,7 @@ def make_records(
     if not chunks:
         return line_window_records(intel_file, text, max_chars, overlap_lines), edges
     pkg_meta = profile_context.active_profile.make_metadata(intel_file.repo_rel_path, text)
+    records.extend(make_assignment_records(intel_file, top_level_make_assignments(text, chunks), pkg_meta))
     for ordinal, (kind, name, line_start, line_end, body) in enumerate(chunks, 1):
         metadata = {**common_extracts(body), **pkg_meta, "make_block_kind": kind}
         record_type, symbol, symbol_kind = profile_context.active_profile.make_block_record(

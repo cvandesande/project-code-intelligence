@@ -29,8 +29,9 @@ Discovery and navigation:
 Search:
 
 - **`search_code_intel_text`** — Keyword/symbol/file/language/record-type/
-  metadata search backed by PostgreSQL full-text search. Use before
-  filesystem search. Supports `parent_record_id` for class→methods or
+  metadata search. Use before filesystem search. The default mode tries
+  PostgreSQL full-text search first, then exact multi-term fallbacks when
+  full-text search misses. Supports `parent_record_id` for class→methods or
   function→inner-symbol navigation.
 - **`search_code_intel_semantic`** — Embedding-based similarity. Only useful
   when `code_intel_status` reports `embedded_records > 0` for the repo.
