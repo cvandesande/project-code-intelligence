@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence import db
 from project_code_intelligence.common import sha256_text
@@ -52,6 +52,30 @@ __all__ = [
     "snapshot_versions_compatible",
     "stamp_embed_types",
 ]
+
+
+def _strip_nul_str(value: str) -> str:
+    """Remove U+0000 from a string."""
+    return value.replace("\x00", "") if "\x00" in value else value
+
+
+def _strip_nul(value: object) -> object:
+    """Remove U+0000 from strings recursively; pass non-strings through.
+
+    PostgreSQL `text` and `jsonb` cannot store NUL bytes. They arrive when a
+    file with mixed text and binary content slips past binary detection (e.g.
+    a compiled artifact with an ASCII preamble). Stripping at the storage
+    boundary keeps the insert from failing without losing the readable parts.
+    """
+    if isinstance(value, str):
+        return _strip_nul_str(value)
+    if isinstance(value, dict):
+        items = cast("dict[object, object]", value).items()
+        return {k: _strip_nul(v) for k, v in items}
+    if isinstance(value, list):
+        items_list = cast("list[object]", value)
+        return [_strip_nul(item) for item in items_list]
+    return value
 
 
 @dataclass(frozen=True)
@@ -171,7 +195,7 @@ def insert_files(conn: db.DbConnection, snapshot_id: int, files: list[IntelFile]
             "skipped_reason": item.skipped_reason,
             "is_untracked": item.is_untracked,
             "indexed_dirty": item.indexed_dirty,
-            "metadata": item.metadata,
+            "metadata": _strip_nul(item.metadata),
         }
         for item in files
     ]
@@ -262,8 +286,13 @@ def insert_records(
         return 0
     payload: list[dict[str, object]] = []
     for record in records:
-        embedding_hash = sha256_text(record.embedding_text)
-        display_hash = sha256_text(record.display_content)
+        title = _strip_nul_str(record.title)
+        summary = _strip_nul_str(record.summary)
+        embedding_text = _strip_nul_str(record.embedding_text)
+        display_content = _strip_nul_str(record.display_content)
+        metadata = _strip_nul(record.metadata)
+        embedding_hash = sha256_text(embedding_text)
+        display_hash = sha256_text(display_content)
         payload.append({
             "snapshot_id": context.snapshot_id,
             "file_id": context.file_ids.get(record.source_path),
@@ -281,10 +310,10 @@ def insert_records(
             "record_type": record.record_type,
             "record_id": record.record_id,
             "parent_record_id": record.parent_record_id,
-            "title": record.title,
-            "summary": record.summary,
-            "embedding_text": record.embedding_text,
-            "display_content": record.display_content,
+            "title": title,
+            "summary": summary,
+            "embedding_text": embedding_text,
+            "display_content": display_content,
             "embedding_text_hash": embedding_hash,
             "display_hash": display_hash,
             "line_start": record.line_start,
@@ -301,7 +330,7 @@ def insert_records(
             "parser": record.parser,
             "parser_version": record.parser_version,
             "chunker_version": record.chunker_version,
-            "metadata": record.metadata,
+            "metadata": metadata,
             "embedding": record.embedding,
         })
     for i in range(0, len(payload), _INSERT_BATCH_SIZE):
@@ -407,7 +436,7 @@ def insert_edges(
             "source_path": edge.source_path,
             "target_path": edge.target_path,
             "confidence_kind": edge.confidence_kind,
-            "metadata": edge.metadata,
+            "metadata": _strip_nul(edge.metadata),
         }
         for edge in edges
     ]
@@ -452,10 +481,12 @@ def resolve_edge_targets(conn: db.DbConnection, snapshot_id: int) -> int:
     """Fill target_record_id / target_path on edges that have only target_symbol.
 
     call_candidate edges are created with target_symbol (the callee name) but no
-    target_record_id, because at parse time we only know the callee by name.  This
-    pass joins against symbol_definition records in the same snapshot and fills in
-    the stable record_id string.  When multiple records share the same symbol name
-    the lexicographically first source_path wins — an acknowledged heuristic.
+    target_record_id, because at parse time we only know the callee by name. This
+    pass joins against symbol_definition records in the same snapshot and fills
+    in the stable record_id string. When multiple records share the same symbol
+    name, prefer same-file matches, then same-directory matches, then anything
+    else (lexicographic tiebreak) — collisions across unrelated subtrees were
+    otherwise resolving by alphabetical accident.
     """
     rows = conn.execute(
         """
@@ -473,7 +504,14 @@ def resolve_edge_targets(conn: db.DbConnection, snapshot_id: int) -> int:
                 WHERE  snapshot_id = e2.snapshot_id
                   AND  symbol      = e2.target_symbol
                   AND  record_type = 'symbol_definition'
-                ORDER  BY source_path
+                ORDER  BY
+                    CASE
+                        WHEN source_path = e2.source_path THEN 0
+                        WHEN regexp_replace(source_path, '/[^/]+$', '')
+                           = regexp_replace(e2.source_path, '/[^/]+$', '') THEN 1
+                        ELSE 2
+                    END,
+                    source_path
                 LIMIT  1
             ) r
             WHERE  e2.snapshot_id      = %s

@@ -414,7 +414,11 @@ def inspect_inventory_file(path: Path, max_file_bytes: int) -> tuple[str | None,
         data = path.read_bytes()
     except OSError:
         return "read_error", b"", size_bytes, False
-    if reason is None and b"\0" in data[:4096]:
+    # Scan the full buffer. Files with an ASCII preamble (compiled artifacts,
+    # exported notebooks, embedded blobs) hide their NULs past the first few KB
+    # and would otherwise be read as text via errors='replace'. PG rejects NULs
+    # in text and jsonb, so catching them here keeps them out of records too.
+    if reason is None and b"\0" in data:
         reason = "binary_nul"
     return reason, data, size_bytes, True
 
