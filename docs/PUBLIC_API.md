@@ -66,6 +66,8 @@ Public tool names:
 | Tool | Purpose |
 | --- | --- |
 | `code_intel_status` | Inspect schema, snapshots, files, records, edges, and embedding state. |
+| `list_code_intel_files` | List indexed source files filtered by language, role, content class, or skip status. Useful for discovering the shape of the codebase. |
+| `list_code_intel_parser_failures` | List files that failed to parse during ingestion, so agents can report which parts of the codebase are missing from the index. |
 | `search_code_intel_text` | Text search or filtered listing of indexed records. Default `query_mode=auto` uses PostgreSQL full-text search first, then exact multi-term fallbacks when needed. |
 | `search_code_intel_semantic` | Semantic search using the configured embedding endpoint. |
 | `get_code_intel_record` | Fetch one record by stable `record_id` (string), scoped to the active snapshot by default. Content is omitted unless `include_content` is true; pass `verbose=true` to retain heavy metadata fields. |
