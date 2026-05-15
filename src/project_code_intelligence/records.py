@@ -7,9 +7,15 @@ from bisect import bisect_right
 from dataclasses import dataclass
 
 from project_code_intelligence import profile_context
+from project_code_intelligence.language_profiles import language_file_only_metadata_keys
 from project_code_intelligence.models import IntelFile, IntelRecord, JsonObject
 
 MIN_LINE_WINDOW_CHARS = 100
+
+# File-level metadata keys (sibling lists of functions/imports/etc) that
+# language profiles produce. These belong on the file row; copying them onto
+# every record from that file duplicates the same payload N times.
+_FILE_ONLY_METADATA_KEYS = language_file_only_metadata_keys()
 
 
 @dataclass(frozen=True)
@@ -115,7 +121,11 @@ def markdown_fence_for(body: str) -> str:
 
 def make_record(intel_file: IntelFile, spec: RecordSpec) -> IntelRecord:
     metadata = dict(spec.metadata or {})
-    metadata.update({key: value for key, value in intel_file.metadata.items() if key not in metadata})
+    metadata.update({
+        key: value
+        for key, value in intel_file.metadata.items()
+        if key not in metadata and key not in _FILE_ONLY_METADATA_KEYS
+    })
     if spec.symbol and "symbol" not in metadata:
         metadata["symbol"] = spec.symbol
     if spec.symbol_kind and "symbol_kind" not in metadata:

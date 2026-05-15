@@ -19,12 +19,20 @@ MAX_METADATA_ITEMS = 80
 
 @dataclass(frozen=True)
 class LanguageProfile:
-    """Metadata extractor for one or more source languages."""
+    """Metadata extractor for one or more source languages.
+
+    metadata_keys lists every key the profile may produce; those values land
+    on the file row. record_metadata_keys is the subset that should also
+    propagate to per-record metadata. Anything not in record_metadata_keys
+    stays file-level only — this avoids duplicating sibling-list data (e.g.
+    every function name in a file) onto every record from that file.
+    """
 
     name: str
     languages: frozenset[str]
     metadata_keys: tuple[str, ...]
     file_metadata: Callable[[str, str], JsonObject]
+    record_metadata_keys: tuple[str, ...] = ()
 
 
 def unique_limited(values: Iterable[str], limit: int = MAX_METADATA_ITEMS) -> list[str]:

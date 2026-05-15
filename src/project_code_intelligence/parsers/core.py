@@ -31,6 +31,11 @@ class SymbolChunkSpec:
     body: str
     metadata: JsonObject | None = None
     confidence_kind: str = "approximate_fact"
+    # Names that should not produce call_candidate edges (e.g. Go builtins).
+    # Skips edges where target_symbol is in this set, because the heuristic
+    # SQL resolver binds by name and would bind builtins to any same-named
+    # user symbol in the codebase.
+    non_resolvable_targets: frozenset[str] = frozenset()
 
 
 def make_profile_record(intel_file: IntelFile, spec: ProfileRecord, *, default_body: str = "") -> IntelRecord:
@@ -145,7 +150,7 @@ def bounded_brace_body(
 
 
 def make_symbol_chunk(intel_file: IntelFile, spec: SymbolChunkSpec) -> tuple[IntelRecord, IntelRecord, list[IntelEdge]]:
-    refs = extract_referenced_symbols(spec.body)
+    refs = [ref for ref in extract_referenced_symbols(spec.body) if ref not in spec.non_resolvable_targets]
     meta = {
         **common_extracts(spec.body),
         "symbols_defined": [spec.name],
