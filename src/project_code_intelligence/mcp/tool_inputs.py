@@ -27,6 +27,7 @@ class CodeIntelStatusArgs(StrictArgs):
     repo: str | None = None
     snapshot_id: int | None = Field(default=None, ge=1)
     include_historical: bool | None = None
+    directory_depth: int | None = Field(default=None, ge=1, le=5)
 
 
 class _SearchFilterArgs(StrictArgs):
@@ -40,11 +41,13 @@ class _SearchFilterArgs(StrictArgs):
     content_class: str | None = None
     confidence_kind: str | None = None
     source_path: str | None = None
+    source_path_prefix: str | None = None
     symbol: str | None = None
     parent_record_id: str | None = None
     metadata_key: str | None = None
     metadata_value: str | None = None
     metadata_contains: dict[str, object] | None = None
+    is_untracked: bool | None = None
     snapshot_id: int | None = Field(default=None, ge=1)
     include_historical: bool | None = None
     verbose: bool | None = None
@@ -104,6 +107,7 @@ class ListCodeIntelFilesArgs(StrictArgs):
     is_source: bool | None = None
     is_build: bool | None = None
     is_config: bool | None = None
+    is_untracked: bool | None = None
     only_skipped: bool | None = None
     verbose: bool | None = None
     snapshot_id: int | None = Field(default=None, ge=1)

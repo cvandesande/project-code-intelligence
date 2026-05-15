@@ -159,23 +159,38 @@ def scoped_snapshot_table_collection_repo_clauses(args: Json, alias: str) -> tup
     return clauses, params
 
 
-def code_intel_clauses(args: Json, alias: str = "") -> tuple[list[str], QueryParams]:
-    clauses = ["TRUE"]
+def source_path_prefix_pattern(prefix: str) -> str:
+    # Strip a trailing slash so callers can pass either "cmd" or "cmd/" and get the
+    # same subtree match. The pattern matches strict descendants only — to match a
+    # file at the exact path, use source_path instead.
+    normalized = prefix.rstrip("/")
+    escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"{escaped}/%"
+
+
+def source_path_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]:
+    """Build WHERE clauses for source_path (exact) and source_path_prefix (subtree).
+
+    The two filters are mutually exclusive; passing both raises so callers see a
+    clear error instead of silent ANDed narrowing.
+    """
+    source_path = optional_text(args, "source_path")
+    source_path_prefix = optional_text(args, "source_path_prefix")
+    if source_path and source_path_prefix:
+        raise McpProtocolError("source_path and source_path_prefix are mutually exclusive")
+    if source_path:
+        return [f"{column(alias, 'source_path')} = %s"], [source_path]
+    if source_path_prefix:
+        return (
+            [f"{column(alias, 'source_path')} LIKE %s ESCAPE '\\'"],
+            [source_path_prefix_pattern(source_path_prefix)],
+        )
+    return [], []
+
+
+def _metadata_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]:
+    clauses: list[str] = []
     params: QueryParams = []
-    collection = scoped_collection(args)
-    if collection:
-        clauses.append(f"{column(alias, 'collection')} = %s")
-        params.append(collection)
-    for name in ("repo", "record_type", "language", "file_role", "content_class", "confidence_kind"):
-        value = optional_text(args, name)
-        if value:
-            clauses.append(f"{column(alias, name)} = %s")
-            params.append(value)
-    for name in ("source_path", "symbol", "parent_record_id"):
-        value = optional_text(args, name)
-        if value:
-            clauses.append(f"{column(alias, name)} = %s")
-            params.append(value)
     metadata_key = optional_text(args, "metadata_key")
     metadata_value = optional_text(args, "metadata_value")
     if metadata_key and metadata_value:
@@ -190,6 +205,38 @@ def code_intel_clauses(args: Json, alias: str = "") -> tuple[list[str], QueryPar
             raise McpProtocolTypeError("metadata_contains must be an object")
         clauses.append(f"{column(alias, 'metadata')} @> %s::jsonb")
         params.append(json_argument(metadata_contains, "metadata_contains"))
+    return clauses, params
+
+
+def code_intel_clauses(args: Json, alias: str = "") -> tuple[list[str], QueryParams]:
+    clauses = ["TRUE"]
+    params: QueryParams = []
+    collection = scoped_collection(args)
+    if collection:
+        clauses.append(f"{column(alias, 'collection')} = %s")
+        params.append(collection)
+    for name in ("repo", "record_type", "language", "file_role", "content_class", "confidence_kind"):
+        value = optional_text(args, name)
+        if value:
+            clauses.append(f"{column(alias, name)} = %s")
+            params.append(value)
+    for name in ("symbol", "parent_record_id"):
+        value = optional_text(args, name)
+        if value:
+            clauses.append(f"{column(alias, name)} = %s")
+            params.append(value)
+    path_clauses, path_params = source_path_clauses(args, alias)
+    clauses.extend(path_clauses)
+    params.extend(path_params)
+    if "is_untracked" in args:
+        # is_untracked lives on the joined files table (alias `f`) in record
+        # SELECTs; null coalesces to false so the filter behaves on rows where
+        # the join didn't match.
+        clauses.append("coalesce(f.is_untracked, false) = %s")
+        params.append(optional_bool(args, "is_untracked"))
+    meta_clauses, meta_params = _metadata_clauses(args, alias)
+    clauses.extend(meta_clauses)
+    params.extend(meta_params)
     snapshot_clauses, snapshot_params = scoped_snapshot_clauses(args, alias)
     clauses.extend(snapshot_clauses)
     params.extend(snapshot_params)
