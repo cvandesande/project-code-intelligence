@@ -512,6 +512,15 @@ def _summary_header(report: JsonObject) -> Table:
     return console_ui.header_row(title, status, label)
 
 
+def _shorten_model(model: str) -> str:
+    if "/" in model:
+        model = model.rsplit("/", 1)[-1]
+    for ext in (".mlpackage", ".gguf", ".safetensors"):
+        if model.endswith(ext):
+            return model[: -len(ext)]
+    return model
+
+
 def _add_identity_rows(rows: Table, report: JsonObject) -> None:
     mode = report.get("mode")
     if isinstance(mode, str):
@@ -522,6 +531,9 @@ def _add_identity_rows(rows: Table, report: JsonObject) -> None:
     database = report.get("database")
     if isinstance(database, str):
         _add_row(rows, "Database", compact_database_target(database))
+    embedding_model = report.get("embedding_model")
+    if isinstance(embedding_model, str):
+        _add_row(rows, "Model", _shorten_model(embedding_model))
     collection = report.get("collection")
     if isinstance(collection, str) and mode == "reset":
         _add_row(rows, "Collection", collection)
