@@ -68,7 +68,7 @@ Public tool names:
 | `code_intel_status` | Inspect schema, snapshots, files, records, edges, and embedding state. |
 | `search_code_intel_text` | Text search or filtered listing of indexed records. Default `query_mode=auto` uses PostgreSQL full-text search first, then exact multi-term fallbacks when needed. |
 | `search_code_intel_semantic` | Semantic search using the configured embedding endpoint. |
-| `get_code_intel_record` | Fetch one record by numeric ID. Content is omitted unless `include_content` is true. |
+| `get_code_intel_record` | Fetch one record by stable `record_id` (string), scoped to the active snapshot by default. Content is omitted unless `include_content` is true; pass `verbose=true` to retain heavy metadata fields. |
 | `related_code_intel` | Follow candidate relationships by record ID or symbol. |
 | `search_static_findings` | Search SARIF/static-analysis findings. |
 | `get_static_finding` | Fetch one SARIF/static-analysis finding with compact rule and location details. Pass `include_code_flows`, `include_raw`, or `include_run_metadata` for larger diagnostic payloads. |
