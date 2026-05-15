@@ -14,6 +14,7 @@ from project_code_intelligence.mcp import tools as mcp_tools
 from project_code_intelligence.mcp.filters import (
     code_intel_clauses,
     json_argument,
+    source_path_prefix_pattern,
     status_filters,
 )
 from project_code_intelligence.mcp.protocol import (
@@ -214,6 +215,67 @@ class McpTextSearchTests(unittest.TestCase):
         ):
             _ = mcp_tools.tool_search_code_intel_text({"mode": "enumerate", "query": "hello"})
         self.assertIn("mode=enumerate", str(ctx.exception))
+
+    def test_explicit_missing_snapshot_id_raises(self) -> None:
+        # First cursor responds to the existence probe with no row.
+        conn = QueuedConnection([FakeCursor(one=None)])
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            self.assertRaises(McpProtocolError) as ctx,
+        ):
+            _ = mcp_tools.tool_list_code_intel_files({"snapshot_id": 9999})
+        self.assertIn("9999", str(ctx.exception))
+
+    def test_text_search_is_untracked_filter(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            _ = mcp_tools.tool_search_code_intel_text({"is_untracked": False})
+        query, params = conn.calls[0]
+        self.assertIn("coalesce(f.is_untracked, false) = %s", query)
+        self.assertTrue(any(p is False for p in params))
+
+    def test_list_files_is_untracked_filter(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            _ = mcp_tools.tool_list_code_intel_files({"is_untracked": False})
+        query, params = conn.calls[0]
+        self.assertIn("f.is_untracked = %s", query)
+        self.assertTrue(any(p is False for p in params))
+
+    def test_text_search_accepts_source_path_prefix(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            _ = mcp_tools.tool_search_code_intel_text({"source_path_prefix": "cmd/"})
+        query, params = conn.calls[0]
+        self.assertIn("r.source_path LIKE %s ESCAPE", query)
+        self.assertIn("cmd/%", params)
+
+    def test_text_search_rejects_source_path_with_prefix(self) -> None:
+        conn = QueuedConnection([FakeCursor(one=None)])
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            self.assertRaises(McpProtocolError),
+        ):
+            _ = mcp_tools.tool_search_code_intel_text({
+                "source_path": "cmd/main.go",
+                "source_path_prefix": "cmd",
+            })
 
     def test_text_search_snippet_length_truncates_inline_snippet(self) -> None:
         long_body = "x" * 600
@@ -732,9 +794,9 @@ class McpToolShapeTests(unittest.TestCase):
         self.assertIn("cmd/%", params)
 
     def test_list_files_source_path_prefix_escapes_like_metacharacters(self) -> None:
-        self.assertEqual(mcp_tools.source_path_prefix_pattern("a%b_c\\d"), "a\\%b\\_c\\\\d/%")
-        self.assertEqual(mcp_tools.source_path_prefix_pattern("foo/"), "foo/%")
-        self.assertEqual(mcp_tools.source_path_prefix_pattern("foo"), "foo/%")
+        self.assertEqual(source_path_prefix_pattern("a%b_c\\d"), "a\\%b\\_c\\\\d/%")
+        self.assertEqual(source_path_prefix_pattern("foo/"), "foo/%")
+        self.assertEqual(source_path_prefix_pattern("foo"), "foo/%")
 
     def test_list_files_rejects_both_source_path_and_prefix(self) -> None:
         with (
@@ -771,9 +833,70 @@ class McpToolShapeTests(unittest.TestCase):
             msg=f"no language breakdown SQL in {queries!r}",
         )
         self.assertTrue(
-            any("split_part(f.source_path, '/', 1)" in q for q in queries),
+            any("string_to_array(f.source_path, '/')" in q for q in queries),
             msg=f"no directory breakdown SQL in {queries!r}",
         )
+
+    def test_get_record_strips_embedding_text_by_default(self) -> None:
+        conn = QueuedConnection([
+            FakeCursor(
+                one={
+                    "id": 1,
+                    "record_id": "src/lib.rs::function::handler::000001",
+                    "source_path": "src/lib.rs",
+                    "embedding_text": "fn handler() { ... }",
+                    "embedding_text_truncated": True,
+                    "display_content": "# handler\n\n```rust\nfn handler() { ... }\n```",
+                }
+            ),
+        ])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_get_code_intel_record({
+                "record_id": "src/lib.rs::function::handler::000001",
+                "include_content": True,
+            })
+
+        payload = mcp_text_payload(response)
+        result = cast("dict[str, object]", payload["result"])
+        self.assertNotIn("embedding_text", result)
+        self.assertNotIn("embedding_text_truncated", result)
+        # display_content remains — it's the canonical rendering.
+        self.assertIn("display_content", result)
+
+    def test_get_record_verbose_keeps_embedding_text(self) -> None:
+        conn = QueuedConnection([
+            FakeCursor(
+                one={
+                    "id": 1,
+                    "record_id": "src/lib.rs::function::handler::000001",
+                    "source_path": "src/lib.rs",
+                    "embedding_text": "fn handler() { ... }",
+                    "embedding_text_truncated": True,
+                    "display_content": "# handler\n\n```rust\nfn handler() { ... }\n```",
+                }
+            ),
+        ])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_get_code_intel_record({
+                "record_id": "src/lib.rs::function::handler::000001",
+                "include_content": True,
+                "verbose": True,
+            })
+
+        payload = mcp_text_payload(response)
+        result = cast("dict[str, object]", payload["result"])
+        self.assertEqual(result["embedding_text"], "fn handler() { ... }")
+        self.assertEqual(result["embedding_text_truncated"], True)
 
     def test_get_record_batch_returns_results_and_missing(self) -> None:
         conn = QueuedConnection([

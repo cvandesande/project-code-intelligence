@@ -20,6 +20,7 @@ from project_code_intelligence.mcp.filters import (
     scoped_collection_repo_clauses,
     scoped_snapshot_clauses,
     snapshot_scope_response,
+    source_path_clauses,
     static_finding_clauses,
     status_filters,
 )
@@ -29,6 +30,7 @@ from project_code_intelligence.mcp.protocol import (
     mcp_max_record_content_chars,
     ok,
     optional_bool,
+    optional_int,
     optional_text,
     require_int,
     scoped_collection,
@@ -205,6 +207,11 @@ _COMPACT_RECORD_STRIP = frozenset({
     "tool",
     "rule_id",
     "severity",
+    # embedding_text duplicates display_content minus the markdown frame and is
+    # truncated mid-body — useful for debugging embedding similarity, noise for
+    # navigation. Verbose mode keeps it.
+    "embedding_text",
+    "embedding_text_truncated",
 })
 _COMPACT_EDGE_STRIP = frozenset({"snapshot_id", "collection", "repo", "commit_sha"})
 
@@ -384,15 +391,6 @@ def like_pattern_for_term(term: str) -> str:
     return f"%{escaped}%"
 
 
-def source_path_prefix_pattern(prefix: str) -> str:
-    # Strip a trailing slash so callers can pass either "cmd" or "cmd/" and get the
-    # same subtree match. The pattern matches strict descendants only — to match a
-    # file at the exact path, use source_path instead.
-    normalized = prefix.rstrip("/")
-    escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"{escaped}/%"
-
-
 def run_text_search_query(
     conn: db.DbConnection,
     args: Json,
@@ -453,6 +451,19 @@ def code_intel_tables_exist(conn: db.DbConnection) -> bool:
     return mcp_db.code_intel_tables_exist(conn)
 
 
+def validate_explicit_snapshot_id(conn: db.DbConnection, args: Json) -> None:
+    """When snapshot_id is explicitly set, fail loudly if it doesn't exist."""
+    snapshot_id = optional_int(args, "snapshot_id")
+    if snapshot_id is None:
+        return
+    row = conn.execute(
+        "SELECT 1 FROM project_code_intel_snapshots WHERE id = %s",
+        [snapshot_id],
+    ).fetchone()
+    if row is None:
+        raise McpProtocolError(f"snapshot_id {snapshot_id} does not exist")
+
+
 def table_regclass_exists(conn: db.DbConnection, table: str) -> bool:
     return mcp_db.table_regclass_exists(conn, table)
 
@@ -510,14 +521,13 @@ def _annotate_status_snapshots(snapshot_rows: list[db.DbRow]) -> list[Json]:
         snap_dict["head_matches_snapshot"] = (
             head_commit is not None and snap_dict.get("commit_sha") == head_commit.strip()
         )
-        snap_meta = snap_dict.get("metadata")
-        if isinstance(snap_meta, dict) and "embed_record_types" in snap_meta:
-            snap_dict["embed_record_types"] = snap_meta["embed_record_types"]
         snapshots.append(snap_dict)
     return snapshots
 
 
-def _status_file_breakdowns(conn: db.DbConnection, filters: StatusFilters) -> dict[str, list[db.DbRow]]:
+def _status_file_breakdowns(
+    conn: db.DbConnection, filters: StatusFilters, directory_depth: int
+) -> dict[str, list[db.DbRow]]:
     language = conn.execute(
         db.query_sql(
             query_with_where(
@@ -534,14 +544,22 @@ def _status_file_breakdowns(conn: db.DbConnection, filters: StatusFilters) -> di
         ),
         filters.files.params,
     ).fetchall()
+    # Group by the first `directory_depth` path segments (excluding the filename).
+    # At depth=1 a file at `crates/foo/lib.rs` rolls up to `crates`; at depth=2 to
+    # `crates/foo`. Files in the repo root produce '.'.
     directory = conn.execute(
         db.query_sql(
             query_with_where(
                 """
             SELECT
-                CASE WHEN position('/' in f.source_path) = 0
-                     THEN '.'
-                     ELSE split_part(f.source_path, '/', 1)
+                CASE
+                    WHEN array_length(string_to_array(f.source_path, '/'), 1) <= 1 THEN '.'
+                    ELSE array_to_string(
+                        (string_to_array(f.source_path, '/'))[
+                            1:LEAST(%s, array_length(string_to_array(f.source_path, '/'), 1) - 1)
+                        ],
+                        '/'
+                    )
                 END AS directory,
                 count(*) AS files
             FROM project_code_intel_files f
@@ -550,19 +568,22 @@ def _status_file_breakdowns(conn: db.DbConnection, filters: StatusFilters) -> di
                 """
             GROUP BY directory
             ORDER BY files DESC, directory
+            LIMIT 100
             """,
             )
         ),
-        filters.files.params,
+        [directory_depth, *filters.files.params],
     ).fetchall()
     return {"language": language, "directory": directory}
 
 
 def tool_code_intel_status(args: Json) -> Json:
     filters = status_filters(args)
+    directory_depth = require_int(args, "directory_depth", 1, 1, 5)
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"schema_present": False})
+        validate_explicit_snapshot_id(conn, args)
         schema_versions = (
             schema_migration_versions(conn)
             if table_regclass_exists(conn, "project_code_intel_schema_migrations")
@@ -655,14 +676,8 @@ def tool_code_intel_status(args: Json) -> Json:
             ),
             filters.edges.params,
         ).fetchall()
-        breakdowns = _status_file_breakdowns(conn, filters)
+        breakdowns = _status_file_breakdowns(conn, filters, directory_depth)
         static_runs, static_findings = static_status_rows(conn, filters)
-    actual_record_types = {str(row["record_type"]) for row in by_type}
-    for snap_dict in snapshots:
-        if "embed_record_types" in snap_dict:
-            snap_dict["embed_record_types"] = [
-                t for t in cast("list[str]", snap_dict["embed_record_types"]) if t in actual_record_types
-            ]
     return ok({
         "schema_present": True,
         "schema_versions": schema_versions,
@@ -723,6 +738,7 @@ def tool_search_code_intel_text(args: Json) -> Json:
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
+        validate_explicit_snapshot_id(conn, args)
         rows, strategy, fallback_reason = _execute_text_search(conn, args, terms, limit)
     if not optional_text(args, "record_type"):
         rows = _dedup_by_location(rows)
@@ -791,6 +807,7 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
+        validate_explicit_snapshot_id(conn, args)
         rows = conn.execute(
             db.query_sql(
                 query_with_where(
@@ -917,6 +934,7 @@ def tool_get_code_intel_record(args: Json) -> Json:
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
+        validate_explicit_snapshot_id(conn, args)
         cursor = conn.execute(db.query_sql(query_sql), params)
         if not batch:
             row = cursor.fetchone()
@@ -971,6 +989,7 @@ def tool_related_code_intel(args: Json) -> Json:
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
+        validate_explicit_snapshot_id(conn, args)
         edges = conn.execute(
             db.query_sql(
                 query_with_where(
@@ -1013,6 +1032,7 @@ def tool_search_static_findings(args: Json) -> Json:
     with mcp_db.connect() as conn:
         if not table_regclass_exists(conn, "project_code_intel_static_findings"):
             return ok({"error": "static-analysis schema is not initialized"})
+        validate_explicit_snapshot_id(conn, args)
         rows = conn.execute(
             db.query_sql(
                 query_with_where(
@@ -1221,16 +1241,9 @@ def tool_list_code_intel_files(args: Json) -> Json:
         if value:
             clauses.append(f"f.{arg_name} = %s")
             params.append(value)
-    source_path = optional_text(args, "source_path")
-    source_path_prefix = optional_text(args, "source_path_prefix")
-    if source_path and source_path_prefix:
-        raise McpProtocolError("source_path and source_path_prefix are mutually exclusive")
-    if source_path:
-        clauses.append("f.source_path = %s")
-        params.append(source_path)
-    elif source_path_prefix:
-        clauses.append("f.source_path LIKE %s ESCAPE '\\'")
-        params.append(source_path_prefix_pattern(source_path_prefix))
+    path_clauses, path_params = source_path_clauses(args, "f")
+    clauses.extend(path_clauses)
+    params.extend(path_params)
     for arg_name in (
         "is_test",
         "is_doc",
@@ -1239,6 +1252,7 @@ def tool_list_code_intel_files(args: Json) -> Json:
         "is_source",
         "is_build",
         "is_config",
+        "is_untracked",
     ):
         if arg_name in args:
             value = optional_bool(args, arg_name)
@@ -1267,6 +1281,7 @@ def tool_list_code_intel_files(args: Json) -> Json:
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
+        validate_explicit_snapshot_id(conn, args)
         rows = conn.execute(
             db.query_sql(
                 query_with_where(
@@ -1292,21 +1307,15 @@ def tool_list_code_intel_parser_failures(args: Json) -> Json:
         if value:
             clauses.append(f"pf.{arg_name} = %s")
             params.append(value)
-    source_path = optional_text(args, "source_path")
-    source_path_prefix = optional_text(args, "source_path_prefix")
-    if source_path and source_path_prefix:
-        raise McpProtocolError("source_path and source_path_prefix are mutually exclusive")
-    if source_path:
-        clauses.append("pf.source_path = %s")
-        params.append(source_path)
-    elif source_path_prefix:
-        clauses.append("pf.source_path LIKE %s ESCAPE '\\'")
-        params.append(source_path_prefix_pattern(source_path_prefix))
+    path_clauses, path_params = source_path_clauses(args, "pf")
+    clauses.extend(path_clauses)
+    params.extend(path_params)
     params.append(limit)
 
     with mcp_db.connect() as conn:
         if not table_regclass_exists(conn, "project_code_intel_parser_failures"):
             return ok({"error": "code intelligence schema is not initialized"})
+        validate_explicit_snapshot_id(conn, args)
         rows = conn.execute(
             db.query_sql(
                 query_with_where(
