@@ -887,6 +887,7 @@ def print_embed_only_report(plan: IngestPlan, snapshot_ids: list[int], embedded_
         "mode": "embed-only",
         "profile": profile_context.active_profile.name,
         "embeddings": True,
+        "embedding_model": args.embedding_endpoint_model if args.embedding_endpoint else None,
         "embedding_max_chars": args.embedding_max_chars,
         "metrics": runtime_state.active_metrics.snapshot(),
     }
@@ -1412,6 +1413,9 @@ def print_ingest_result(
         "mode": effective_ingest_mode(ingests),
         "profile": profile_context.active_profile.name,
         "embeddings": plan.args.embed,
+        "embedding_model": (
+            plan.args.embedding_endpoint_model if plan.args.embed and plan.args.embedding_endpoint else None
+        ),
         "sarif_files": [relative_to_or_none(path, plan.root) or str(path) for path in plan.sarif_files],
         "sarif_file_count": len(plan.sarif_files),
         "sarif_warnings": sarif_ingest.warnings,
