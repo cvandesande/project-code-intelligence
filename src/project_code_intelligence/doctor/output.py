@@ -114,9 +114,9 @@ def option_label(name: str) -> str:
     return {
         "option-cpu": "CPU",
         "option-npu": "NPU",
-        "option-gpu-amd": "AMD GPU",
-        "option-gpu-nvidia": "NVIDIA GPU",
-        "option-gpu-apple": "Apple GPU",
+        "option-gpu-amd": "AMD ROCm",
+        "option-gpu-nvidia": "NVIDIA CUDA",
+        "option-gpu-apple": "Apple MLX",
         "option-gpu": "GPU",
         "option-gpu-large-model": "Large GPU model",
         "option-remote": "Remote",
@@ -130,7 +130,7 @@ def check_label(name: str) -> str:
     if gpu_match:
         return f"GPU {gpu_match.group(1)}"
     return {
-        "apple-metal": "Apple Metal",
+        "apple-metal": "Apple MLX",
         "apple-metal-model": "Apple embedding model",
         "configuration": "Configuration",
         "database": "Database",
@@ -198,10 +198,10 @@ def active_embedding_profile(by_name: Mapping[str, CheckResult]) -> tuple[str, s
             "CPU",
             ("jina" in model or "bge" in model or "fastembed" in model) and ok_result(by_name, "option-cpu"),
         ),
-        ("amdgpu", "AMD GPU", ("qwen" in model or ".gguf" in model) and ok_result(by_name, "option-gpu-amd")),
+        ("amdgpu", "AMD ROCm", ("qwen" in model or ".gguf" in model) and ok_result(by_name, "option-gpu-amd")),
         (
             "nvidia",
-            "NVIDIA GPU",
+            "NVIDIA CUDA",
             ("qwen" in model or ".gguf" in model) and ok_result(by_name, "option-gpu-nvidia"),
         ),
         (
@@ -349,7 +349,7 @@ def _active_path_section(by_name: Mapping[str, CheckResult]) -> Group | None:
         return None
     profile, label = active_embedding_profile(by_name)
     if profile == "apple":
-        label = "Apple Metal"
+        label = "Apple MLX"
     url = embedding_config_endpoint(by_name)
     header = Table.grid(expand=True)
     header.add_column()
@@ -411,8 +411,8 @@ def _issues_table(issues: Sequence[CheckResult]) -> Table:
 _PROFILE_FRIENDLY_DESCRIPTIONS = {
     "cpu": "Start CPU embeddings",
     "npu": "Start AMD NPU embeddings",
-    "amdgpu": "Start AMD GPU embeddings",
-    "nvidia": "Start NVIDIA GPU embeddings",
+    "amdgpu": "Start AMD ROCm embeddings",
+    "nvidia": "Start NVIDIA CUDA embeddings",
     "apple": "Start Apple native embeddings",
 }
 
