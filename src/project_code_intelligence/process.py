@@ -186,14 +186,21 @@ def _audit_docker_args(args: Sequence[str]) -> None:
         saw_volume_flag = arg in {"-v", "--volume"}
 
 
+_COMPOSE_FILE_ENV_VAR = "PROJECT_CODE_INTELLIGENCE_COMPOSE_FILE"
+
+
 def compose_file_args() -> list[str]:
     """Return ["-f", "/path/to/docker-compose.yml"] for use in compose subcommands.
 
-    Resolves the bundled docker-compose.yml from the installed package data so
-    compose commands work regardless of the caller's current working directory.
-    Returns an empty list if the file cannot be located (callers degrade to
-    CWD-based discovery, preserving the previous behaviour).
+    Resolution order:
+    1. PROJECT_CODE_INTELLIGENCE_COMPOSE_FILE environment variable — use this to
+       point at a customised compose file without modifying the installed package.
+    2. Bundled docker-compose.yml from installed package data.
+    3. Empty list — callers degrade to CWD-based discovery.
     """
+    override = os.environ.get(_COMPOSE_FILE_ENV_VAR, "").strip()
+    if override:
+        return ["-f", override]
     try:
         ref = importlib_resources.files("project_code_intelligence").joinpath("docker-compose.yml")
         path = Path(str(ref))
