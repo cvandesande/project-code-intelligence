@@ -77,6 +77,22 @@ the MCP server.
 - Add checks when a change affects ingest behavior, database writes, MCP tool
   responses, or privacy-sensitive output.
 
+## Profiles
+
+The generic profile covers common source, docs, build files, config files, and
+SARIF input under the selected repo paths. A project can add its own profile for
+domain-specific file roles, metadata, records, security context, or extra SARIF
+locations.
+
+Private profiles do not need to be registered in this package. Put them on
+`PYTHONPATH` and select them with a fully qualified profile path:
+
+```sh
+PROJECT_CODE_INTELLIGENCE_PROFILE=my_project.code_profile:MyProjectProfile pci-index .
+```
+
+Profiles are ordinary Python code, so load them only from trusted local modules.
+
 ## Privacy
 
 Do not commit database dumps, restore artifacts, SARIF output, embedding caches,

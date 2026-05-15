@@ -20,11 +20,11 @@ Plain code RAG helps by embedding chunks and retrieving similar passages, but it
 
 **Finding callers.** `related_code_intel` returns callers with file paths, line numbers, and snippets across the whole codebase in one round-trip. The alternative is grep plus reading each match in context.
 
-**Private or sensitive codebases.** Most embedding setups send source text to a remote API. Every function signature, comment, and identifier you index leaves the machine. `project-code-intelligence` runs embeddings locally by default, on CPU, Apple Silicon via MLX, AMD, or NVIDIA hardware. The code stays on the machine, and there's no per-token API cost.
+**Private or sensitive codebases.** Most embedding setups send source text to a remote API. Every function signature, comment, and identifier you index leaves the machine. `project-code-intelligence` runs embeddings locally by default, using Apple Silicon (MLX), AMD (ROCm), or NVIDIA (CUDA) hardware when available and falling back to CPU otherwise. The code stays on the machine, and there's no per-token API cost.
 
 ## What it is
 
-An MCP server backed by Postgres/pgvector. `pci-index` scans one or more Git repositories and stores source files, code records (functions, classes, symbols, config entries), static-analysis findings from SARIF, and candidate relationships between records. `pci-mcp` exposes that index to Claude Code, Codex, OpenCode, or any other MCP client. `pci-doctor` inspects the local machine and prints the exact startup commands for the current hardware. Embeddings run locally by default on CPU, Apple Silicon via MLX, AMD, or NVIDIA, so indexed source text stays on the machine.
+An MCP server backed by Postgres/pgvector. `pci-index` scans one or more Git repositories and stores source files, code records (functions, classes, symbols, config entries), static-analysis findings from SARIF, and candidate relationships between records. `pci-mcp` exposes that index to Claude Code, Codex, OpenCode, or any other MCP client. `pci-doctor` inspects the local machine and prints the exact startup commands for the current hardware. Embeddings run locally by default, using Apple Silicon (MLX), AMD (ROCm), or NVIDIA (CUDA) hardware when available and falling back to CPU otherwise, so indexed source text stays on the machine.
 
 The package is generic by default. Project-specific behavior belongs in code profiles, with [`example.py`](src/project_code_intelligence/code_profiles/example.py) as the public starting point.
 
@@ -54,109 +54,21 @@ pci-index .
 pci-mcp-smoke .
 ```
 
-Then point your MCP client at `pci-mcp`. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md) for client-specific configuration and collection options.
+Then point your MCP client at `pci-mcp`. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md) for client-specific configuration.
 
 ---
 
-## Indexing
-
-Use `.` when you mean the current directory. You can also index one or more
-repositories without changing directories:
-
-```sh
-pci-index /path/to/repo-to-index
-pci-index /path/to/repo-a /path/to/repo-b
-```
-
-`pci-index` infers a collection name for you. A single repo path uses that repo
-directory name. Multiple repo paths use their common parent directory name. For
-a workspace with related repositories, run from the workspace and pass the repo
-directories:
-
-```sh
-cd /path/to/workspace
-pci-index service-api web-ui shared-lib
-```
-
-MCP repo filters then use those repo names, such as `service-api`, not
-absolute filesystem paths. Run `code_intel_status` without a repo filter to
-see the available collection and repo keys. Use `--collection` only when you
-want a name different from the inferred workspace name:
-
-```sh
-pci-index --collection workspace-name service-api web-ui shared-lib
-```
-
-For advanced ingest options, put them after `--`:
-
-```sh
-pci-index /path/to/repo-to-index -- --limit-files 100
-```
-
-SARIF files are discovered automatically under the selected repo paths. Obvious
-test fixtures such as `*-expected.sarif` under test directories are ignored
-unless passed explicitly with `--sarif`. The indexer records SARIF findings even
-when reports live in ignored output directories, and prints soft notes when
-freshness cannot be verified, for example when a report file is older than the
-indexed commit. Use `--sarif` for reports outside the selected repos, or
-`--no-profile-sarif` to disable automatic SARIF discovery.
-
-If indexing is interrupted, rerun the same command. `pci-index .` reuses the
-same snapshot when the Git tree is unchanged, keeps compatible existing
-embeddings, and fills in records that are still missing embeddings. In normal
-incremental mode it only reparses changed files.
-
-When upgrading this tool, reindex if release notes or local changes mention a
-parser, chunker, schema, or profile version bump. Those changes affect the
-records stored in Postgres, so old snapshots may not contain newly indexed
-metadata such as Makefile package pins.
-
-Text-only indexing is available as a fallback for bootstrap, debugging, or
-privacy-sensitive environments:
-
-```sh
-pci-index . --no-embed
-```
-
-For that mode, choose the Postgres-only command from `pci-doctor` and verify
-that the database is reachable. `pci-doctor` may still warn about the missing
-embedding endpoint, which is expected for a deliberate text-only run.
-
-To delete indexed data for one repo and rebuild it:
-
-```sh
-pci-index --reset .
-```
-
-This deletes snapshots, records, edges, embeddings, and findings for the
-selected collection and repo key only. Other repos and the schema are untouched.
-The command prints the resolved database target, asks for confirmation before
-deleting anything, and exits without scanning. Run `pci-index .` afterwards to
-rebuild the index.
-
-To delete all indexed data in the configured database while keeping the schema:
-
-```sh
-pci-index --reset-all
-```
-
-For non-interactive automation, add `--i-know-this-deletes-code-intel-db`.
-
-In a brand-new local repository, make an initial commit before scanning so the
-indexer has a Git `HEAD` snapshot.
-
 ## Supported Hardware
 
-`pci-doctor` is the source of truth for the current machine. It detects usable
-local runtimes and prints the exact startup command for each available path.
+`pci-doctor` is the source of truth for the current machine. It detects usable local runtimes and prints the exact startup command for each available path.
 
 | Path | Runtime | Notes |
 | --- | --- | --- |
 | CPU | FastEmbed | Portable default for local testing and machines without accelerator support. |
-| Apple Silicon | Core ML or llama.cpp Metal | Core ML can use ANE, GPU, and CPU; Docker is still useful for Postgres. |
+| Apple Silicon | MLX | Native MLX embedding server (`pci-apple-embed-server`) using the GPU; Docker is still useful for Postgres. |
 | AMD Ryzen AI NPU | Lemonade FLM | Experimental; requires supported XDNA hardware, driver, and firmware. |
-| AMD GPU | llama.cpp ROCm | Experimental; uses the `amdgpu` Compose profile. |
-| NVIDIA GPU | llama.cpp CUDA | Experimental; requires the NVIDIA driver and NVIDIA Container Toolkit. |
+| AMD GPU | llama.cpp ROCm | Uses the `amdgpu` Compose profile. |
+| NVIDIA GPU | llama.cpp CUDA | Requires the NVIDIA driver and NVIDIA Container Toolkit. |
 | Remote provider | OpenAI-compatible embeddings endpoint | Useful when local embeddings are not desired; source-derived text leaves the machine. |
 
 ## Installation
@@ -167,24 +79,13 @@ Install the CLI tools for your user with `uv`:
 uv tool install /path/to/project-code-intelligence
 ```
 
-This places `pci-doctor`, `pci-index`, `pci-mcp`, and the other console scripts
-on your PATH (usually `~/.local/bin`). Platform-specific optional dependencies
-are selected by the package metadata where supported.
-
-Make sure the tool path is on `PATH`:
+This places the console scripts on your PATH (usually `~/.local/bin`). Make sure that path is on `PATH`:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-After that, run commands from any repository:
-
-```sh
-cd /path/to/repo-to-index
-pci-index .
-```
-
-Without `uv`, create and activate a virtualenv first:
+Without `uv`, use a virtualenv:
 
 ```sh
 cd /path/to/project-code-intelligence
@@ -193,171 +94,56 @@ python -m venv .venv
 python -m pip install -e .
 ```
 
-### Development setup
-
-For contributing, use `uv sync` which creates a `.venv` in the project
-directory with dev tools (ruff, basedpyright, coverage, bandit) included
-automatically:
-
-```sh
-cd /path/to/project-code-intelligence
-uv sync
-```
-
-The shell wrapper scripts in the repository root (`./pci-doctor`, `./pci-index`,
-etc.) auto-detect `.venv/bin/python`, so `make` commands and direct
-`./pci-doctor` invocations work without activating the virtualenv.
-
-The installed console scripts are:
-
-- `pci-index`
-- `pci-doctor`
-- `pci-mcp`
-- `pci-mcp-smoke`
-- `pci-coreml-server`
-- `pci-embedding-bench`
-- `pci-fastembed-server`
-- `pci-llama-embed`
+The full list of installed commands lives in [docs/PUBLIC_API.md](docs/PUBLIC_API.md).
 
 ## MCP Setup
 
-Point Codex, Claude Code, OpenCode, or another MCP client at the installed
-`pci-mcp` command. Use `command -v pci-mcp` to find the absolute path if your
-client does not inherit your shell `PATH`.
+Point Codex, Claude Code, OpenCode, or another MCP client at the installed `pci-mcp` command. Use `command -v pci-mcp` to find the absolute path if your client does not inherit your shell `PATH`. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md) for setup examples, database configuration, and collection/repo filter guidance.
 
-For setup examples, database configuration, and collection/repo filter guidance,
-see [docs/MCP_SETUP.md](docs/MCP_SETUP.md).
+## Indexing
+
+`pci-index .` indexes the current Git repository. You can also pass multiple repo paths to index them as a workspace:
+
+```sh
+cd /path/to/workspace
+pci-index service-api web-ui shared-lib
+```
+
+`pci-index` infers a collection name from the paths. MCP tool filters then use repo names like `service-api`, not absolute filesystem paths. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md) for the collection model.
+
+Rerunning the same command is incremental: unchanged files are skipped and the Git snapshot is reused when the working tree hasn't changed. SARIF reports under the indexed repo paths are picked up automatically.
+
+To reset one repo's indexed data and rebuild it:
+
+```sh
+pci-index --reset .
+```
+
+For advanced flags (text-only mode, reset-all, custom SARIF locations, ingest tuning), see `pci-index --help`.
 
 ## Embeddings
 
-Embeddings are the expected path for normal use. They are what make the MCP
-index useful for semantic search instead of only exact text lookup.
+Embeddings power semantic search. Local CPU, NPU, and GPU embedding services all publish the same default endpoint at `http://127.0.0.1:18081/v1/embeddings`. Run only one local embedding service at a time. `pci-doctor` prints the right startup command for the current hardware.
 
-Local CPU, NPU, and GPU embedding services all publish the same host endpoint by
-default: `http://127.0.0.1:18081/v1/embeddings`. Run only one local embedding
-service at a time. Runtime-specific models have profile defaults.
+Default models download on first run.
 
-Run `pci-doctor` to see which embedding paths and models are available on the
-current machine:
-
-```sh
-pci-doctor
-```
-
-`pci-index` itself does not download models. The Docker Compose embedding
-profiles may download models into Docker volumes or ignored local paths.
-
-Remote embedding endpoints receive source-derived text. For private code, use a
-local endpoint or a provider you trust, and set
-`PROJECT_CODE_INTELLIGENCE_ALLOW_REMOTE_EMBEDDING=1` only intentionally.
-
-## Docker Compose Profiles
-
-Profiles are runtime choices, not project modes. The local database is isolated
-from the embedding services so users with an external Postgres/pgvector database
-can start embeddings without also starting a local database.
-
-| Profile or service | Use when |
-| --- | --- |
-| `pgvector` (`db`) | Local Postgres/pgvector database. Skip this when using an external database. |
-| `cpu` (`fastembed`) | Portable local semantic-search demo with FastEmbed. |
-| `npu` (`lemonade-npu`) | Experimental AMD Ryzen AI/XDNA NPU embeddings. |
-| `amdgpu` (`llama-rocm`) | Experimental AMD ROCm llama.cpp embeddings. |
-| `nvidia` (`llama-cuda`) | Experimental NVIDIA CUDA llama.cpp embeddings. |
-
-List the profiles with:
-
-```sh
-docker compose config --profiles
-```
-
-For a local database, start:
-
-```sh
-docker compose up -d pgvector
-```
-
-For embeddings only, start the specific service:
-
-```sh
-docker compose --profile cpu up -d --build fastembed
-docker compose --profile npu up -d lemonade-npu
-docker compose --profile amdgpu up -d --build llama-rocm
-docker compose --profile nvidia up -d --build llama-cuda
-```
-
-When unsure, use the commands from `pci-doctor`. The `cpu` profile is the
-portable local fallback.
-
-## What the MCP Server Provides
-
-The server exposes tools for:
-
-- checking indexed snapshot and embedding status
-- text and semantic search over indexed records
-- fetching individual records
-- following candidate relationships
-- searching SARIF/static-analysis findings
-- fetching CodeQL/SARIF code-flow steps
-
-The MCP server runs over stdio. Docker Compose is used for local dependencies,
-not for wrapping the MCP process.
-
-## Project Profiles
-
-The generic profile covers common source, docs, build files, config files, and
-SARIF input under the selected repo paths. A project can add its own profile for
-domain-specific file roles, metadata, records, security context, or extra SARIF
-locations.
-
-Private profiles do not need to be registered in this package. Put them on
-`PYTHONPATH` and select them with a fully qualified profile path:
-
-```sh
-PROJECT_CODE_INTELLIGENCE_PROFILE=my_project.code_profile:MyProjectProfile pci-index .
-```
-
-Profiles are ordinary Python code, so load them only from trusted local modules.
-
-## Development
-
-Run the local quality gate:
-
-```sh
-make check
-```
-
-Run the integration smoke. This starts the local Compose `pgvector` service if
-needed:
-
-```sh
-make integration-smoke
-```
-
-Useful docs:
-
-- [CONTRIBUTING.md](CONTRIBUTING.md): contributor workflow and guardrails
-- [docs/PUBLIC_API.md](docs/PUBLIC_API.md): supported CLI, MCP, config, and Python import surfaces
-- [docs/MCP_SETUP.md](docs/MCP_SETUP.md): MCP setup examples for Codex, Claude Code, and OpenCode
-- [docs/BENCHMARKS.md](docs/BENCHMARKS.md): local CPU/NPU/GPU benchmark notes
-- [.env.example](.env.example): available environment variables
-- [AGENTS.md](AGENTS.md): instructions for assistants working on this repo
+Remote embedding endpoints receive source-derived text. For private code, use a local endpoint or a provider you trust, and set `PROJECT_CODE_INTELLIGENCE_ALLOW_REMOTE_EMBEDDING=1` only intentionally.
 
 ## Privacy
 
-Do not publish database dumps, restore artifacts, SARIF output, embedding
-caches, model files, vector indexes, local MCP configs, or generated data from
-private repositories. These can contain source snippets, internal paths,
-symbols, findings, metadata, and embeddings derived from source text.
+Do not publish database dumps, restore artifacts, SARIF output, embedding caches, model files, vector indexes, local MCP configs, or generated data from private repositories. These can contain source snippets, internal paths, symbols, findings, metadata, and embeddings derived from source text.
 
-Remote embedding endpoints receive source-derived text. Use local embeddings for
-private code unless you have explicitly accepted the risk of sending that text to
-a remote provider.
+Remote embedding endpoints receive source-derived text. Use local embeddings for private code unless you have explicitly accepted the risk of sending that text to a remote provider.
 
-Collections help organize multiple repos in one database and prevent accidental
-cross-repo MCP results, but they are not a security boundary. Use separate
-databases or database users when repos need stronger isolation. See
-[docs/MCP_SETUP.md](docs/MCP_SETUP.md#security-model).
+Collections help organize multiple repos in one database and prevent accidental cross-repo MCP results, but they are not a security boundary. Use separate databases or database users when repos need stronger isolation. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md#security-model).
+
+## Documentation
+
+- [docs/MCP_SETUP.md](docs/MCP_SETUP.md) — MCP client configuration, collections, repo filters, security model
+- [docs/PUBLIC_API.md](docs/PUBLIC_API.md) — installed CLI commands, environment variables, MCP tool surface, Python imports
+- [.env.example](.env.example) — available environment variables
+- [AGENTS.md](AGENTS.md) — instructions for assistants working on this repo
+- [CONTRIBUTING.md](CONTRIBUTING.md) — contributor workflow, local checks, and guardrails
 
 ## License
 
