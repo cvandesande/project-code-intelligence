@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from project_code_intelligence.models import JsonObject
 
 _RESOLVED_MODEL_CACHE: dict[tuple[str, str], str] = {}
+_RESOLVED_FRAMEWORK_CACHE: dict[str, str | None] = {}
 
 
 def embedding_request_timeout_seconds() -> float:
@@ -108,7 +109,7 @@ def endpoint_is_local(endpoint: str) -> bool:
     return bool(hostname and endpoint_host_is_loopback(hostname))
 
 
-def local_endpoint_health_model(endpoint: str, *, timeout: float) -> str | None:
+def local_endpoint_health_payload(endpoint: str, *, timeout: float) -> dict[object, object] | None:
     health_url = endpoint_base_url(endpoint) + "/healthz"
     try:
         raw_response = http_client.read_text(health_url, timeout=timeout)
@@ -117,9 +118,36 @@ def local_endpoint_health_model(endpoint: str, *, timeout: float) -> str | None:
         return None
     if not isinstance(payload_value, dict):
         return None
-    payload = cast("dict[object, object]", payload_value)
-    model = payload.get("model")
-    return model.strip() if isinstance(model, str) and model.strip() else None
+    return cast("dict[object, object]", payload_value)
+
+
+def _stripped_string(payload: dict[object, object], key: str) -> str | None:
+    value = payload.get(key)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def local_endpoint_health_model(endpoint: str, *, timeout: float) -> str | None:
+    payload = local_endpoint_health_payload(endpoint, timeout=timeout)
+    return _stripped_string(payload, "model") if payload is not None else None
+
+
+def clear_embedding_endpoint_framework_cache() -> None:
+    """Clear cached framework probe results (intended for tests)."""
+    _RESOLVED_FRAMEWORK_CACHE.clear()
+
+
+def resolve_embedding_endpoint_framework(endpoint: str | None, *, timeout: float | None = None) -> str | None:
+    """Return the framework advertised by a local embedding server's /healthz, or None."""
+    if endpoint is None or not endpoint_is_local(endpoint):
+        return None
+    cache_key = endpoint.rstrip("/")
+    if cache_key in _RESOLVED_FRAMEWORK_CACHE:
+        return _RESOLVED_FRAMEWORK_CACHE[cache_key]
+    probe_timeout = embedding_model_resolve_timeout_seconds() if timeout is None else timeout
+    payload = local_endpoint_health_payload(endpoint, timeout=min(3.0, probe_timeout))
+    framework = _stripped_string(payload, "framework") if payload is not None else None
+    _RESOLVED_FRAMEWORK_CACHE[cache_key] = framework
+    return framework
 
 
 def model_name_from_object(value: object) -> str | None:

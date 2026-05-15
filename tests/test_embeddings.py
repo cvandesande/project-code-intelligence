@@ -6,7 +6,10 @@ import urllib.error
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
+from typing_extensions import override
+
 from project_code_intelligence import db
+from project_code_intelligence.embedding.endpoint import clear_embedding_endpoint_framework_cache
 from project_code_intelligence.embeddings import (
     EmbeddingBackend,
     EmbeddingEndpointUnavailableError,
@@ -21,6 +24,7 @@ from project_code_intelligence.embeddings import (
     endpoint_host_is_loopback,
     parse_embedding_items,
     require_compatible_embedding_contract,
+    resolve_embedding_endpoint_framework,
     resolve_embedding_endpoint_model,
     smaller_embedding_max_chars,
     validate_embedding_endpoint,
@@ -359,6 +363,77 @@ class EmbeddingContractTests(unittest.TestCase):
         self.assertEqual(embedded, [])
         self.assertEqual(skipped_count, 1)
         self.assertEqual(skipped, [("a", "context exceeded", 800)])
+
+
+class ResolveEmbeddingEndpointFrameworkTests(unittest.TestCase):
+    @override
+    def setUp(self) -> None:
+        clear_embedding_endpoint_framework_cache()
+
+    def test_returns_apple_mlx_from_healthz(self) -> None:
+        with patch(
+            "project_code_intelligence.embedding.endpoint.http_client.read_text",
+            return_value=json.dumps({
+                "ok": True,
+                "model": "mlx-community/Qwen3-Embedding-0.6B-8bit",
+                "framework": "Apple MLX",
+            }),
+        ):
+            framework = resolve_embedding_endpoint_framework("http://127.0.0.1:18091/v1/embeddings")
+
+        self.assertEqual(framework, "Apple MLX")
+
+    def test_returns_fastembed_cpu_from_healthz(self) -> None:
+        with patch(
+            "project_code_intelligence.embedding.endpoint.http_client.read_text",
+            return_value=json.dumps({
+                "ok": True,
+                "model": "jinaai/jina-embeddings-v2-base-code",
+                "framework": "Fastembed CPU",
+            }),
+        ):
+            framework = resolve_embedding_endpoint_framework("http://127.0.0.1:18092/v1/embeddings")
+
+        self.assertEqual(framework, "Fastembed CPU")
+
+    def test_returns_none_when_healthz_omits_field(self) -> None:
+        with patch(
+            "project_code_intelligence.embedding.endpoint.http_client.read_text",
+            return_value=json.dumps({"ok": True, "model": "some-third-party-model"}),
+        ):
+            framework = resolve_embedding_endpoint_framework("http://127.0.0.1:18093/v1/embeddings")
+
+        self.assertIsNone(framework)
+
+    def test_returns_none_for_remote_endpoint_without_probe(self) -> None:
+        with patch(
+            "project_code_intelligence.embedding.endpoint.http_client.read_text",
+        ) as read_text:
+            framework = resolve_embedding_endpoint_framework("https://f5ai.pd.f5net.com/v1/embeddings")
+
+        self.assertIsNone(framework)
+        read_text.assert_not_called()
+
+    def test_returns_none_when_endpoint_is_unreachable(self) -> None:
+        with patch(
+            "project_code_intelligence.embedding.endpoint.http_client.read_text",
+            side_effect=urllib.error.URLError("connection refused"),
+        ):
+            framework = resolve_embedding_endpoint_framework("http://127.0.0.1:18094/v1/embeddings")
+
+        self.assertIsNone(framework)
+
+    def test_caches_repeated_calls(self) -> None:
+        with patch(
+            "project_code_intelligence.embedding.endpoint.http_client.read_text",
+            return_value=json.dumps({"framework": "Apple MLX", "model": "x"}),
+        ) as read_text:
+            first = resolve_embedding_endpoint_framework("http://127.0.0.1:18095/v1/embeddings")
+            second = resolve_embedding_endpoint_framework("http://127.0.0.1:18095/v1/embeddings")
+
+        self.assertEqual(first, "Apple MLX")
+        self.assertEqual(second, "Apple MLX")
+        self.assertEqual(read_text.call_count, 1)
 
 
 if __name__ == "__main__":

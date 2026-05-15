@@ -88,6 +88,52 @@ class ProgressRenderingTests(unittest.TestCase):
             "codeintel @ 127.0.0.1:5433",
         )
 
+    def test_plan_event_captures_authoritative_framework(self) -> None:
+        emitter = progress.RichEmitter()
+
+        emit_without_live(
+            emitter,
+            "code_intel_plan",
+            {
+                "collection": "project-code-intelligence",
+                "repos": ["project-code-intelligence"],
+                "embedding_endpoint": "http://127.0.0.1:18081/v1/embeddings",
+                "embedding_model": "mlx-community/Qwen3-Embedding-0.6B-8bit",
+                "embedding_framework": "Apple MLX",
+            },
+        )
+
+        self.assertEqual(emitter.embedding_framework, "Apple MLX")
+        self.assertEqual(emitter.embedding_model, "mlx-community/Qwen3-Embedding-0.6B-8bit")
+        self.assertEqual(emitter.embedding_endpoint, "http://127.0.0.1:18081/v1/embeddings")
+
+    def test_plan_event_without_framework_keeps_endpoint_for_fallback(self) -> None:
+        emitter = progress.RichEmitter()
+
+        emit_without_live(
+            emitter,
+            "code_intel_plan",
+            {
+                "collection": "project-code-intelligence",
+                "repos": ["project-code-intelligence"],
+                "embedding_endpoint": "http://127.0.0.1:18081/v1/embeddings",
+                "embedding_model": "Qwen3-Embedding-0.6B-Q8_0.gguf",
+            },
+        )
+
+        self.assertIsNone(emitter.embedding_framework)
+        self.assertEqual(emitter.embedding_endpoint, "http://127.0.0.1:18081/v1/embeddings")
+        self.assertEqual(
+            progress.compact_endpoint_target(emitter.embedding_endpoint),
+            "127.0.0.1:18081",
+        )
+
+    def test_compact_endpoint_target_handles_remote_host(self) -> None:
+        self.assertEqual(
+            progress.compact_endpoint_target("https://f5ai.pd.f5net.com/v1/embeddings"),
+            "f5ai.pd.f5net.com",
+        )
+
     def test_live_progress_shows_current_repo_before_discovery_finishes(self) -> None:
         emitter = progress.RichEmitter()
 
