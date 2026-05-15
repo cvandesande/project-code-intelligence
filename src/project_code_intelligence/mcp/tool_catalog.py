@@ -21,15 +21,25 @@ class ToolDefinition:
     write_tool: bool = False
 
 
+# Shared property-description text. Lives once here so adding a new tool that
+# exposes the same filter doesn't re-litigate the gotchas in prose.
+_SOURCE_PATH_DESC = "Exact path match (not a prefix). For subtrees, use source_path_prefix where supported."
+_SOURCE_PATH_PREFIX_DESC = (
+    "Subtree filter (strict descendants, trailing slash optional). Must match stored paths "
+    "verbatim — include any repo segment. Mutex with source_path."
+)
+_CONFIDENCE_KIND_DESC = "'confirmed' = type-aware parser; 'heuristic_candidate' = heuristic parser."
+_SNIPPET_LENGTH_DESC = "Inline snippet size in chars. Lower for many results, raise for few."
+
+
 TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
     "code_intel_status": ToolDefinition(
-        "Check code intelligence snapshot, file, record, edge, and embedding state. Snapshots include "
-        "index_age_seconds (freshness), head_commit (current HEAD), head_matches_snapshot (whether "
-        "the index is up-to-date), and embed_record_types (the record types that were configured for "
-        "embedding when this snapshot was indexed — absent if the index ran without --embed). "
-        "File counts include untracked_files and dirty_files. "
-        "records_by_type includes embedded_records per type so you can compare against embed_record_types "
-        "to understand which types are expected to have embeddings and which are not.",
+        "Snapshot, file, record, edge, and embedding state for the indexed codebase. Each snapshot "
+        "carries index_age_seconds, head_commit, head_matches_snapshot, and embed_record_types "
+        "(the types configured for embedding at index time — absent if --embed wasn't passed). "
+        "records_by_type includes embedded_records per type for comparison against "
+        "embed_record_types. language_breakdown and directory_breakdown summarize the file "
+        "inventory in one call — prefer over paginating list_code_intel_files for project shape.",
         {
             "type": "object",
             "properties": {
@@ -42,31 +52,23 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         },
     ),
     "search_code_intel_text": ToolDefinition(
-        "Search or list code intelligence records. By default, plain multi-term searches use PostgreSQL "
-        "full-text search first, then automatically fall back to exact all-term and any-term matching "
-        "when full-text search returns no results. Omit query to enumerate records by filter "
-        "(e.g. parent_record_id, symbol) ordered by most recently updated. The query argument, when "
-        "supplied, must be non-empty. "
-        "source_path is an exact full-path filter, not a directory prefix; pass the complete relative "
-        "file path (e.g. 'agent/internal/grpc/grpc.go') to match. "
-        "Results are deduplicated by source location: when a code_chunk and a symbol_definition "
-        "cover the same lines, only the code_chunk is returned. Pass record_type='symbol_definition' "
-        "to see symbol definitions instead. "
-        "Results are compact by default: per-result snapshot/git/repo metadata is omitted and a short "
-        "code snippet is included inline so most navigational tasks need no follow-up call. "
-        "Pass verbose=true to restore all fields (snapshot_id, collection, repo, branch, commit_sha, "
-        "tree_sha, record_id, updated_at, confidence, tool, rule_id, severity). "
-        "When the auto fallback activates (query_strategy=all_terms_fallback), rank is null because "
-        "every result matched all terms equally — use fallback_reason to detect this case.",
+        "Search or list code intelligence records. Multi-term queries try PostgreSQL FTS first, "
+        "then fall back to all-term then any-term matching; query_strategy reports the path taken "
+        "(rank is null on all_terms_fallback — check fallback_reason). With query set, runs a "
+        "search (mode=search); without it, enumerates by filter (mode=enumerate) — pass mode "
+        "explicitly to fail on mismatch. Source-location dedup: code_chunk wins over "
+        "symbol_definition at the same lines; pass record_type='symbol_definition' to override. "
+        "Compact by default; verbose=true restores stripped fields.",
         {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "minLength": 1},
+                "mode": {"type": "string", "enum": ["search", "enumerate"]},
                 "query_mode": {
                     "type": "string",
                     "enum": ["auto", "websearch", "all_terms", "any_terms"],
-                    "description": "Defaults to auto. Use websearch for PostgreSQL full-text only, "
-                    "all_terms when every extracted term must match, or any_terms for broad fallback search.",
+                    "description": "auto (default) tries FTS then falls back; websearch = FTS only; "
+                    "all_terms = every term must match; any_terms = broad.",
                 },
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                 "collection": {"type": "string"},
@@ -75,8 +77,8 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "language": {"type": "string"},
                 "file_role": {"type": "string"},
                 "content_class": {"type": "string"},
-                "confidence_kind": {"type": "string"},
-                "source_path": {"type": "string"},
+                "confidence_kind": {"type": "string", "description": _CONFIDENCE_KIND_DESC},
+                "source_path": {"type": "string", "description": _SOURCE_PATH_DESC},
                 "symbol": {"type": "string"},
                 "parent_record_id": {"type": "string"},
                 "metadata_key": {"type": "string"},
@@ -85,18 +87,21 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
                 "verbose": {"type": "boolean"},
+                "snippet_length": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 800,
+                    "description": _SNIPPET_LENGTH_DESC,
+                },
             },
             "additionalProperties": False,
         },
     ),
     "search_code_intel_semantic": ToolDefinition(
-        "Embed a query with the configured embedding backend and search embedded code intelligence records. "
-        "Only record types listed in embed_record_types (visible in code_intel_status) have embeddings — "
-        "typically code_chunk and doc_section. symbol_definition records are not embedded by default, so "
-        "semantic search cannot find function/type definitions; use search_code_intel_text with the symbol "
-        "filter or source_path enumeration for those. "
-        "Results are compact by default: per-result snapshot/git/repo metadata is omitted and a short "
-        "code snippet is included inline. Pass verbose=true to restore all fields.",
+        "Vector search of indexed records via the configured embedding backend. Only record types "
+        "in embed_record_types (see code_intel_status) are searchable — symbol_definition is not "
+        "embedded by default; use search_code_intel_text for function/type lookups. Compact by "
+        "default; verbose=true restores all stripped fields.",
         {
             "type": "object",
             "properties": {
@@ -108,8 +113,8 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "language": {"type": "string"},
                 "file_role": {"type": "string"},
                 "content_class": {"type": "string"},
-                "confidence_kind": {"type": "string"},
-                "source_path": {"type": "string"},
+                "confidence_kind": {"type": "string", "description": _CONFIDENCE_KIND_DESC},
+                "source_path": {"type": "string", "description": _SOURCE_PATH_DESC},
                 "symbol": {"type": "string"},
                 "parent_record_id": {"type": "string"},
                 "metadata_key": {"type": "string"},
@@ -118,45 +123,56 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
                 "verbose": {"type": "boolean"},
+                "snippet_length": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 800,
+                    "description": _SNIPPET_LENGTH_DESC,
+                },
             },
             "required": ["query"],
             "additionalProperties": False,
         },
     ),
     "get_code_intel_record": ToolDefinition(
-        "Fetch one code intelligence record by numeric ID, including display content.",
+        "Fetch records by stable record_id (returned by search and related-edge results, e.g. "
+        "'README.md::doc::000001'). Pass record_id (singular) for one record → {result: {...}} "
+        "or {found: false}; record_ids (array, max 100) for a batch → {results: [...], "
+        "missing: [...]}. Exactly one is required. Compact by default; verbose=true keeps the "
+        "internal int id and heavy metadata like metadata.doc_links.",
         {
             "type": "object",
             "properties": {
-                "id": {"type": "integer", "minimum": 1},
+                "record_id": {"type": "string", "minLength": 1},
+                "record_ids": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "minItems": 1,
+                    "maxItems": 100,
+                },
+                "collection": {"type": "string"},
+                "repo": {"type": "string"},
+                "snapshot_id": {"type": "integer", "minimum": 1},
+                "include_historical": {"type": "boolean"},
                 "include_content": {"type": "boolean"},
+                "verbose": {"type": "boolean"},
             },
-            "required": ["id"],
             "additionalProperties": False,
         },
     ),
     "related_code_intel": ToolDefinition(
-        "Return code intelligence graph edges related to a record id or symbol, "
-        "joined with source and target record details so a single call resolves both "
-        "ends of every edge. At least one of record_id or symbol must be provided. "
-        "For call_candidate edges: source = caller, target = callee. Querying by "
-        "record_id returns all edges where that record is source or target. Querying "
-        "by symbol matches on source_symbol or target_symbol and typically surfaces "
-        "callers of functions with that name across the whole codebase. "
-        "Filter by edge_type ('call_candidate' for function calls, "
-        "'include' for C/C++ #include relationships) when you only want one kind of "
-        "relationship. For short, common names (Close, Read, Write, etc.) expect "
-        "many heuristic_candidate edges — use a more specific record_id instead of symbol "
-        "to reduce noise. confidence_kind='confirmed' edges are only produced by "
-        "type-aware parsers; heuristic parsers (stdlib-heuristic-*) produce "
-        "heuristic_candidate edges exclusively.",
+        "Return graph edges related to a record_id or symbol, joined with source and target "
+        "record details. At least one of record_id or symbol is required. For call_candidate "
+        "edges, source = caller, target = callee. Symbol queries match both ends — prefer "
+        "record_id for common names (Close/Read/Write) to avoid noise. edge_type filters to a "
+        "kind: 'call_candidate' for calls, 'include' for C/C++ #include.",
         {
             "type": "object",
             "properties": {
                 "record_id": {"type": "string"},
                 "symbol": {"type": "string"},
                 "edge_type": {"type": "string"},
-                "confidence_kind": {"type": "string"},
+                "confidence_kind": {"type": "string", "description": _CONFIDENCE_KIND_DESC},
                 "collection": {"type": "string"},
                 "repo": {"type": "string"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100},
@@ -168,12 +184,9 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         },
     ),
     "list_code_intel_files": ToolDefinition(
-        "List indexed source files filtered by language, role, content class, or skip status. "
-        "Use this to discover the shape of the codebase (e.g. all test files, only Python sources, "
-        "files that were skipped during ingestion). File-level language metadata (go_functions, "
-        "go_imports, etc.) is omitted by default; pass include_metadata=true to include it. "
-        "source_path is an exact full-path filter (e.g. 'agent/internal/grpc/grpc.go'), not a "
-        "directory prefix — passing a directory path returns no results.",
+        "List indexed source files filtered by language, role, content class, or skip status. Use "
+        "this to discover the shape of the codebase (test files, sources by language, files skipped "
+        "at ingestion). Compact by default; verbose=true restores every column including metadata.",
         {
             "type": "object",
             "properties": {
@@ -183,7 +196,8 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "language": {"type": "string"},
                 "file_role": {"type": "string"},
                 "content_class": {"type": "string"},
-                "source_path": {"type": "string"},
+                "source_path": {"type": "string", "description": _SOURCE_PATH_DESC},
+                "source_path_prefix": {"type": "string", "description": _SOURCE_PATH_PREFIX_DESC},
                 "is_test": {"type": "boolean"},
                 "is_doc": {"type": "boolean"},
                 "is_generated": {"type": "boolean"},
@@ -192,7 +206,7 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "is_build": {"type": "boolean"},
                 "is_config": {"type": "boolean"},
                 "only_skipped": {"type": "boolean"},
-                "include_metadata": {"type": "boolean"},
+                "verbose": {"type": "boolean"},
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
             },
@@ -210,7 +224,8 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "repo": {"type": "string"},
                 "language": {"type": "string"},
                 "parser": {"type": "string"},
-                "source_path": {"type": "string"},
+                "source_path": {"type": "string", "description": _SOURCE_PATH_DESC},
+                "source_path_prefix": {"type": "string", "description": _SOURCE_PATH_PREFIX_DESC},
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
             },
@@ -218,11 +233,10 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         },
     ),
     "search_static_findings": ToolDefinition(
-        "Search SARIF/static-analysis findings with exact filters. "
-        "This tool covers SARIF-based findings only (populated by pci-index --sarif). "
-        "Heuristic security patterns detected during indexing (e.g. shell backtick usage, "
-        "insecure API calls) are stored as security_pattern records and are accessible via "
-        "search_code_intel_text with record_type='security_pattern', not through this tool.",
+        "Search SARIF/static-analysis findings (populated by pci-index --sarif) with exact "
+        "filters. Heuristic security patterns detected during indexing are stored as "
+        "security_pattern records — fetch those via search_code_intel_text with "
+        "record_type='security_pattern', not this tool.",
         {
             "type": "object",
             "properties": {
@@ -233,7 +247,7 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "rule_id": {"type": "string"},
                 "level": {"type": "string"},
                 "baseline_state": {"type": "string"},
-                "source_path": {"type": "string"},
+                "source_path": {"type": "string", "description": _SOURCE_PATH_DESC},
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
             },

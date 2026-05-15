@@ -52,18 +52,27 @@ class _SearchFilterArgs(StrictArgs):
 
 class SearchCodeIntelTextArgs(_SearchFilterArgs):
     query: str | None = Field(default=None, min_length=1)
+    mode: Literal["search", "enumerate"] | None = None
     query_mode: Literal["auto", "websearch", "all_terms", "any_terms"] | None = None
     limit: int | None = Field(default=None, ge=1, le=50)
+    snippet_length: int | None = Field(default=None, ge=1, le=800)
 
 
 class SearchCodeIntelSemanticArgs(_SearchFilterArgs):
     query: str
     limit: int | None = Field(default=None, ge=1, le=50)
+    snippet_length: int | None = Field(default=None, ge=1, le=800)
 
 
 class GetCodeIntelRecordArgs(StrictArgs):
-    id: int = Field(ge=1)
+    record_id: str | None = Field(default=None, min_length=1)
+    record_ids: list[str] | None = Field(default=None, min_length=1, max_length=100)
+    collection: str | None = None
+    repo: str | None = None
+    snapshot_id: int | None = Field(default=None, ge=1)
+    include_historical: bool | None = None
     include_content: bool | None = None
+    verbose: bool | None = None
 
 
 class RelatedCodeIntelArgs(StrictArgs):
@@ -87,6 +96,7 @@ class ListCodeIntelFilesArgs(StrictArgs):
     file_role: str | None = None
     content_class: str | None = None
     source_path: str | None = None
+    source_path_prefix: str | None = None
     is_test: bool | None = None
     is_doc: bool | None = None
     is_generated: bool | None = None
@@ -95,7 +105,7 @@ class ListCodeIntelFilesArgs(StrictArgs):
     is_build: bool | None = None
     is_config: bool | None = None
     only_skipped: bool | None = None
-    include_metadata: bool | None = None
+    verbose: bool | None = None
     snapshot_id: int | None = Field(default=None, ge=1)
     include_historical: bool | None = None
 
@@ -107,6 +117,7 @@ class ListCodeIntelParserFailuresArgs(StrictArgs):
     language: str | None = None
     parser: str | None = None
     source_path: str | None = None
+    source_path_prefix: str | None = None
     snapshot_id: int | None = Field(default=None, ge=1)
     include_historical: bool | None = None
 

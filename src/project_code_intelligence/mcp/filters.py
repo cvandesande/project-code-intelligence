@@ -97,7 +97,11 @@ def snapshot_scope(args: Json) -> tuple[str, int | None]:
 
 def snapshot_scope_response(args: Json) -> Json:
     scope, snapshot_id = snapshot_scope(args)
-    result: Json = {"snapshot_scope": scope}
+    result: Json = {}
+    # "latest" is the default — only echo when the caller explicitly widened the
+    # scope (snapshot_id pin or include_historical).
+    if scope != "latest":
+        result["snapshot_scope"] = scope
     if snapshot_id is not None:
         result["snapshot_id"] = snapshot_id
     return result

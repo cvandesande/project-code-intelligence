@@ -517,7 +517,8 @@ class McpQueryTests(unittest.TestCase):
         self.assertIn("r.snapshot_id", sql)
         self.assertIn("project_code_intel_snapshots latest_snapshot", sql)
         self.assertEqual(params, ["test", "sample-repo"])
-        self.assertEqual(snapshot_scope_response({}), {"snapshot_scope": "latest"})
+        # "latest" is the implicit default — only non-default scopes are echoed.
+        self.assertEqual(snapshot_scope_response({}), {})
 
     def test_mcp_record_queries_can_include_historical_snapshots(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
