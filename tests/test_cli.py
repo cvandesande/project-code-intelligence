@@ -10,6 +10,7 @@ from typing import cast
 from unittest.mock import patch
 
 from project_code_intelligence import cli
+from project_code_intelligence.embeddings import EmbeddingEndpointUnavailableError
 
 
 def mcp_response(payload: dict[str, object]) -> dict[str, object]:
@@ -303,6 +304,137 @@ class CliWrapperTests(unittest.TestCase):
         result = cast("dict[str, object]", payload["result"])
         content = cast("list[dict[str, object]]", result["content"])
         self.assertIn("code intelligence schema is not initialized", str(content[0]["text"]))
+
+
+class IndexStartupTests(unittest.TestCase):
+    def test_pci_index_startup_header_shown_before_ingest(self) -> None:
+        call_order: list[str] = []
+
+        def fake_startup(_parsed: object, *, embed: object, endpoint: object, model: object) -> bool:
+            del embed, endpoint, model
+            call_order.append("startup")
+            return True
+
+        def fake_ingest_main(_args: list[str]) -> int:
+            call_order.append("ingest")
+            return 0
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("project_code_intelligence.cli.ingest_code_intel.cli_main", side_effect=fake_ingest_main),
+            patch("project_code_intelligence.cli._resolve_index_embedding", return_value=(None, None)),
+            patch("project_code_intelligence.cli.print_index_startup", side_effect=fake_startup),
+        ):
+            status = cli.index_main([".", "--no-embed", "--dry-run"])
+
+        self.assertEqual(status, 0)
+        self.assertEqual(call_order, ["startup", "ingest"])
+
+    def test_pci_index_exits_early_when_embedding_preflight_fails(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("project_code_intelligence.cli.ingest_code_intel.cli_main") as ingest_main,
+            patch(
+                "project_code_intelligence.cli._resolve_index_embedding",
+                return_value=("http://127.0.0.1:18081/v1/embeddings", "test-model"),
+            ),
+            patch(
+                "project_code_intelligence.cli.preflight_embedding_endpoint",
+                side_effect=EmbeddingEndpointUnavailableError("endpoint down"),
+            ),
+            patch("sys.stderr", io.StringIO()),
+        ):
+            status = cli.index_main(["."])
+
+        self.assertEqual(status, 1)
+        ingest_main.assert_not_called()
+
+    def test_pci_index_reset_skips_startup_header(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("project_code_intelligence.cli.ingest_code_intel.cli_main", return_value=0),
+            patch("project_code_intelligence.cli.print_index_startup") as mock_startup,
+        ):
+            status = cli.index_main(["--reset", "--i-know-this-deletes-code-intel-db", "."])
+
+        self.assertEqual(status, 0)
+        mock_startup.assert_not_called()
+
+    def test_pci_index_reset_all_skips_startup_header(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("project_code_intelligence.cli.ingest_code_intel.cli_main", return_value=0),
+            patch("project_code_intelligence.cli.print_index_startup") as mock_startup,
+        ):
+            status = cli.index_main(["--reset-all", "--i-know-this-deletes-code-intel-db"])
+
+        self.assertEqual(status, 0)
+        mock_startup.assert_not_called()
+
+    def test_pci_index_json_mode_skips_startup_header(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("project_code_intelligence.cli.ingest_code_intel.cli_main", return_value=0),
+            patch("project_code_intelligence.cli._resolve_index_embedding", return_value=(None, None)),
+            patch("project_code_intelligence.cli.print_index_startup") as mock_startup,
+        ):
+            status = cli.index_main([".", "--json", "--dry-run"])
+
+        self.assertEqual(status, 0)
+        mock_startup.assert_not_called()
+
+    def test_pci_index_dry_run_skips_preflight(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("project_code_intelligence.cli.ingest_code_intel.cli_main", return_value=0),
+            patch(
+                "project_code_intelligence.cli._resolve_index_embedding",
+                return_value=("http://127.0.0.1:18081/v1/embeddings", "test-model"),
+            ),
+            patch("project_code_intelligence.cli.preflight_embedding_endpoint") as mock_preflight,
+            patch("sys.stderr", io.StringIO()),
+        ):
+            status = cli.index_main([".", "--dry-run"])
+
+        self.assertEqual(status, 0)
+        mock_preflight.assert_not_called()
+
+    def test_pci_index_no_embed_skips_preflight(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("project_code_intelligence.cli.ingest_code_intel.cli_main", return_value=0),
+            patch("project_code_intelligence.cli.preflight_embedding_endpoint") as mock_preflight,
+            patch("sys.stderr", io.StringIO()),
+        ):
+            status = cli.index_main([".", "--no-embed", "--dry-run"])
+
+        self.assertEqual(status, 0)
+        mock_preflight.assert_not_called()
+
+    def test_pci_index_startup_header_passes_embedding_info_from_resolver(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_startup(_parsed: object, *, embed: object, endpoint: object, model: object) -> bool:
+            captured["embed"] = embed
+            captured["endpoint"] = endpoint
+            captured["model"] = model
+            return True
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("project_code_intelligence.cli.ingest_code_intel.cli_main", return_value=0),
+            patch(
+                "project_code_intelligence.cli._resolve_index_embedding",
+                return_value=("http://127.0.0.1:18081/v1/embeddings", "resolved-model"),
+            ),
+            patch("project_code_intelligence.cli.print_index_startup", side_effect=fake_startup),
+        ):
+            status = cli.index_main([".", "--dry-run"])
+
+        self.assertEqual(status, 0)
+        self.assertEqual(captured["endpoint"], "http://127.0.0.1:18081/v1/embeddings")
+        self.assertEqual(captured["model"], "resolved-model")
+        self.assertTrue(captured["embed"])
 
     def test_mcp_smoke_fails_on_probe_payload_error(self) -> None:
         def fake_mcp_call(

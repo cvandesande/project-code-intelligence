@@ -11,7 +11,11 @@ from typing import cast
 
 from project_code_intelligence import config, console_ui, ingest_code_intel, mcp_smoke_render, process, progress
 from project_code_intelligence.common import default_collection
-from project_code_intelligence.embeddings import resolve_embedding_endpoint_model
+from project_code_intelligence.embeddings import (
+    EmbeddingEndpointUnavailableError,
+    preflight_embedding_endpoint,
+    resolve_embedding_endpoint_model,
+)
 
 DEFAULT_EMBED_RECORD_TYPES = (
     "code_chunk,package_definition,config_symbol,patch_hunk,dts_node,"
@@ -188,7 +192,19 @@ def forwarded_index_args(parsed: IndexNamespace, passthrough: list[str]) -> list
     return forwarded
 
 
-def index_embedding_args(*, embed_only: bool) -> list[str]:
+def _resolve_index_embedding() -> tuple[str | None, str | None]:
+    """Return (endpoint, model) for the current embedding config, or (None, None)."""
+    endpoint = config.default_embedding_endpoint(local_default=True)
+    if not endpoint:
+        return None, None
+    model = resolve_embedding_endpoint_model(
+        endpoint,
+        config.default_embedding_endpoint_model(endpoint=endpoint),
+    )
+    return endpoint, model
+
+
+def index_embedding_args(*, embed_only: bool, endpoint: str | None, model: str | None) -> list[str]:
     embedding_args = [
         "--embedding-batch-size",
         os.environ["PROJECT_CODE_INTELLIGENCE_EMBEDDING_BATCH_SIZE"],
@@ -197,13 +213,8 @@ def index_embedding_args(*, embed_only: bool) -> list[str]:
         "--embed-record-types",
         os.environ["PROJECT_CODE_INTELLIGENCE_EMBED_RECORD_TYPES"],
     ]
-    endpoint = config.default_embedding_endpoint(local_default=True)
     if endpoint:
-        model = resolve_embedding_endpoint_model(
-            endpoint,
-            config.default_embedding_endpoint_model(endpoint=endpoint),
-        )
-        embedding_args.extend(["--embedding-endpoint", endpoint, "--embedding-endpoint-model", model])
+        embedding_args.extend(["--embedding-endpoint", endpoint, "--embedding-endpoint-model", model or ""])
     else:
         embedding_args.append("--llama-embed")
     if embed_only:
@@ -215,6 +226,30 @@ def index_embedding_args(*, embed_only: bool) -> list[str]:
     return embedding_args
 
 
+def print_index_startup(
+    parsed: IndexNamespace,
+    *,
+    embed: bool,
+    endpoint: str | None,
+    model: str | None,
+) -> bool:
+    """Run an embedding preflight check before indexing begins.
+
+    Produces no output on success — embedding details appear in the final result
+    panel. On failure, prints the error to stderr and returns False so the caller
+    can exit before any work starts.
+    """
+    if not embed or not endpoint or parsed.dry_run:
+        return True
+    try:
+        preflight_embedding_endpoint(endpoint, model or "")
+    except EmbeddingEndpointUnavailableError as exc:
+        use_color = console_ui.should_emit_pretty(sys.stderr)
+        console_ui.build_console(file=sys.stderr, color=use_color).print(str(exc))
+        return False
+    return True
+
+
 def index_main(argv: list[str] | None = None) -> int:
     parsed, passthrough = parse_index_args(argv)
     set_index_environment_defaults()
@@ -222,8 +257,26 @@ def index_main(argv: list[str] | None = None) -> int:
     forwarded = forwarded_index_args(parsed, passthrough)
     embed = config.env_bool("PROJECT_CODE_INTELLIGENCE_EMBED")
     embed_only = config.env_bool("PROJECT_CODE_INTELLIGENCE_EMBED_ONLY")
+
+    embedding_endpoint: str | None = None
+    embedding_model: str | None = None
     if (embed or embed_only) and not parsed.reset_code_intel:
-        forwarded = [*index_embedding_args(embed_only=embed_only), *forwarded]
+        embedding_endpoint, embedding_model = _resolve_index_embedding()
+        forwarded = [
+            *index_embedding_args(embed_only=embed_only, endpoint=embedding_endpoint, model=embedding_model),
+            *forwarded,
+        ]
+
+    is_reset = parsed.reset_code_intel or parsed.reset_all_code_intel
+    if (
+        not parsed.json
+        and not is_reset
+        and not print_index_startup(
+            parsed, embed=embed or embed_only, endpoint=embedding_endpoint, model=embedding_model
+        )
+    ):
+        return 1
+
     if parsed.json:
         os.environ["PROJECT_CODE_INTELLIGENCE_OUTPUT"] = "json"
     _ = progress.set_emitter(progress.detect_progress_mode(requested="json" if parsed.json else None))
