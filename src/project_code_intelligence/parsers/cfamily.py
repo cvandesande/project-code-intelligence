@@ -213,6 +213,32 @@ def go_import_paths(text: str) -> list[str]:
     return sorted(set(imports))
 
 
+# Go builtins (https://pkg.go.dev/builtin). Edges to these names are never
+# resolvable to a definition in this codebase — and a user-defined symbol with
+# the same name (e.g. a routeRuleErrors.append method) would otherwise capture
+# every call to the builtin via the name-based edge resolver.
+GO_BUILTIN_NAMES: frozenset[str] = frozenset({
+    "append",
+    "cap",
+    "clear",
+    "close",
+    "complex",
+    "copy",
+    "delete",
+    "imag",
+    "len",
+    "make",
+    "max",
+    "min",
+    "new",
+    "panic",
+    "print",
+    "println",
+    "real",
+    "recover",
+})
+
+
 def go_records(
     intel_file: IntelFile, text: str, max_chars: int, overlap_lines: int
 ) -> tuple[list[IntelRecord], list[IntelEdge]]:
@@ -220,8 +246,8 @@ def go_records(
     edges: list[IntelEdge] = []
     lines = text.splitlines()
     offsets = line_offsets(text)
-    package_match = re.search(r"(?m)^\s*package\s+([A-Za-z_][A-Za-z0-9_]*)", text)
-    imports_flat = go_import_paths(text)
+    # Package name and import list live on the file row via the language profile
+    # (go_package / go_imports). Per-record metadata stays minimal.
     for idx, line in enumerate(lines):
         match = re.match(
             r"^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]+\])?\s*\(",
@@ -240,12 +266,9 @@ def go_records(
                 line_start=idx + 1,
                 line_end=line_end,
                 body=body,
-                metadata={
-                    "package_name": package_match.group(1) if package_match else None,
-                    "imports": imports_flat[:80],
-                    "body_truncated": truncated,
-                },
+                metadata={"body_truncated": truncated},
                 confidence_kind="approximate_fact",
+                non_resolvable_targets=GO_BUILTIN_NAMES,
             ),
         )
         records.extend([symbol, chunk])
@@ -262,17 +285,107 @@ def go_records(
                 line_start=line,
                 line_end=line_end,
                 body=body,
-                metadata={
-                    "package_name": package_match.group(1) if package_match else None,
-                    "body_truncated": truncated,
-                },
+                metadata={"body_truncated": truncated},
                 confidence_kind="approximate_fact",
+                non_resolvable_targets=GO_BUILTIN_NAMES,
             ),
         )
         records.extend([symbol, chunk])
     if not records:
         records.extend(line_window_records(intel_file, text, max_chars, overlap_lines))
     return records, edges
+
+
+# Rust keywords + common Option/Result/&str/String/Iter methods. Edges to these
+# names are pure noise — they appear in nearly every function body and the
+# name-based SQL resolver would otherwise bind them to any user-defined symbol
+# that happens to share the name.
+RUST_NON_RESOLVABLE_NAMES: frozenset[str] = frozenset({
+    # Keywords
+    "as",
+    "async",
+    "await",
+    "break",
+    "const",
+    "continue",
+    "crate",
+    "dyn",
+    "else",
+    "enum",
+    "extern",
+    "false",
+    "fn",
+    "for",
+    "if",
+    "impl",
+    "in",
+    "let",
+    "loop",
+    "match",
+    "mod",
+    "move",
+    "mut",
+    "pub",
+    "ref",
+    "return",
+    "self",
+    "Self",
+    "static",
+    "struct",
+    "super",
+    "trait",
+    "true",
+    "type",
+    "unsafe",
+    "use",
+    "where",
+    "while",
+    # Common Option/Result methods
+    "and_then",
+    "err",
+    "expect",
+    "is_err",
+    "is_none",
+    "is_ok",
+    "is_some",
+    "map",
+    "map_err",
+    "ok",
+    "ok_or",
+    "ok_or_else",
+    "or",
+    "or_else",
+    "unwrap",
+    "unwrap_or",
+    "unwrap_or_default",
+    "unwrap_or_else",
+    # Common iterator / collection methods
+    "collect",
+    "contains",
+    "ends_with",
+    "filter",
+    "find",
+    "into_iter",
+    "iter",
+    "iter_mut",
+    "len",
+    "next",
+    "push",
+    "pop",
+    "starts_with",
+    # Common conversion methods
+    "as_mut",
+    "as_ref",
+    "as_str",
+    "clone",
+    "from",
+    "into",
+    "to_owned",
+    "to_str",
+    "to_string",
+    # Common predicate / size methods
+    "is_empty",
+})
 
 
 def rust_records(
@@ -303,6 +416,7 @@ def rust_records(
                 body=body,
                 metadata={"body_truncated": truncated},
                 confidence_kind="approximate_fact",
+                non_resolvable_targets=RUST_NON_RESOLVABLE_NAMES,
             ),
         )
         records.extend([symbol, chunk])

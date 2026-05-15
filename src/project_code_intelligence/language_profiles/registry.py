@@ -89,3 +89,18 @@ def language_metadata_keys() -> list[str]:
             if key not in keys:
                 keys.append(key)
     return keys
+
+
+def language_file_only_metadata_keys() -> frozenset[str]:
+    """Keys produced by any language profile that should not propagate to records.
+
+    Anything declared in metadata_keys but not in record_metadata_keys ends up
+    here. Used by `make_record` to strip sibling-list data from per-record
+    metadata at construction time.
+    """
+    all_keys: set[str] = set()
+    propagating: set[str] = set()
+    for profile in LANGUAGE_PROFILES:
+        all_keys.update(profile.metadata_keys)
+        propagating.update(profile.record_metadata_keys)
+    return frozenset(all_keys - propagating)

@@ -92,4 +92,8 @@ GO_PROFILE = LanguageProfile(
     languages=frozenset({"go"}),
     metadata_keys=GO_METADATA_KEYS,
     file_metadata=go_file_metadata,
+    # go_package is a single string identifying the file's package — useful per
+    # record. The sibling lists (go_imports/go_functions/go_methods/etc.) stay
+    # on the file row only.
+    record_metadata_keys=("go_package",),
 )

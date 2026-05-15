@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -35,6 +36,7 @@ from project_code_intelligence.ingest_code_intel import (
     validate_args,
     warning_for_sarif_mtime,
 )
+from project_code_intelligence.language_profiles.go import go_file_metadata
 from project_code_intelligence.mcp.filters import (
     code_intel_clauses,
     scoped_snapshot_clauses,
@@ -42,7 +44,7 @@ from project_code_intelligence.mcp.filters import (
     static_finding_clauses,
 )
 from project_code_intelligence.models import IntelFile, JsonValue, Snapshot
-from project_code_intelligence.parsers import go_records, make_records, python_records
+from project_code_intelligence.parsers import go_records, make_records, python_records, rust_records
 from project_code_intelligence.records import line_for_offset_with_index, line_offsets, line_window_records
 from project_code_intelligence.runtime import RuntimeMetrics
 from project_code_intelligence.sarif import (
@@ -439,6 +441,92 @@ class ParserAndRuntimeTests(unittest.TestCase):
         symbols = {record.symbol for record in records if record.record_type == "symbol_definition"}
 
         self.assertIn("Map", symbols)
+
+    def test_go_records_skip_call_edges_to_builtins(self) -> None:
+        # Without the blocklist, `append` here would emit a heuristic edge whose
+        # target_symbol="append", which the SQL resolver would later bind to any
+        # user-defined symbol named "append" in the same snapshot.
+        text = "\n".join([
+            "package main",
+            "",
+            "func Acc(xs []int, x int) []int {",
+            "    helper(xs)",
+            "    return append(xs, x)",
+            "}",
+        ])
+
+        _records, edges = go_records(fixture_file("main.go", "go"), text, 2400, 0)
+        targets = {edge.target_symbol for edge in edges}
+
+        self.assertIn("helper", targets)
+        self.assertNotIn("append", targets)
+
+    def test_rust_records_filter_keyword_and_method_edges(self) -> None:
+        # The Rust parser is heuristic: extract_referenced_symbols pulls every
+        # identifier-shaped token from the body. Without the non_resolvable_targets
+        # filter, keywords (let/pub/ref) and ubiquitous Option/Result methods
+        # (unwrap/ok_or_else/map_err) would emit call_candidate edges and the SQL
+        # resolver would bind them to any same-named user symbol.
+        text = "\n".join([
+            "pub fn validate(&self) -> Result<()> {",
+            "    let parsed = self.parse_config_file()?;",
+            "    let merged = build_merged_ast_if_needed(&parsed)",
+            "        .map_err(|e| Error::new(e.to_string()))",
+            "        .ok_or_else(|| Error::missing())?;",
+            "    Ok(merged)",
+            "}",
+        ])
+        _records, edges = rust_records(fixture_file("lib.rs", "rust"), text, 2400, 0)
+        targets = {edge.target_symbol for edge in edges}
+
+        self.assertIn("parse_config_file", targets)
+        self.assertIn("build_merged_ast_if_needed", targets)
+        for noise in ("let", "pub", "ref", "unwrap", "ok_or_else", "map_err", "to_string"):
+            self.assertNotIn(noise, targets, msg=f"unexpected edge to {noise!r}")
+
+    def test_rust_records_strip_noise_from_symbols_referenced(self) -> None:
+        text = "\n".join([
+            "pub fn handler(&self) {",
+            "    let result = self.fetch().unwrap_or_default();",
+            "    result.to_string()",
+            "}",
+        ])
+        records, _edges = rust_records(fixture_file("lib.rs", "rust"), text, 2400, 0)
+        chunk = next(r for r in records if r.record_type == "code_chunk")
+        symbols_referenced = chunk.metadata.get("symbols_referenced", [])
+        if not isinstance(symbols_referenced, list):
+            self.fail("symbols_referenced should be a list")
+        names = {str(s) for s in symbols_referenced}
+
+        # Real symbol still surfaces.
+        self.assertIn("fetch", names)
+        # Noise is gone from the metadata view too — same set drives both.
+        for noise in ("let", "pub", "unwrap_or_default", "to_string"):
+            self.assertNotIn(noise, names, msg=f"noise {noise!r} leaked into symbols_referenced")
+
+    def test_go_records_keep_file_only_metadata_off_records(self) -> None:
+        # Simulate what inventory.py does: populate file metadata via the Go
+        # language profile, then build records. Sibling-list keys belong on the
+        # file row, not duplicated onto every per-function record.
+        text = "\n".join([
+            "package main",
+            "",
+            'import "context"',
+            "",
+            "func Alpha() {}",
+            "func Beta() {}",
+        ])
+        intel_file = fixture_file("main.go", "go")
+        intel_file = replace(intel_file, metadata=dict(go_file_metadata("main.go", text)))
+        records, _edges = go_records(intel_file, text, 2400, 0)
+        function_records = [r for r in records if r.symbol_kind == "function"]
+        self.assertTrue(function_records)
+        for record in function_records:
+            self.assertNotIn("go_functions", record.metadata)
+            self.assertNotIn("go_imports", record.metadata)
+            self.assertNotIn("go_methods", record.metadata)
+            # go_package is single-value and explicitly propagated.
+            self.assertEqual(record.metadata.get("go_package"), "main")
 
     def test_make_records_include_top_level_package_pins_when_blocks_exist(self) -> None:
         text = "\n".join([
