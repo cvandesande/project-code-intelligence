@@ -1,65 +1,40 @@
 # Project Code Intelligence
 
-Local codebase mapping and semantic retrieval for coding agents.
+Coding agents are only as good as the context they get. Reading isn't the problem. Knowing what to read is.
 
-`project-code-intelligence` indexes one or more Git repositories into
-Postgres/pgvector and exposes the result through a small stdio MCP server.
+## The actual problem
 
-The goal is higher-quality agent results: reuse a local code-intelligence index
-instead of repeatedly asking an assistant to re-read the same repository. The
-index combines semantic search with a structured map of the codebase, so an
-assistant can retrieve relevant context, fetch exact records, inspect metadata,
-follow likely relationships, and search static-analysis findings.
+When an agent works through a codebase without tooling, it reads files to find what it needs. The waste isn't in the reading itself — it's in the speculative loading that comes before. A file gets opened because it *might* contain what's needed. Sometimes it does, often it doesn't. On a large codebase, that speculation burns tokens fast.
 
-The package is generic by default. Project-specific behavior belongs in code
-profiles, with [`example.py`](src/project_code_intelligence/code_profiles/example.py)
-as the public example.
+Plain code RAG helps by embedding chunks and retrieving similar passages, but it ignores what makes source code different from prose. Code has structure: files have roles, functions have callers, static analysis has findings. None of that survives chunking into text.
 
-Language-specific metadata is additive. The generic index currently records
-portable C-family, C#, Go, Java/Kotlin, Rust, Python, JavaScript/TypeScript,
-Lua, Perl, PHP, Ruby, shell, Objective-C/Objective-C++, Protobuf, SQL, XML,
-Markdown/RST, Swift, HTML/CSS/SCSS, Vue/Svelte, GraphQL, Starlark/Bazel,
-Groovy/Gradle, PowerShell, Scala, Elixir/Erlang, Zig, Dockerfile,
-Terraform/Packer, CMake/Meson, and common build DSL facts such as
-imports/includes, package or module names, functions, classes/types, macros,
-traits, sourced shell files, service functions, linker sections, boot-script
-variables, and unsafe markers.
-Project profiles can add project context without replacing those language
-extractors.
+`project-code-intelligence` stores that structure directly. The index combines semantic search with a structured map of the codebase, so an agent can retrieve relevant context, fetch exact records, follow candidate relationships, and surface static-analysis findings without reading files speculatively.
 
-## Why This Exists
+## Where this pays off
 
-Plain codebase RAG often means splitting files into text chunks, embedding those
-chunks, and retrieving similar passages when an assistant needs context. That is
-useful, but source code has structure that plain text chunks do not capture well.
+**Large and generated files.** Every serious codebase has files that exist to be consumed by machines: protobuf-generated code, auto-generated clients, ORM models. These can be hundreds of kilobytes. Without the index, an agent reads a huge slice or runs multiple greps and still loads more than it needs. With the index, it queries for the symbol and gets a 20-line snippet.
 
-Code has files, symbols, functions, classes, configuration, documentation,
-generated artifacts, tests, static-analysis findings, and relationships between
-those things.
+**Not knowing what you're looking for.** Grep requires knowing the word. So does any tool that navigates by symbol name. Semantic search doesn't. "Find code that handles connection retry backoff" or "where does TLS configuration get assembled" are questions grep can't answer without already knowing the answer. The index makes those queries cheap.
 
-`project-code-intelligence` stores that structure directly.
+**Getting oriented.** Understanding the shape of an unfamiliar codebase (which languages, what's generated versus hand-written, where the entry points are) normally costs exploratory reading. `code_intel_status` and `list_code_intel_files` with filters make it a single query.
 
-In short:
+**Finding callers.** `related_code_intel` returns callers with file paths, line numbers, and snippets across the whole codebase in one round-trip. The alternative is grep plus reading each match in context.
 
-- embeddings help answer: “what looks relevant?”
-- lexical search helps answer: “where does this exact word, path, symbol, or rule appear?”
-- the code map helps answer: “what is it, where is it, and how does it relate to the rest of the project?”
+**Private or sensitive codebases.** Most embedding setups send source text to a remote API. Every function signature, comment, and identifier you index leaves the machine. `project-code-intelligence` runs embeddings locally by default, on CPU, Apple Silicon via MLX, AMD, or NVIDIA hardware. The code stays on the machine, and there's no per-token API cost.
 
-## What the Index Stores
+## What it is
 
-The index can store:
+An MCP server backed by Postgres/pgvector. `pci-index` scans one or more Git repositories and stores source files, code records (functions, classes, symbols, config entries), static-analysis findings from SARIF, and candidate relationships between records. `pci-mcp` exposes that index to Claude Code, Codex, OpenCode, or any other MCP client. `pci-doctor` inspects the local machine and prints the exact startup commands for the current hardware. Embeddings run locally by default on CPU, Apple Silicon via MLX, AMD, or NVIDIA, so indexed source text stays on the machine.
 
-- repository snapshots and file inventory
-- source, documentation, build, and configuration files
-- code records such as chunks, functions, classes, symbols, docs, package definitions, and config entries
-- candidate relationships between records and symbols
-- SARIF/static-analysis runs, rules, findings, locations, and code-flow steps
-- optional semantic embeddings for similarity search
-- metadata such as language, file role, content class, source path, line ranges, imports/includes, parser details, rule IDs, and confidence hints
+The package is generic by default. Project-specific behavior belongs in code profiles, with [`example.py`](src/project_code_intelligence/code_profiles/example.py) as the public starting point.
 
-This makes the project more than a bag of embedded chunks. The MCP server can
-search semantically, search lexically, fetch individual records, follow
-candidate relationships, and inspect static-analysis results.
+## What it won't do well
+
+Call graph edges are heuristic — inferred from symbol co-occurrence, not proven by a type checker or linker. They're useful for navigating to candidates, not for asserting definitive caller/callee relationships. Treat them as "probably calls" and verify in source when correctness matters.
+
+Text search falls back through multiple strategies when the primary index finds nothing. Results are still useful, but relevance ranking degrades. If text search returns noise, try semantic search instead. They use different mechanisms and one often succeeds where the other doesn't.
+
+Embeddings are what make semantic search useful. Text-only indexing (`--no-embed`) works as a fallback but limits the MCP server to lexical search. For most use cases, running a local embedding service is worth the setup cost.
 
 ## Quick Start
 
@@ -70,24 +45,18 @@ uv tool install /path/to/project-code-intelligence
 pci-doctor
 ```
 
-`pci-doctor` checks Postgres/pgvector, embeddings, and available local
-acceleration. It prints the startup commands that fit the current machine. For
-a fully local setup, start the suggested `pgvector` command and one embedding
-service. If you already have an external Postgres/pgvector database, set
-`PROJECT_CODE_INTELLIGENCE_DATABASE_URL` and start only the embedding service
-you want to use.
-
-Run `pci-doctor` again after starting services. When it reports `Status: ok
-ready`, index a Git repository:
+`pci-doctor` checks Postgres/pgvector, embeddings, and available local acceleration. It prints the startup commands that fit the current machine. Start the suggested services, then run `pci-doctor` again. When it reports `Status: ok ready`, index a repository:
 
 ```sh
-cd /path/to/repo-to-index
+cd /path/to/repo
 pci-index . --dry-run
 pci-index .
 pci-mcp-smoke .
 ```
 
-After indexing, configure your assistant to run `pci-mcp`. See MCP Setup below.
+Then point your MCP client at `pci-mcp`. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md) for client-specific configuration and collection options.
+
+---
 
 ## Indexing
 
