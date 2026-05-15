@@ -22,6 +22,10 @@ Plain code RAG helps by embedding chunks and retrieving similar passages, but it
 
 **Private or sensitive codebases.** Most embedding setups send source text to a remote API. Every function signature, comment, and identifier you index leaves the machine. `project-code-intelligence` runs embeddings locally by default, using Apple Silicon (MLX), AMD (ROCm), or NVIDIA (CUDA) hardware when available and falling back to CPU otherwise. The code stays on the machine, and there's no per-token API cost.
 
+## Where it doesn't help
+
+Known-target retrieval — "give me lines 60–80 of `internal/foo/bar.go`" — is cheaper with plain `grep` + a bounded read than with the MCP. The index pays off when the agent doesn't already know the answer (semantic queries, caller graphs, project orientation, doc navigation). For pinpoint lookups against a file the agent has already identified, raw tools win on token cost.
+
 ## What it is
 
 An MCP server backed by Postgres/pgvector. `pci-index` scans one or more Git repositories and stores source files, code records (functions, classes, symbols, config entries), static-analysis findings from SARIF, and candidate relationships between records. `pci-mcp` exposes that index to Claude Code, Codex, OpenCode, or any other MCP client. `pci-doctor` inspects the local machine and prints the exact startup commands for the current hardware. Embeddings run locally by default, using Apple Silicon (MLX), AMD (ROCm), or NVIDIA (CUDA) hardware when available and falling back to CPU otherwise, so indexed source text stays on the machine.
