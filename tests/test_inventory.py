@@ -154,6 +154,14 @@ class InventoryContractTests(unittest.TestCase):
             self.assertEqual(reason, "binary_nul")
             self.assertTrue(read_ok)
 
+            # NUL after the first 4 KB of ASCII preamble — the prior detector
+            # only scanned 4096 bytes and would miss this case.
+            deep_nul_file = root / "deep_nul.txt"
+            _ = deep_nul_file.write_bytes(b"a" * 8192 + b"\x00rest")
+            reason, _data, _size_bytes, read_ok = inspect_inventory_file(deep_nul_file, max_file_bytes=1_000_000)
+            self.assertEqual(reason, "binary_nul")
+            self.assertTrue(read_ok)
+
             reason, data, size_bytes, read_ok = inspect_inventory_file(large_file, max_file_bytes=5)
             self.assertEqual(reason, "file_too_large")
             self.assertEqual(data, b"")

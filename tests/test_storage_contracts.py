@@ -146,6 +146,50 @@ class StorageContractTests(unittest.TestCase):
 
         self.assertEqual(metadata, {"detail": "line 1"})
 
+    def test_insert_records_strips_nul_bytes_from_text_and_metadata(self) -> None:
+        # NUL bytes leak in when a file with mixed text/binary slips past the
+        # binary detector. PG rejects U+0000 in both text and jsonb columns.
+        # Storage must scrub before insert so the rest of the batch still lands.
+        fake = FakeConnection()
+        context = RecordInsertContext(
+            conn=cast("db.DbConnection", fake),
+            snapshot=snapshot_fixture(),
+            snapshot_id=7,
+            file_ids={"src/main.py": 9},
+            file_hashes={"src/main.py": "filesha"},
+        )
+        tainted = IntelRecord(
+            collection="test",
+            source_path="src/main.py",
+            language="python",
+            file_role="source",
+            content_class="source",
+            record_type="code_chunk",
+            record_id="src/main.py::chunk::000001-000002",
+            parent_record_id=None,
+            title="ok\x00title",
+            summary="ok summary",
+            embedding_text="prefix\x00suffix",
+            display_content="display\x00body",
+            line_start=1,
+            line_end=2,
+            symbol="main",
+            symbol_kind="function",
+            metadata={"snippet": "code\x00here", "tags": ["a\x00b", "clean"], "n": 1},
+            embedding=None,
+        )
+
+        _ = insert_records(context, [tainted])
+
+        batch = cast("list[dict[str, object]]", json.loads(cast("str", fake.params[0])))
+        row = batch[0]
+        for key in ("title", "summary", "embedding_text", "display_content"):
+            self.assertNotIn("\x00", cast("str", row[key]), msg=f"{key} kept NUL byte")
+        metadata = cast("dict[str, object]", row["metadata"])
+        self.assertEqual(metadata["snippet"], "codehere")
+        self.assertEqual(metadata["tags"], ["ab", "clean"])
+        self.assertEqual(metadata["n"], 1)
+
     def test_insert_records_serializes_database_write_contract(self) -> None:
         fake = FakeConnection()
         context = RecordInsertContext(
