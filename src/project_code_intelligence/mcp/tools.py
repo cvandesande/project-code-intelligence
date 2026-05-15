@@ -75,6 +75,7 @@ STATIC_RULE_COMPACT_KEYS = (
     "help_uri",
 )
 
+SearchMode: TypeAlias = Literal["search", "enumerate"]
 SearchQueryMode: TypeAlias = Literal["auto", "websearch", "all_terms", "any_terms"]
 SearchQueryStrategy: TypeAlias = Literal[
     "list",
@@ -190,6 +191,7 @@ _SNIPPET_CLOSE_FENCE_RE = re.compile(r"\n`{3,}[^\n]*$")
 # constant across all results in a single-snapshot query and redundant with the
 # response envelope. Verbose mode (verbose=true) returns them.
 _COMPACT_RECORD_STRIP = frozenset({
+    "id",
     "snapshot_id",
     "collection",
     "repo",
@@ -197,14 +199,45 @@ _COMPACT_RECORD_STRIP = frozenset({
     "branch",
     "commit_sha",
     "tree_sha",
+    "created_at",
     "updated_at",
-    "record_id",
     "confidence",
     "tool",
     "rule_id",
     "severity",
 })
 _COMPACT_EDGE_STRIP = frozenset({"snapshot_id", "collection", "repo", "commit_sha"})
+
+# Per-record metadata fields that are valuable but heavy enough to balloon a
+# compact response. doc_links in particular carries every URL in a README, which
+# easily dwarfs the rest of the record. Verbose mode keeps these.
+_HEAVY_METADATA_KEYS = frozenset({"doc_links"})
+
+# Boolean fields where False is the uninteresting default. Stripped from compact
+# responses so the absence of the key implies False. has_embedding stays — both
+# True and False carry useful signal (False == not findable via semantic search).
+_STRIP_WHEN_FALSE = frozenset({
+    "is_test",
+    "is_doc",
+    "is_generated",
+    "is_vendor",
+    "is_source",
+    "is_build",
+    "is_config",
+    "is_untracked",
+    "indexed_dirty",
+    "display_content_truncated",
+    "embedding_text_truncated",
+    "content_omitted",
+})
+
+
+def _is_compact_noise(key: str, value: object) -> bool:
+    if value is None:
+        return True
+    if value in ([], {}):
+        return True
+    return value is False and key in _STRIP_WHEN_FALSE
 
 
 _RECORD_TYPE_DEDUP_PRIORITY: dict[str, int] = {"code_chunk": 0, "symbol_definition": 1}
@@ -242,36 +275,63 @@ def _dedup_by_location(rows: list[db.DbRow]) -> list[db.DbRow]:
     return result
 
 
-def _extract_snippet(raw: str | None) -> str | None:
-    """Return the first ~300 chars of code body from a display_content prefix."""
+DEFAULT_SNIPPET_LENGTH = 300
+
+
+def _extract_snippet(raw: str | None, length: int = DEFAULT_SNIPPET_LENGTH) -> str | None:
+    """Return the first `length` chars of code body from a display_content prefix."""
     if not raw:
         return None
     m = _SNIPPET_FENCE_RE.search(raw)
     if m:
         code = raw[m.end() :]
-        return _SNIPPET_CLOSE_FENCE_RE.sub("", code[:300]).rstrip() or None
+        return _SNIPPET_CLOSE_FENCE_RE.sub("", code[:length]).rstrip() or None
     return None
 
 
-def _compact_record(row: db.DbRow) -> dict[str, object]:
-    snippet = _extract_snippet(row.get("snippet_raw"))  # type: ignore[arg-type]
-    out = {k: v for k, v in row.items() if k not in _COMPACT_RECORD_STRIP and k != "snippet_raw"}
+def _compact_record(row: db.DbRow, snippet_length: int = DEFAULT_SNIPPET_LENGTH) -> dict[str, object]:
+    snippet = _extract_snippet(row.get("snippet_raw"), snippet_length)  # type: ignore[arg-type]
+    out: dict[str, object] = {
+        k: v
+        for k, v in row.items()
+        if not _is_compact_noise(k, v) and k not in _COMPACT_RECORD_STRIP and k != "snippet_raw"
+    }
+    metadata = out.get("metadata")
+    if isinstance(metadata, dict):
+        metadata_dict = cast("dict[str, object]", metadata)
+        trimmed = {
+            k: v for k, v in metadata_dict.items() if k not in _HEAVY_METADATA_KEYS and not _is_compact_noise(k, v)
+        }
+        if trimmed != metadata_dict:
+            if trimmed:
+                out["metadata"] = trimmed
+            else:
+                del out["metadata"]
     if snippet:
         out["snippet"] = snippet
     return out
 
 
-def _verbose_record(row: db.DbRow) -> dict[str, object]:
-    snippet = _extract_snippet(row.get("snippet_raw"))  # type: ignore[arg-type]
+def _verbose_record(row: db.DbRow, snippet_length: int = DEFAULT_SNIPPET_LENGTH) -> dict[str, object]:
+    snippet = _extract_snippet(row.get("snippet_raw"), snippet_length)  # type: ignore[arg-type]
     out = {k: v for k, v in row.items() if k != "snippet_raw"}
     if snippet:
         out["snippet"] = snippet
     return out
 
 
-def _format_records(rows: list[db.DbRow], *, verbose: bool) -> list[dict[str, object]]:
+def _compact_file(row: db.DbRow) -> dict[str, object]:
+    return {k: v for k, v in row.items() if not _is_compact_noise(k, v)}
+
+
+def _format_records(
+    rows: list[db.DbRow],
+    *,
+    verbose: bool,
+    snippet_length: int = DEFAULT_SNIPPET_LENGTH,
+) -> list[dict[str, object]]:
     fmt = _verbose_record if verbose else _compact_record
-    return [fmt(row) for row in rows]
+    return [fmt(row, snippet_length) for row in rows]
 
 
 def _format_edges(rows: list[db.DbRow], *, verbose: bool) -> list[dict[str, object]]:
@@ -295,6 +355,19 @@ def search_query_mode(args: Json) -> SearchQueryMode:
     raise McpProtocolError("query_mode must be one of: auto, websearch, all_terms, any_terms")
 
 
+def search_mode(args: Json, query: str | None) -> SearchMode:
+    value = optional_text(args, "mode")
+    if value is None:
+        return "enumerate" if not query else "search"
+    if value not in {"search", "enumerate"}:
+        raise McpProtocolError("mode must be one of: search, enumerate")
+    if value == "search" and not query:
+        raise McpProtocolError("mode=search requires a non-empty query")
+    if value == "enumerate" and query:
+        raise McpProtocolError("mode=enumerate must not be combined with a query")
+    return cast("SearchMode", value)
+
+
 def search_terms(query: str) -> list[str]:
     terms: list[str] = []
     for match in SEARCH_TERM_RE.finditer(query):
@@ -309,6 +382,15 @@ def search_terms(query: str) -> list[str]:
 def like_pattern_for_term(term: str) -> str:
     escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
+
+
+def source_path_prefix_pattern(prefix: str) -> str:
+    # Strip a trailing slash so callers can pass either "cmd" or "cmd/" and get the
+    # same subtree match. The pattern matches strict descendants only — to match a
+    # file at the exact path, use source_path instead.
+    normalized = prefix.rstrip("/")
+    escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"{escaped}/%"
 
 
 def run_text_search_query(
@@ -415,6 +497,67 @@ def static_status_rows(conn: db.DbConnection, filters: StatusFilters) -> tuple[l
     return static_runs, static_findings
 
 
+def _annotate_status_snapshots(snapshot_rows: list[db.DbRow]) -> list[Json]:
+    head_commit = git_utils.run_git(Path.cwd(), ["rev-parse", "HEAD"])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    snapshots: list[Json] = []
+    for snap in snapshot_rows:
+        snap_dict: Json = cast("Json", dict(snap))
+        created = snap_dict.get("created_at")
+        if created is not None and isinstance(created, datetime.datetime):
+            snap_dict["index_age_seconds"] = int((now - created).total_seconds())
+        snap_dict["head_commit"] = head_commit
+        snap_dict["head_matches_snapshot"] = (
+            head_commit is not None and snap_dict.get("commit_sha") == head_commit.strip()
+        )
+        snap_meta = snap_dict.get("metadata")
+        if isinstance(snap_meta, dict) and "embed_record_types" in snap_meta:
+            snap_dict["embed_record_types"] = snap_meta["embed_record_types"]
+        snapshots.append(snap_dict)
+    return snapshots
+
+
+def _status_file_breakdowns(conn: db.DbConnection, filters: StatusFilters) -> dict[str, list[db.DbRow]]:
+    language = conn.execute(
+        db.query_sql(
+            query_with_where(
+                """
+            SELECT f.language, count(*) AS files
+            FROM project_code_intel_files f
+            """,
+                filters.files.clauses,
+                """
+            GROUP BY f.language
+            ORDER BY files DESC, f.language
+            """,
+            )
+        ),
+        filters.files.params,
+    ).fetchall()
+    directory = conn.execute(
+        db.query_sql(
+            query_with_where(
+                """
+            SELECT
+                CASE WHEN position('/' in f.source_path) = 0
+                     THEN '.'
+                     ELSE split_part(f.source_path, '/', 1)
+                END AS directory,
+                count(*) AS files
+            FROM project_code_intel_files f
+            """,
+                filters.files.clauses,
+                """
+            GROUP BY directory
+            ORDER BY files DESC, directory
+            """,
+            )
+        ),
+        filters.files.params,
+    ).fetchall()
+    return {"language": language, "directory": directory}
+
+
 def tool_code_intel_status(args: Json) -> Json:
     filters = status_filters(args)
     with mcp_db.connect() as conn:
@@ -425,8 +568,6 @@ def tool_code_intel_status(args: Json) -> Json:
             if table_regclass_exists(conn, "project_code_intel_schema_migrations")
             else []
         )
-        head_commit = git_utils.run_git(Path.cwd(), ["rev-parse", "HEAD"])
-        now = datetime.datetime.now(datetime.timezone.utc)
         snapshot_rows = conn.execute(
             db.query_sql(
                 query_with_where(
@@ -444,20 +585,7 @@ def tool_code_intel_status(args: Json) -> Json:
             ),
             [*filters.snapshots.params, mcp_db.mcp_max_status_rows()],
         ).fetchall()
-        snapshots: list[Json] = []
-        for snap in snapshot_rows:
-            snap_dict: Json = cast("Json", dict(snap))
-            created = snap_dict.get("created_at")
-            if created is not None and isinstance(created, datetime.datetime):
-                snap_dict["index_age_seconds"] = int((now - created).total_seconds())
-            snap_dict["head_commit"] = head_commit
-            snap_dict["head_matches_snapshot"] = (
-                head_commit is not None and snap_dict.get("commit_sha") == head_commit.strip()
-            )
-            snap_meta = snap_dict.get("metadata")
-            if isinstance(snap_meta, dict) and "embed_record_types" in snap_meta:
-                snap_dict["embed_record_types"] = snap_meta["embed_record_types"]
-            snapshots.append(snap_dict)
+        snapshots = _annotate_status_snapshots(snapshot_rows)
         counts = conn.execute(
             db.query_sql(
                 query_with_where(
@@ -527,6 +655,7 @@ def tool_code_intel_status(args: Json) -> Json:
             ),
             filters.edges.params,
         ).fetchall()
+        breakdowns = _status_file_breakdowns(conn, filters)
         static_runs, static_findings = static_status_rows(conn, filters)
     actual_record_types = {str(row["record_type"]) for row in by_type}
     for snap_dict in snapshots:
@@ -543,6 +672,8 @@ def tool_code_intel_status(args: Json) -> Json:
         "records": counts,
         "records_by_type": by_type,
         "edges": edges,
+        "language_breakdown": breakdowns["language"],
+        "directory_breakdown": breakdowns["directory"],
         "static_runs": static_runs,
         "static_findings": static_findings,
     })
@@ -584,9 +715,11 @@ def _execute_text_search(
 
 def tool_search_code_intel_text(args: Json) -> Json:
     query = optional_text(args, "query")
+    mode = search_mode(args, query)
     query_mode = search_query_mode(args)
     terms = tuple(search_terms(query)) if query else ()
     limit = require_int(args, "limit", 10, 1, 50)
+    snippet_length = require_int(args, "snippet_length", DEFAULT_SNIPPET_LENGTH, 1, 800)
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
@@ -596,11 +729,15 @@ def tool_search_code_intel_text(args: Json) -> Json:
     verbose = optional_bool(args, "verbose") or False
     response: Json = {
         "query": query,
-        "query_mode": query_mode,
         "query_strategy": strategy,
         **snapshot_scope_response(args),
-        "results": cast("JsonValue", _format_records(rows, verbose=verbose)),
+        "results": cast("JsonValue", _format_records(rows, verbose=verbose, snippet_length=snippet_length)),
     }
+    # Echo mode/query_mode only when explicitly set — inferred defaults are noise.
+    if optional_text(args, "mode") is not None:
+        response["mode"] = mode
+    if optional_text(args, "query_mode") is not None:
+        response["query_mode"] = query_mode
     if terms:
         response["terms"] = list(terms)
     if fallback_reason:
@@ -646,6 +783,7 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
     if not query:
         raise McpProtocolError("query is required")
     limit = require_int(args, "limit", 10, 1, 50)
+    snippet_length = require_int(args, "snippet_length", DEFAULT_SNIPPET_LENGTH, 1, 800)
     clauses, params = code_intel_clauses(args, "r")
     clauses.append("r.embedding IS NOT NULL")
     embedding, embedding_dimensions = query_embedding(query)
@@ -680,34 +818,13 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
         "query": query,
         "embedding_dimensions": embedding_dimensions,
         **snapshot_scope_response(args),
-        "results": cast("JsonValue", _format_records(rows, verbose=verbose)),
+        "results": cast("JsonValue", _format_records(rows, verbose=verbose, snippet_length=snippet_length)),
     })
 
 
-def record_projection_query(*, include_content: bool, filter_collection: bool = False) -> str:
-    if include_content:
-        if filter_collection:
-            return """
-                SELECT r.id, r.collection, r.repo, r.repo_role, r.branch, r.commit_sha, r.tree_sha,
-                       r.source_path, r.language, r.file_role, r.content_class,
-                       r.record_type, r.record_id, r.parent_record_id, r.title, r.summary,
-                       left(r.embedding_text, %s) AS embedding_text,
-                       coalesce(length(r.embedding_text), 0) > %s AS embedding_text_truncated,
-                       left(r.display_content, %s) AS display_content,
-                       coalesce(length(r.display_content), 0) > %s AS display_content_truncated,
-                       false AS content_omitted,
-                       r.line_start, r.line_end, r.symbol, r.symbol_kind, r.confidence_kind,
-                       r.confidence, r.tool, r.rule_id, r.severity, r.analyzer, r.analyzer_version,
-                       r.parser, r.parser_version, r.chunker_version, r.metadata, r.created_at,
-                       r.updated_at, r.embedding IS NOT NULL AS has_embedding,
-                       coalesce(f.is_untracked, false) AS is_untracked,
-                       coalesce(f.indexed_dirty, false) AS indexed_dirty
-                FROM project_code_intel_records r
-                LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
-                WHERE r.id = %s AND r.collection = %s
-                """
-        return """
-            SELECT r.id, r.collection, r.repo, r.repo_role, r.branch, r.commit_sha, r.tree_sha,
+_RECORD_PROJECTION_WITH_CONTENT = """
+            SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role, r.branch,
+                   r.commit_sha, r.tree_sha,
                    r.source_path, r.language, r.file_role, r.content_class,
                    r.record_type, r.record_id, r.parent_record_id, r.title, r.summary,
                    left(r.embedding_text, %s) AS embedding_text,
@@ -723,11 +840,11 @@ def record_projection_query(*, include_content: bool, filter_collection: bool = 
                    coalesce(f.indexed_dirty, false) AS indexed_dirty
             FROM project_code_intel_records r
             LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
-            WHERE r.id = %s
             """
-    if filter_collection:
-        return """
-            SELECT r.id, r.collection, r.repo, r.repo_role, r.branch, r.commit_sha, r.tree_sha,
+
+_RECORD_PROJECTION_WITHOUT_CONTENT = """
+            SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role, r.branch,
+                   r.commit_sha, r.tree_sha,
                    r.source_path, r.language, r.file_role, r.content_class,
                    r.record_type, r.record_id, r.parent_record_id, r.title, r.summary,
                    NULL::text AS embedding_text,
@@ -743,53 +860,76 @@ def record_projection_query(*, include_content: bool, filter_collection: bool = 
                    coalesce(f.indexed_dirty, false) AS indexed_dirty
             FROM project_code_intel_records r
             LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
-            WHERE r.id = %s AND r.collection = %s
             """
-    return """
-            SELECT r.id, r.collection, r.repo, r.repo_role, r.branch, r.commit_sha, r.tree_sha,
-                   r.source_path, r.language, r.file_role, r.content_class,
-                   r.record_type, r.record_id, r.parent_record_id, r.title, r.summary,
-                   NULL::text AS embedding_text,
-                   false AS embedding_text_truncated,
-                   NULL::text AS display_content,
-                   false AS display_content_truncated,
-                   true AS content_omitted,
-                   r.line_start, r.line_end, r.symbol, r.symbol_kind, r.confidence_kind,
-                   r.confidence, r.tool, r.rule_id, r.severity, r.analyzer, r.analyzer_version,
-                   r.parser, r.parser_version, r.chunker_version, r.metadata, r.created_at,
-                   r.updated_at, r.embedding IS NOT NULL AS has_embedding,
-                   coalesce(f.is_untracked, false) AS is_untracked,
-                   coalesce(f.indexed_dirty, false) AS indexed_dirty
-            FROM project_code_intel_records r
-            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
-            WHERE r.id = %s
-            """
+
+
+def record_projection_select(*, include_content: bool) -> str:
+    return _RECORD_PROJECTION_WITH_CONTENT if include_content else _RECORD_PROJECTION_WITHOUT_CONTENT
+
+
+def _get_record_ids_arg(args: Json) -> tuple[list[str], bool]:
+    record_id = args.get("record_id")
+    record_ids = args.get("record_ids")
+    if record_id is not None and record_ids is not None:
+        raise McpProtocolError("provide exactly one of record_id or record_ids")
+    if record_id is not None:
+        if not isinstance(record_id, str) or not record_id:
+            raise McpProtocolTypeError("record_id must be a non-empty string")
+        return [record_id], False
+    if record_ids is None:
+        raise McpProtocolError("record_id or record_ids is required")
+    if not isinstance(record_ids, list) or not record_ids:
+        raise McpProtocolTypeError("record_ids must be a non-empty list of strings")
+    out: list[str] = []
+    for item in cast("list[object]", record_ids):
+        if not isinstance(item, str) or not item:
+            raise McpProtocolTypeError("record_ids entries must be non-empty strings")
+        out.append(item)
+    return out, True
+
+
+def _build_record_lookup(args: Json, ids: list[str], *, batch: bool, include_content: bool) -> tuple[str, QueryParams]:
+    where_clauses, where_params = scoped_collection_repo_clauses(args, "r")
+    select_prefix = record_projection_select(include_content=include_content)
+    if batch:
+        where_clauses.append("r.record_id = ANY(%s::text[])")
+        where_params.append(ids)
+        suffix = "\n            ORDER BY r.record_id, r.updated_at DESC, r.id DESC\n            "
+        select_prefix = select_prefix.replace("SELECT r.id,", "SELECT DISTINCT ON (r.record_id) r.id,", 1)
+    else:
+        where_clauses.append("r.record_id = %s")
+        where_params.append(ids[0])
+        suffix = "\n            ORDER BY r.updated_at DESC, r.id DESC\n            LIMIT 1\n            "
+    query_sql = query_with_where(select_prefix, where_clauses, suffix)
+    if include_content:
+        limit = mcp_max_record_content_chars()
+        params: QueryParams = [limit, limit, limit, limit, *where_params]
+    else:
+        params = list(where_params)
+    return query_sql, params
 
 
 def tool_get_code_intel_record(args: Json) -> Json:
-    record_id = args.get("id")
-    if not isinstance(record_id, int):
-        raise McpProtocolTypeError("id must be an integer")
+    ids, batch = _get_record_ids_arg(args)
     include_content = optional_bool(args, "include_content")
-    collection = scoped_collection({})
-    params: QueryParams
-    if include_content:
-        content_limit = mcp_max_record_content_chars()
-        params = [content_limit, content_limit, content_limit, content_limit, record_id]
-    else:
-        params = [record_id]
-    if collection:
-        params.append(collection)
+    verbose = optional_bool(args, "verbose") or False
+    query_sql, params = _build_record_lookup(args, ids, batch=batch, include_content=include_content)
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
-        row = conn.execute(
-            record_projection_query(include_content=include_content, filter_collection=collection is not None),
-            params,
-        ).fetchone()
-    if row is None:
-        return ok({"found": False})
-    return ok({"result": row})
+        cursor = conn.execute(db.query_sql(query_sql), params)
+        if not batch:
+            row = cursor.fetchone()
+            if row is None:
+                return ok({"found": False})
+            return ok({"result": dict(row) if verbose else _compact_record(row)})
+        rows = cursor.fetchall()
+    formatted = [dict(row) if verbose else _compact_record(row) for row in rows]
+    missing = [rid for rid in ids if rid not in {str(row["record_id"]) for row in rows}]
+    response: Json = {"results": cast("JsonValue", formatted)}
+    if missing:
+        response["missing"] = missing
+    return ok(response)
 
 
 def tool_related_code_intel(args: Json) -> Json:
@@ -1082,9 +1222,15 @@ def tool_list_code_intel_files(args: Json) -> Json:
             clauses.append(f"f.{arg_name} = %s")
             params.append(value)
     source_path = optional_text(args, "source_path")
+    source_path_prefix = optional_text(args, "source_path_prefix")
+    if source_path and source_path_prefix:
+        raise McpProtocolError("source_path and source_path_prefix are mutually exclusive")
     if source_path:
         clauses.append("f.source_path = %s")
         params.append(source_path)
+    elif source_path_prefix:
+        clauses.append("f.source_path LIKE %s ESCAPE '\\'")
+        params.append(source_path_prefix_pattern(source_path_prefix))
     for arg_name in (
         "is_test",
         "is_doc",
@@ -1100,15 +1246,13 @@ def tool_list_code_intel_files(args: Json) -> Json:
             params.append(value)
     if optional_bool(args, "only_skipped"):
         clauses.append("f.skipped_reason IS NOT NULL")
-    include_metadata = optional_bool(args, "include_metadata")
+    verbose = optional_bool(args, "verbose") or False
     params.append(limit)
 
     files_select_slim = """
-            SELECT f.id, f.snapshot_id, f.collection, f.repo, f.repo_role, f.branch,
-                   f.commit_sha, f.tree_sha, f.source_path, f.git_blob_sha, f.file_sha256,
-                   f.size_bytes, f.language, f.file_role, f.content_class,
+            SELECT f.id, f.source_path, f.size_bytes, f.language, f.file_role, f.content_class,
                    f.is_generated, f.is_vendor, f.is_test, f.is_source, f.is_build,
-                   f.is_config, f.is_doc, f.skipped_reason, f.created_at
+                   f.is_config, f.is_doc, f.skipped_reason
             FROM project_code_intel_files f
             """
     files_select_full = """
@@ -1126,7 +1270,7 @@ def tool_list_code_intel_files(args: Json) -> Json:
         rows = conn.execute(
             db.query_sql(
                 query_with_where(
-                    files_select_full if include_metadata else files_select_slim,
+                    files_select_full if verbose else files_select_slim,
                     clauses,
                     """
             ORDER BY f.source_path
@@ -1136,7 +1280,8 @@ def tool_list_code_intel_files(args: Json) -> Json:
             ),
             params,
         ).fetchall()
-    return ok({**snapshot_scope_response(args), "files": rows})
+    files: list[object] = list(rows) if verbose else [_compact_file(row) for row in rows]
+    return ok({**snapshot_scope_response(args), "files": cast("JsonValue", files)})
 
 
 def tool_list_code_intel_parser_failures(args: Json) -> Json:
@@ -1148,9 +1293,15 @@ def tool_list_code_intel_parser_failures(args: Json) -> Json:
             clauses.append(f"pf.{arg_name} = %s")
             params.append(value)
     source_path = optional_text(args, "source_path")
+    source_path_prefix = optional_text(args, "source_path_prefix")
+    if source_path and source_path_prefix:
+        raise McpProtocolError("source_path and source_path_prefix are mutually exclusive")
     if source_path:
         clauses.append("pf.source_path = %s")
         params.append(source_path)
+    elif source_path_prefix:
+        clauses.append("pf.source_path LIKE %s ESCAPE '\\'")
+        params.append(source_path_prefix_pattern(source_path_prefix))
     params.append(limit)
 
     with mcp_db.connect() as conn:

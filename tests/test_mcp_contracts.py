@@ -134,14 +134,15 @@ class McpTextSearchTests(unittest.TestCase):
             })
 
         payload = mcp_text_payload(response)
-        self.assertEqual(payload["query_mode"], "auto")
+        # query_mode is no longer echoed when left at its default ("auto").
+        self.assertNotIn("query_mode", payload)
         self.assertEqual(payload["query_strategy"], "all_terms_fallback")
         self.assertEqual(
             payload["terms"],
             ["CONFIG_SELINUX", "procd-selinux", "busybox-selinux", "setfiles"],
         )
         self.assertEqual(payload["fallback_reason"], "websearch returned no results for a multi-term query")
-        self.assertEqual(payload["results"], [{"id": 7, "source_path": "config/Config-build.in"}])
+        self.assertEqual(payload["results"], [{"source_path": "config/Config-build.in"}])
 
         websearch_query, websearch_params = conn.calls[0]
         fallback_query, fallback_params = conn.calls[1]
@@ -168,7 +169,7 @@ class McpTextSearchTests(unittest.TestCase):
 
         payload = mcp_text_payload(response)
         self.assertEqual(payload["query_strategy"], "any_terms_fallback")
-        self.assertEqual(payload["results"], [{"id": 11, "symbol": "setfiles"}])
+        self.assertEqual(payload["results"], [{"symbol": "setfiles"}])
         self.assertEqual(len(conn.calls), 3)
         self.assertIn("EXISTS", conn.calls[2][0])
 
@@ -195,6 +196,66 @@ class McpTextSearchTests(unittest.TestCase):
         with self.assertRaises(McpProtocolError) as ctx:
             validate_tool_arguments(definition, {"query": ""})
         self.assertIn("query", str(ctx.exception))
+
+    def test_text_search_mode_search_requires_query(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            self.assertRaises(McpProtocolError) as ctx,
+        ):
+            _ = mcp_tools.tool_search_code_intel_text({"mode": "search"})
+        self.assertIn("mode=search requires a non-empty query", str(ctx.exception))
+
+    def test_text_search_mode_enumerate_rejects_query(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            self.assertRaises(McpProtocolError) as ctx,
+        ):
+            _ = mcp_tools.tool_search_code_intel_text({"mode": "enumerate", "query": "hello"})
+        self.assertIn("mode=enumerate", str(ctx.exception))
+
+    def test_text_search_snippet_length_truncates_inline_snippet(self) -> None:
+        long_body = "x" * 600
+        snippet_raw = f"```go\n{long_body}\n```"
+        conn = QueuedConnection([FakeCursor(many=[{"id": 1, "snippet_raw": snippet_raw}])])
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_search_code_intel_text({"query": "x", "snippet_length": 50})
+        payload = mcp_text_payload(response)
+        results = cast("list[dict[str, object]]", payload["results"])
+        self.assertEqual(len(cast("str", results[0]["snippet"])), 50)
+
+    def test_text_search_snippet_length_rejects_out_of_range(self) -> None:
+        definition = TOOL_DEFINITIONS["search_code_intel_text"]
+        with self.assertRaises(McpProtocolError):
+            validate_tool_arguments(definition, {"query": "x", "snippet_length": 0})
+        with self.assertRaises(McpProtocolError):
+            validate_tool_arguments(definition, {"query": "x", "snippet_length": 1000})
+
+    def test_text_search_mode_echoed_only_when_explicitly_set(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_search_code_intel_text({})
+        payload = mcp_text_payload(response)
+        self.assertNotIn("mode", payload)
+
+        conn = QueuedConnection([FakeCursor(many=[])])
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_search_code_intel_text({"mode": "enumerate"})
+        payload = mcp_text_payload(response)
+        self.assertEqual(payload["mode"], "enumerate")
 
 
 class McpContractTests(unittest.TestCase):
@@ -302,7 +363,7 @@ class McpContractTests(unittest.TestCase):
         self.assertEqual(filters.static_runs.params, ["test", "repo-a"])
         self.assertEqual(filters.static_findings.params, ["test", "repo-a"])
 
-    def test_id_record_fetch_is_scoped_to_configured_collection(self) -> None:
+    def test_record_fetch_by_record_id_is_scoped_to_configured_collection(self) -> None:
         conn = FakeConnection()
 
         with (
@@ -314,12 +375,13 @@ class McpContractTests(unittest.TestCase):
             patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
-            _ = mcp_tools.tool_get_code_intel_record({"id": 1})
+            _ = mcp_tools.tool_get_code_intel_record({"record_id": "README.md::doc::000001"})
 
         query, params = conn.calls[0]
-        self.assertIn("WHERE r.id = %s", query)
-        self.assertIn("AND r.collection = %s", query)
-        self.assertEqual(params, [1, "project-code-intelligence"])
+        self.assertIn("r.collection = %s", query)
+        self.assertIn("r.record_id = %s", query)
+        self.assertIn("project-code-intelligence", params)
+        self.assertIn("README.md::doc::000001", params)
 
     def test_id_static_finding_fetch_is_scoped_to_configured_collection(self) -> None:
         conn = FakeConnection()
@@ -506,18 +568,271 @@ class McpContractTests(unittest.TestCase):
     def test_required_tool_arguments_are_enforced_before_handlers(self) -> None:
         record_fetch = TOOL_DEFINITIONS["get_code_intel_record"]
 
-        with self.assertRaises(McpProtocolError):
-            validate_tool_arguments(record_fetch, {})
+        # record_id and record_ids are both optional in the schema; the handler
+        # enforces "exactly one." The schema still rejects malformed values.
         with self.assertRaises(McpProtocolTypeError):
-            validate_tool_arguments(record_fetch, {"id": True})
+            validate_tool_arguments(record_fetch, {"record_id": 1})
         with self.assertRaises(McpProtocolError):
-            validate_tool_arguments(record_fetch, {"id": 0})
+            validate_tool_arguments(record_fetch, {"record_id": ""})
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(FakeConnection())),
+            self.assertRaises(McpProtocolError),
+        ):
+            _ = mcp_tools.tool_get_code_intel_record({})
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(FakeConnection())),
+            self.assertRaises(McpProtocolError),
+        ):
+            _ = mcp_tools.tool_get_code_intel_record({"record_id": "a", "record_ids": ["b"]})
 
     def test_tool_call_rejects_non_object_params_and_arguments(self) -> None:
         with self.assertRaises(McpProtocolTypeError):
             _ = handle_tool_call({"params": []}, None)
         with self.assertRaises(McpProtocolTypeError):
             _ = handle_tool_call({"params": {"name": "code_intel_status", "arguments": []}}, None)
+
+
+class McpToolShapeTests(unittest.TestCase):
+    def test_list_files_default_selects_slim_columns(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            _ = mcp_tools.tool_list_code_intel_files({})
+
+        query, _ = conn.calls[0]
+        select_clause = query.split("FROM project_code_intel_files")[0]
+        self.assertNotIn("f.snapshot_id", select_clause)
+        self.assertNotIn("f.commit_sha", select_clause)
+        self.assertNotIn("f.metadata", select_clause)
+        self.assertNotIn("f.created_at", select_clause)
+        self.assertIn("f.source_path", select_clause)
+        self.assertIn("f.file_role", select_clause)
+
+    def test_list_files_verbose_selects_all_columns(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            _ = mcp_tools.tool_list_code_intel_files({"verbose": True})
+
+        query, _ = conn.calls[0]
+        select_clause = query.split("FROM project_code_intel_files")[0]
+        self.assertIn("f.snapshot_id", select_clause)
+        self.assertIn("f.commit_sha", select_clause)
+        self.assertIn("f.metadata", select_clause)
+        self.assertIn("f.created_at", select_clause)
+
+    def test_list_files_rejects_legacy_include_metadata(self) -> None:
+        definition = TOOL_DEFINITIONS["list_code_intel_files"]
+        with self.assertRaises(McpProtocolError):
+            validate_tool_arguments(definition, {"include_metadata": True})
+
+    def test_compact_record_drops_null_envelope_fields(self) -> None:
+        conn = QueuedConnection([
+            FakeCursor(
+                one={
+                    "id": 1,
+                    "record_id": "README.md::doc::000001",
+                    "source_path": "README.md",
+                    "title": "Overview",
+                    "summary": "",
+                    "symbol": None,
+                    "symbol_kind": None,
+                    "parent_record_id": None,
+                    "analyzer": None,
+                    "analyzer_version": None,
+                    "rule_id": None,
+                    "severity": None,
+                    "tool": None,
+                    "embedding_text": None,
+                    "display_content": None,
+                    "metadata": {"doc_headings": ["Overview"]},
+                }
+            ),
+        ])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_get_code_intel_record({"record_id": "README.md::doc::000001"})
+
+        payload = mcp_text_payload(response)
+        result = cast("dict[str, object]", payload["result"])
+        # Null-valued fields are dropped entirely; the agent infers their absence.
+        for null_field in (
+            "symbol",
+            "symbol_kind",
+            "parent_record_id",
+            "analyzer",
+            "analyzer_version",
+            "embedding_text",
+            "display_content",
+        ):
+            self.assertNotIn(null_field, result)
+        self.assertEqual(result["record_id"], "README.md::doc::000001")
+        self.assertEqual(result["title"], "Overview")
+
+    def test_get_record_strips_doc_links_by_default(self) -> None:
+        conn = QueuedConnection([
+            FakeCursor(
+                one={
+                    "id": 1,
+                    "record_id": "README.md::doc::000001",
+                    "source_path": "README.md",
+                    "metadata": {
+                        "doc_headings": ["Overview"],
+                        "doc_links": ["https://a", "https://b", "https://c"],
+                        "doc_fenced_languages": ["bash"],
+                    },
+                }
+            ),
+        ])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_get_code_intel_record({"record_id": "README.md::doc::000001"})
+
+        payload = mcp_text_payload(response)
+        result = cast("dict[str, object]", payload["result"])
+        self.assertNotIn("id", result)
+        self.assertEqual(result["record_id"], "README.md::doc::000001")
+        metadata = cast("dict[str, object]", result["metadata"])
+        self.assertNotIn("doc_links", metadata)
+        self.assertIn("doc_headings", metadata)
+        self.assertIn("doc_fenced_languages", metadata)
+
+    def test_list_files_source_path_prefix_matches_subtree(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            _ = mcp_tools.tool_list_code_intel_files({"source_path_prefix": "cmd/"})
+
+        query, params = conn.calls[0]
+        self.assertIn("f.source_path LIKE %s ESCAPE", query)
+        self.assertIn("cmd/%", params)
+
+    def test_list_files_source_path_prefix_escapes_like_metacharacters(self) -> None:
+        self.assertEqual(mcp_tools.source_path_prefix_pattern("a%b_c\\d"), "a\\%b\\_c\\\\d/%")
+        self.assertEqual(mcp_tools.source_path_prefix_pattern("foo/"), "foo/%")
+        self.assertEqual(mcp_tools.source_path_prefix_pattern("foo"), "foo/%")
+
+    def test_list_files_rejects_both_source_path_and_prefix(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            self.assertRaises(McpProtocolError),
+        ):
+            _ = mcp_tools.tool_list_code_intel_files({
+                "source_path": "cmd/main.go",
+                "source_path_prefix": "cmd",
+            })
+
+    def test_status_includes_language_and_directory_breakdowns(self) -> None:
+        # code_intel_status executes several aggregation queries. We only care
+        # about the new ones here; feed every cursor an empty result and check
+        # the SQL.
+        conn = QueuedConnection([FakeCursor(many=[]) for _ in range(10)])
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools, "table_regclass_exists", return_value=False),
+            patch.object(mcp_tools, "schema_migration_versions", return_value=[]),
+            patch.object(mcp_tools.git_utils, "run_git", return_value="abc123"),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_code_intel_status({})
+
+        payload = mcp_text_payload(response)
+        self.assertIn("language_breakdown", payload)
+        self.assertIn("directory_breakdown", payload)
+        queries = [call[0] for call in conn.calls]
+        self.assertTrue(
+            any("GROUP BY f.language" in q for q in queries),
+            msg=f"no language breakdown SQL in {queries!r}",
+        )
+        self.assertTrue(
+            any("split_part(f.source_path, '/', 1)" in q for q in queries),
+            msg=f"no directory breakdown SQL in {queries!r}",
+        )
+
+    def test_get_record_batch_returns_results_and_missing(self) -> None:
+        conn = QueuedConnection([
+            FakeCursor(
+                many=[
+                    {"id": 1, "record_id": "a::doc::000001", "source_path": "a.md"},
+                    {"id": 2, "record_id": "b::doc::000001", "source_path": "b.md"},
+                ]
+            ),
+        ])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_get_code_intel_record({
+                "record_ids": ["a::doc::000001", "b::doc::000001", "missing::doc::000001"],
+            })
+
+        payload = mcp_text_payload(response)
+        results = cast("list[dict[str, object]]", payload["results"])
+        self.assertEqual({r["record_id"] for r in results}, {"a::doc::000001", "b::doc::000001"})
+        self.assertEqual(payload["missing"], ["missing::doc::000001"])
+
+        query, _ = conn.calls[0]
+        self.assertIn("DISTINCT ON (r.record_id)", query)
+        self.assertIn("r.record_id = ANY(%s::text[])", query)
+
+    def test_get_record_verbose_keeps_doc_links_and_int_id(self) -> None:
+        conn = QueuedConnection([
+            FakeCursor(
+                one={
+                    "id": 1,
+                    "record_id": "README.md::doc::000001",
+                    "source_path": "README.md",
+                    "metadata": {
+                        "doc_headings": ["Overview"],
+                        "doc_links": ["https://a", "https://b"],
+                    },
+                }
+            ),
+        ])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_get_code_intel_record({
+                "record_id": "README.md::doc::000001",
+                "verbose": True,
+            })
+
+        payload = mcp_text_payload(response)
+        result = cast("dict[str, object]", payload["result"])
+        self.assertEqual(result["id"], 1)
+        metadata = cast("dict[str, object]", result["metadata"])
+        self.assertEqual(metadata["doc_links"], ["https://a", "https://b"])
 
 
 if __name__ == "__main__":
