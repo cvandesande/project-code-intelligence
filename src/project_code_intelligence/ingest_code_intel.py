@@ -28,6 +28,7 @@ from project_code_intelligence.embeddings import (
     embed_db_records,
     insert_records_with_preembedding,
     preflight_embedding_endpoint,
+    resolve_embedding_endpoint_framework,
     resolve_embedding_endpoint_model,
     start_record_preembedding,
 )
@@ -888,6 +889,8 @@ def print_embed_only_report(plan: IngestPlan, snapshot_ids: list[int], embedded_
         "profile": profile_context.active_profile.name,
         "embeddings": True,
         "embedding_model": args.embedding_endpoint_model if args.embedding_endpoint else None,
+        "embedding_endpoint": args.embedding_endpoint,
+        "embedding_framework": resolve_embedding_endpoint_framework(args.embedding_endpoint),
         "embedding_max_chars": args.embedding_max_chars,
         "metrics": runtime_state.active_metrics.snapshot(),
     }
@@ -1416,6 +1419,10 @@ def print_ingest_result(
         "embedding_model": (
             plan.args.embedding_endpoint_model if plan.args.embed and plan.args.embedding_endpoint else None
         ),
+        "embedding_endpoint": plan.args.embedding_endpoint if plan.args.embed else None,
+        "embedding_framework": (
+            resolve_embedding_endpoint_framework(plan.args.embedding_endpoint) if plan.args.embed else None
+        ),
         "sarif_files": [relative_to_or_none(path, plan.root) or str(path) for path in plan.sarif_files],
         "sarif_file_count": len(plan.sarif_files),
         "sarif_warnings": sarif_ingest.warnings,
@@ -1440,14 +1447,19 @@ def resolve_plan_embedding_model(plan: IngestPlan) -> IngestPlan:
 
 
 def run_ingest_plan(plan: IngestPlan) -> int:
+    plan = resolve_plan_embedding_model(plan)
+    embedding_endpoint = plan.args.embedding_endpoint if plan.embedding_requested else None
+    embedding_framework = resolve_embedding_endpoint_framework(embedding_endpoint)
     progress_event(
         "code_intel_plan",
         collection=plan.collection,
         repos=plan.repos,
         database=config.DatabaseSettings.from_env().display_target(),
+        embedding_endpoint=embedding_endpoint,
+        embedding_model=plan.args.embedding_endpoint_model if plan.embedding_requested else None,
+        embedding_framework=embedding_framework,
     )
     configure_ingest_progress(plan)
-    plan = resolve_plan_embedding_model(plan)
     prepare_writable_database(plan.args, embedding_requested=plan.embedding_requested)
     if plan.args.embed_only:
         return run_embed_only(plan)

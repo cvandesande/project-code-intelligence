@@ -151,7 +151,11 @@ class FastEmbedHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/healthz":
-            write_json(self, 200, {"ok": True, "model": self.fastembed_server().model_name})
+            write_json(
+                self,
+                200,
+                {"ok": True, "model": self.fastembed_server().model_name, "framework": "Fastembed CPU"},
+            )
             return
         write_json(self, 404, json_error("not found"))
 

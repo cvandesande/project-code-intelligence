@@ -261,7 +261,17 @@ class AppleEmbedHandlerGetTests(unittest.TestCase):
         handler = _TestHandler("/healthz", model_name="qwen3-0.6b")
         handler.do_GET()
         self.assertEqual(handler.captured_status, 200)
-        self.assertEqual(handler.response_body, {"ok": True, "model": "qwen3-0.6b"})
+        self.assertEqual(
+            handler.response_body,
+            {"ok": True, "model": "qwen3-0.6b", "framework": "Apple MLX"},
+        )
+
+    def test_healthz_advertises_apple_mlx_framework(self) -> None:
+        handler = _TestHandler("/healthz", model_name="qwen3-0.6b")
+        handler.do_GET()
+        body = handler.response_body
+        self.assertIsInstance(body, dict)
+        self.assertEqual(cast("dict[str, object]", body).get("framework"), "Apple MLX")
 
     def test_unknown_path_returns_404(self) -> None:
         handler = _TestHandler("/unknown")

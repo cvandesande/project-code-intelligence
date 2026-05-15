@@ -166,6 +166,18 @@ def compact_database_target(target: str) -> str:
     return f"{database} @ {parts.hostname}{port}"
 
 
+def compact_endpoint_target(endpoint: str | None) -> str | None:
+    """Render an embedding endpoint URL as host:port for compact display."""
+    if not endpoint:
+        return None
+    parts = urlsplit(endpoint)
+    host = parts.hostname or ""
+    if not host:
+        return endpoint
+    port = f":{parts.port}" if parts.port is not None else ""
+    return f"{host}{port}"
+
+
 class RichEmitter:
     """Render progress as a Rich Live panel on stderr, with one summary panel per terminal."""
 
@@ -179,6 +191,9 @@ class RichEmitter:
         self.database: str | None = None
         self.dirty: bool = False
         self.mode: str | None = None
+        self.embedding_endpoint: str | None = None
+        self.embedding_model: str | None = None
+        self.embedding_framework: str | None = None
         self.last_event: str = "starting"
         self.last_message: str | None = None
         self.live: Live | None = None
@@ -221,6 +236,7 @@ class RichEmitter:
             database = values.get("database")
             if isinstance(database, str) and database:
                 self.database = database
+            self._capture_plan_embedding(values)
             return
         if event in {
             "code_intel_repo_scan_started",
@@ -242,6 +258,17 @@ class RichEmitter:
             mode = values.get("mode")
             if isinstance(mode, str):
                 self.mode = mode
+
+    def _capture_plan_embedding(self, values: JsonObject) -> None:
+        endpoint = values.get("embedding_endpoint")
+        if isinstance(endpoint, str) and endpoint:
+            self.embedding_endpoint = endpoint
+        embedding_model = values.get("embedding_model")
+        if isinstance(embedding_model, str) and embedding_model:
+            self.embedding_model = embedding_model
+        framework = values.get("embedding_framework")
+        if isinstance(framework, str) and framework:
+            self.embedding_framework = framework
 
     def _capture_message(self, event: str, values: JsonObject) -> None:
         if event == "code_intel_repo_scan_started":
@@ -325,6 +352,14 @@ class RichEmitter:
         else:
             _add_row(rows, "Repository", self.current_repo_row_text())
         _add_row(rows, "Database", self.database_row_text())
+        if self.embedding_model:
+            _add_row(rows, "Model", _shorten_model(self.embedding_model))
+        if self.embedding_framework:
+            _add_row(rows, "Framework", self.embedding_framework)
+        elif self.embedding_endpoint:
+            endpoint_label = compact_endpoint_target(self.embedding_endpoint)
+            if endpoint_label:
+                _add_row(rows, "Endpoint", endpoint_label)
         _add_live_progress_row(rows, progress)
         _add_live_write_op_row(rows, progress)
         _add_live_files_row(rows, counts)
@@ -521,6 +556,21 @@ def _shorten_model(model: str) -> str:
     return model
 
 
+def _add_summary_embedding_rows(rows: Table, report: JsonObject) -> None:
+    embedding_model = report.get("embedding_model")
+    if isinstance(embedding_model, str):
+        _add_row(rows, "Model", _shorten_model(embedding_model))
+    embedding_framework = report.get("embedding_framework")
+    if isinstance(embedding_framework, str) and embedding_framework:
+        _add_row(rows, "Framework", embedding_framework)
+        return
+    embedding_endpoint = report.get("embedding_endpoint")
+    if isinstance(embedding_endpoint, str) and embedding_endpoint:
+        endpoint_label = compact_endpoint_target(embedding_endpoint)
+        if endpoint_label:
+            _add_row(rows, "Endpoint", endpoint_label)
+
+
 def _add_identity_rows(rows: Table, report: JsonObject) -> None:
     mode = report.get("mode")
     if isinstance(mode, str):
@@ -531,9 +581,7 @@ def _add_identity_rows(rows: Table, report: JsonObject) -> None:
     database = report.get("database")
     if isinstance(database, str):
         _add_row(rows, "Database", compact_database_target(database))
-    embedding_model = report.get("embedding_model")
-    if isinstance(embedding_model, str):
-        _add_row(rows, "Model", _shorten_model(embedding_model))
+    _add_summary_embedding_rows(rows, report)
     collection = report.get("collection")
     if isinstance(collection, str) and mode == "reset":
         _add_row(rows, "Collection", collection)
