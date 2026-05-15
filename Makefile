@@ -111,6 +111,11 @@ amd-rocm-bundle:
 	$(PYTHON) scripts/select_llamacpp_rocm_bundle.py --format env
 
 compose-check:
+	@if ! diff -q docker-compose.yml src/project_code_intelligence/docker-compose.yml >/dev/null 2>&1; then \
+		echo "error: docker-compose.yml and src/project_code_intelligence/docker-compose.yml are out of sync" >&2; \
+		diff docker-compose.yml src/project_code_intelligence/docker-compose.yml >&2; \
+		exit 1; \
+	fi
 	@if [ -n "$(DOCKER)" ] && $(DOCKER) compose version >/dev/null 2>&1; then \
 		$(DOCKER) compose config --quiet; \
 	else \
