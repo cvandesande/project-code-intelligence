@@ -47,6 +47,7 @@ from project_code_intelligence.doctor.output import (
     exit_code,
     format_result,
     format_summary,
+    local_embedding_startup_commands,
     should_use_color,
     status_rank,
     summary_status,
@@ -100,6 +101,9 @@ class DoctorArgs(argparse.Namespace):
     stop_embedding: bool
     stop_database: bool
     clean: bool
+    start: bool
+    start_db: bool
+    start_embedding: bool
 
 
 def parser() -> argparse.ArgumentParser:
@@ -153,6 +157,21 @@ def parser() -> argparse.ArgumentParser:
         "--clean",
         action="store_true",
         help="Stop all services and remove containers, volumes, and PID files. Prompts before destructive actions.",
+    )
+    _ = argument_parser.add_argument(
+        "--start",
+        action="store_true",
+        help="Start the local pgvector database and the best available embedding service for this hardware.",
+    )
+    _ = argument_parser.add_argument(
+        "--start-db",
+        action="store_true",
+        help="Start the local pgvector database container.",
+    )
+    _ = argument_parser.add_argument(
+        "--start-embedding",
+        action="store_true",
+        help="Start the best available local embedding service for this hardware.",
     )
     return argument_parser
 
@@ -358,11 +377,101 @@ def _dispatch_stop(parsed: DoctorArgs) -> int | None:
     return None
 
 
+# Compose args for starting each embedding profile (inserted after "compose" and
+# compose_file_args() at the call site).
+_EMBEDDING_START_ARGS: dict[str, list[str]] = {
+    "cpu": ["--profile", "cpu", "up", "-d", "--build", "fastembed"],
+    "npu": ["--profile", "npu", "up", "-d", "lemonade-npu"],
+    "amdgpu": ["--profile", "amdgpu", "up", "-d", "--build", "llama-rocm"],
+    "nvidia": ["--profile", "nvidia", "up", "-d", "--build", "llama-cuda"],
+}
+
+
+def _detect_embedding_options() -> dict[str, CheckResult]:
+    """Run hardware and options checks only — no DB or endpoint probing."""
+    gpus = discover_gpus()
+    results = check_platform(os.environ)
+    results.extend(check_gpu_support(gpus))
+    npu_results = check_npu_support(os.environ)
+    results.extend(npu_results)
+    results.extend(check_embedding_options(env=os.environ, gpus=gpus, npu_results=npu_results))
+    return {r.name: r for r in results}
+
+
+def start_database() -> int:
+    """Start the local pgvector database container and return 0 on success."""
+    engine = process.container_engine_name()
+    write_stdout(f"Starting database: {engine} compose up -d pgvector")
+    try:
+        _ = process.run_docker(
+            ["compose", *process.compose_file_args(), "up", "-d", "pgvector"],
+            process.RunOptions(),
+        )
+    except FileNotFoundError:
+        write_stdout("docker/podman not found; cannot start pgvector container.")
+        return 1
+    return 0
+
+
+def start_embedding_services() -> int:
+    """Detect available hardware and start the best local embedding service."""
+    by_name = _detect_embedding_options()
+    commands = local_embedding_startup_commands(by_name)
+    if not commands:
+        write_stdout("No local embedding service is available for this hardware.")
+        return 1
+    # Take the last option: Apple is always last when present; otherwise the most
+    # capable detected hardware (NVIDIA/AMD > NPU > CPU) ends up last.
+    profile, display_command = commands[-1]
+    write_stdout(f"Starting {profile} embedding: {display_command}")
+    if profile == "apple":
+        try:
+            _ = process.run(["pci-apple-embed-server"], process.RunOptions())
+        except FileNotFoundError:
+            write_stdout("pci-apple-embed-server not found on PATH.")
+            return 1
+        return 0
+    start_args = _EMBEDDING_START_ARGS.get(profile)
+    if start_args is None:
+        write_stdout(f"Unknown embedding profile: {profile!r}")
+        return 1
+    try:
+        _ = process.run_docker(
+            ["compose", *process.compose_file_args(), *start_args],
+            process.RunOptions(),
+        )
+    except FileNotFoundError:
+        write_stdout("docker/podman not found; cannot start embedding container.")
+        return 1
+    return 0
+
+
+def start_all_services() -> int:
+    """Start the database and best available embedding service."""
+    db_code = start_database()
+    emb_code = start_embedding_services()
+    return db_code or emb_code
+
+
+def _dispatch_start(parsed: DoctorArgs) -> int | None:
+    """Handle start flags and return exit code, or None to continue."""
+    if parsed.start:
+        return start_all_services()
+    if parsed.start_db:
+        return start_database()
+    if parsed.start_embedding:
+        return start_embedding_services()
+    return None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parsed = parser().parse_args(argv, namespace=DoctorArgs())
     stop_result = _dispatch_stop(parsed)
     if stop_result is not None:
         return stop_result
+    start_result = _dispatch_start(parsed)
+    if start_result is not None:
+        return start_result
     if parsed.init_db:
         init_result = init_database_schema()
         if parsed.json:
