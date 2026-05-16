@@ -168,6 +168,24 @@ def source_path_prefix_pattern(prefix: str) -> str:
     return f"{escaped}/%"
 
 
+def source_path_suffix_pattern(path: str) -> str:
+    escaped = path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%/{escaped}"
+
+
+def source_path_prefix_suffix_pattern(prefix: str) -> str:
+    normalized = prefix.rstrip("/")
+    escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%/{escaped}/%"
+
+
+def repo_relative_source_path_candidates(args: Json, path: str) -> list[str]:
+    repo = optional_text(args, "repo")
+    if not repo or repo in {".", path} or path.startswith(f"{repo}/"):
+        return [path]
+    return list(dict.fromkeys([path, f"{repo}/{path}"]))
+
+
 def source_path_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]:
     """Build WHERE clauses for source_path (exact) and source_path_prefix (subtree).
 
@@ -179,11 +197,32 @@ def source_path_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]
     if source_path and source_path_prefix:
         raise McpProtocolError("source_path and source_path_prefix are mutually exclusive")
     if source_path:
-        return [f"{column(alias, 'source_path')} = %s"], [source_path]
+        candidates = repo_relative_source_path_candidates(args, source_path)
+        if len(candidates) == 1:
+            if not optional_text(args, "repo"):
+                return (
+                    [f"({column(alias, 'source_path')} = %s OR {column(alias, 'source_path')} LIKE %s ESCAPE '\\')"],
+                    [candidates[0], source_path_suffix_pattern(candidates[0])],
+                )
+            return [f"{column(alias, 'source_path')} = %s"], [candidates[0]]
+        return [f"{column(alias, 'source_path')} = ANY(%s)"], [candidates]
     if source_path_prefix:
+        patterns = [
+            source_path_prefix_pattern(candidate)
+            for candidate in repo_relative_source_path_candidates(args, source_path_prefix)
+        ]
+        if not optional_text(args, "repo"):
+            patterns.append(source_path_prefix_suffix_pattern(source_path_prefix))
+        if len(patterns) > 1:
+            path_column = column(alias, "source_path")
+            pattern_params: QueryParams = list(patterns)
+            return (
+                ["(" + " OR ".join(f"{path_column} LIKE %s ESCAPE '\\'" for _ in patterns) + ")"],
+                pattern_params,
+            )
         return (
             [f"{column(alias, 'source_path')} LIKE %s ESCAPE '\\'"],
-            [source_path_prefix_pattern(source_path_prefix)],
+            [patterns[0]],
         )
     return [], []
 

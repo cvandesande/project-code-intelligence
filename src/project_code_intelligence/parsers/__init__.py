@@ -12,6 +12,7 @@ from project_code_intelligence.parsers.core import (
     make_symbol_chunk,
     string_items,
 )
+from project_code_intelligence.parsers.javascript import javascript_records
 from project_code_intelligence.parsers.patch import patch_records
 from project_code_intelligence.parsers.project import (
     doc_parser,
@@ -46,6 +47,7 @@ __all__ = [
     "first_sentence",
     "go_records",
     "iter_python_definitions",
+    "javascript_records",
     "json_like_records",
     "kconfig_parser",
     "make_profile_record",

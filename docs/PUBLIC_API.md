@@ -65,13 +65,13 @@ Public tool names:
 
 | Tool | Purpose |
 | --- | --- |
-| `code_intel_status` | Inspect schema, snapshots, files, records, edges, and embedding state. |
+| `code_intel_status` | Inspect schema, snapshots, freshness, files, records, edges, embedding state, and compact `queryability` hints for text/semantic/text-only record types and edge types. |
 | `list_code_intel_files` | List indexed source files filtered by language, role, content class, or skip status. Useful for discovering the shape of the codebase. |
 | `list_code_intel_parser_failures` | List files that failed to parse during ingestion, so agents can report which parts of the codebase are missing from the index. |
-| `search_code_intel_text` | Text search or filtered listing of indexed records. Default `query_mode=auto` uses PostgreSQL full-text search first, then exact multi-term fallbacks when needed. |
-| `search_code_intel_semantic` | Semantic search using the configured embedding endpoint. |
+| `search_code_intel_text` | Text search or filtered listing of indexed records. Default `query_mode=auto` uses exact term matching for identifier-like single tokens, otherwise PostgreSQL full-text search first, then exact multi-term fallbacks when needed. Broad text search excludes `security_pattern` records unless `record_type` or `content_class` is set. |
+| `search_code_intel_semantic` | Semantic search using the configured embedding endpoint. Broad semantic search excludes `security_pattern` records unless `record_type` or `content_class` is set. |
 | `get_code_intel_record` | Fetch one record by stable `record_id` (string), scoped to the active snapshot by default. Content is omitted unless `include_content` is true; pass `verbose=true` to retain heavy metadata fields. |
-| `related_code_intel` | Follow candidate relationships by record ID or symbol. |
+| `related_code_intel` | Follow candidate relationships by record ID or symbol. `direction` can be `any`, `incoming`, or `outgoing`; results include `direction`, `target_resolved`, and `target_kind`. Symbol queries rank incoming/resolved edges first; chunk record IDs include parent symbol edges when available. |
 | `search_static_findings` | Search SARIF/static-analysis findings. |
 | `get_static_finding` | Fetch one SARIF/static-analysis finding with compact rule and location details. Pass `include_code_flows`, `include_raw`, or `include_run_metadata` for larger diagnostic payloads. |
 | `get_static_code_flow` | Fetch ordered code-flow steps for one finding. |

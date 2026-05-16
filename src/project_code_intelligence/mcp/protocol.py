@@ -83,6 +83,8 @@ def scoped_collection(args: Json) -> str | None:
             "collection override is disabled by PROJECT_CODE_INTELLIGENCE_COLLECTION; "
             "set PROJECT_CODE_INTELLIGENCE_ALLOW_COLLECTION_OVERRIDE=1 for trusted multi-collection access"
         )
+    if not requested and optional_text(args, "repo") and config.configured_collection_defaulted():
+        return None
     return requested or configured
 
 

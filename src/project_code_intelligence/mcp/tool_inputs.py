@@ -81,6 +81,7 @@ class GetCodeIntelRecordArgs(StrictArgs):
 class RelatedCodeIntelArgs(StrictArgs):
     record_id: str | None = None
     symbol: str | None = None
+    direction: Literal["any", "incoming", "outgoing"] | None = None
     edge_type: str | None = None
     confidence_kind: str | None = None
     collection: str | None = None
