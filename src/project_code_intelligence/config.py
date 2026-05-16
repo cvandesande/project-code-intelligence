@@ -355,5 +355,9 @@ def configured_collection(env: Env | None = None) -> str | None:
     return env_text("PROJECT_CODE_INTELLIGENCE_COLLECTION", env=env)
 
 
+def configured_collection_defaulted(env: Env | None = None) -> bool:
+    return env_bool("PROJECT_CODE_INTELLIGENCE_COLLECTION_DEFAULTED", default=False, env=env)
+
+
 def collection_override_allowed(env: Env | None = None) -> bool:
     return env_bool("PROJECT_CODE_INTELLIGENCE_ALLOW_COLLECTION_OVERRIDE", default=False, env=env)

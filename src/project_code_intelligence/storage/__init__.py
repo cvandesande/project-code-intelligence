@@ -5,6 +5,7 @@ from __future__ import annotations
 from project_code_intelligence.storage.copy import copy_unchanged_parser_failures, copy_unchanged_records_and_edges
 from project_code_intelligence.storage.core import (
     RecordInsertContext,
+    count_unresolved_edge_targets,
     delete_all_code_intel_data,
     delete_repo_data,
     insert_edges,
@@ -13,6 +14,7 @@ from project_code_intelligence.storage.core import (
     insert_records,
     insert_snapshot,
     parser_failure_metadata,
+    pre_resolve_edge_targets,
     prune_old_snapshots,
     replace_repos,
     resolve_edge_targets,
@@ -35,6 +37,7 @@ __all__ = [
     "RecordInsertContext",
     "copy_unchanged_parser_failures",
     "copy_unchanged_records_and_edges",
+    "count_unresolved_edge_targets",
     "delete_all_code_intel_data",
     "delete_repo_data",
     "ensure_schema",
@@ -47,6 +50,7 @@ __all__ = [
     "insert_static_runs",
     "latest_snapshot_info",
     "parser_failure_metadata",
+    "pre_resolve_edge_targets",
     "previous_file_signatures",
     "previous_file_state_signature",
     "previous_file_states",

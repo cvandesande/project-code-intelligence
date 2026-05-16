@@ -110,6 +110,8 @@ class RuntimeMetrics:
     inserted_files: int = 0
     inserted_records: int = 0
     inserted_edges: int = 0
+    pre_resolved_edges: int = 0
+    resolved_edges: int = 0
     inserted_parser_failures: int = 0
     static_runs: int = 0
     static_rules: int = 0
@@ -265,6 +267,8 @@ class RuntimeMetrics:
                 "inserted_files": self.inserted_files,
                 "inserted_records": self.inserted_records,
                 "inserted_edges": self.inserted_edges,
+                "pre_resolved_edges": self.pre_resolved_edges,
+                "resolved_edges": self.resolved_edges,
                 "inserted_parser_failures": self.inserted_parser_failures,
                 "static_runs": self.static_runs,
                 "static_rules": self.static_rules,

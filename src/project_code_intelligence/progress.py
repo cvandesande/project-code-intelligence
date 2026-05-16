@@ -53,6 +53,11 @@ PHASE_LABELS: dict[str, str] = {
     "db_upload": "WRITING",
     "embedding": "EMBEDDING",
 }
+PHASE_PROGRESS_UNITS: dict[str, str] = {
+    "scan": "files",
+    "db_upload": "database items",
+    "embedding": "embedding records",
+}
 
 
 def _resolve_mode(stream: object, *, requested: OutputMode | None, env_var: str) -> OutputMode:
@@ -176,6 +181,28 @@ def compact_endpoint_target(endpoint: str | None) -> str | None:
         return endpoint
     port = f":{parts.port}" if parts.port is not None else ""
     return f"{host}{port}"
+
+
+def embedding_endpoint_row_text(endpoint: str | None, framework: str | None) -> str | None:
+    endpoint_label = compact_endpoint_target(endpoint)
+    if endpoint_label and framework:
+        return f"{endpoint_label} · {framework}"
+    if endpoint_label:
+        return endpoint_label
+    return framework or None
+
+
+def _add_embedding_endpoint_row(rows: Table, endpoint: str | None, framework: str | None) -> None:
+    endpoint_label = compact_endpoint_target(endpoint)
+    if not endpoint_label and not framework:
+        return
+    label = "Endpoint" if endpoint_label else "Framework"
+    detail = Text(endpoint_label or "")
+    if endpoint_label and framework:
+        _ = detail.append(" · ")
+    if framework:
+        _ = detail.append(framework, style="bold cyan")
+    rows.add_row(Text(label, style="bold"), detail)
 
 
 class RichEmitter:
@@ -343,6 +370,9 @@ class RichEmitter:
             return "resolving…"
         return compact_database_target(self.database)
 
+    def endpoint_row_text(self) -> str | None:
+        return embedding_endpoint_row_text(self.embedding_endpoint, self.embedding_framework)
+
     def _live_rows(self, counts: JsonObject, progress: JsonObject, timing: JsonObject) -> Table:
         rows = _section_grid()
         if len(self.repos) > 1:
@@ -354,19 +384,14 @@ class RichEmitter:
         _add_row(rows, "Database", self.database_row_text())
         if self.embedding_model:
             _add_row(rows, "Model", _shorten_model(self.embedding_model))
-        if self.embedding_framework:
-            _add_row(rows, "Framework", self.embedding_framework)
-        elif self.embedding_endpoint:
-            endpoint_label = compact_endpoint_target(self.embedding_endpoint)
-            if endpoint_label:
-                _add_row(rows, "Endpoint", endpoint_label)
+        _add_embedding_endpoint_row(rows, self.embedding_endpoint, self.embedding_framework)
         _add_live_progress_row(rows, progress)
+        _add_live_embeddings_row(rows, counts)
         _add_live_write_op_row(rows, progress)
         _add_live_files_row(rows, counts)
         _add_live_records_row(rows, counts)
         _add_live_edges_row(rows, counts)
         _add_live_workers_row(rows, counts, progress)
-        _add_live_embeddings_row(rows, counts)
         _add_row(rows, "Elapsed", _format_seconds(time.monotonic() - self.started_at))
         _add_live_eta_row(rows, progress, counts, timing)
         return rows
@@ -407,16 +432,23 @@ def _add_live_eta_row(rows: Table, progress: JsonObject, counts: JsonObject, tim
     _add_row(rows, "ETA", f"~ {_format_seconds(remaining)} remaining")
 
 
-def _add_live_progress_row(rows: Table, progress: JsonObject) -> None:
+def live_progress_row_text(progress: JsonObject) -> str | None:
     phase_done = _coerce_int(progress.get("phase_done"))
     phase_total = _coerce_int(progress.get("phase_total"))
     if phase_total:
         bar = _bar(phase_done, phase_total)
-        _add_row(rows, "Progress", f"{bar} {phase_done:,}/{phase_total:,}")
-        return
+        phase = progress.get("phase")
+        unit = PHASE_PROGRESS_UNITS.get(phase, "items") if isinstance(phase, str) else "items"
+        return f"{bar} {phase_done:,}/{phase_total:,} {unit}"
     overall = progress.get("overall_percent_estimated")
     if isinstance(overall, (int, float)):
-        _add_row(rows, "Progress", f"~{overall:.0f}%")
+        return f"~{overall:.0f}%"
+    return None
+
+
+def _add_live_progress_row(rows: Table, progress: JsonObject) -> None:
+    if detail := live_progress_row_text(progress):
+        _add_row(rows, "Progress", detail)
 
 
 def _add_live_write_op_row(rows: Table, progress: JsonObject) -> None:
@@ -448,7 +480,14 @@ def _add_live_edges_row(rows: Table, counts: JsonObject) -> None:
     edges = _coerce_int(counts.get("generated_edges"))
     if not edges:
         return
-    _add_row(rows, "Edges", f"{_format_count(edges)} generated")
+    inserted = _coerce_int(counts.get("inserted_edges"))
+    resolved = _coerce_int(counts.get("resolved_edges"))
+    detail = f"{_format_count(edges)} generated"
+    if inserted:
+        detail += f" · {_format_count(inserted)} inserted"
+    if resolved:
+        detail += f" · {_format_count(resolved)} resolved"
+    _add_row(rows, "Edges", detail)
 
 
 def _add_live_workers_row(rows: Table, counts: JsonObject, progress: JsonObject) -> None:
@@ -561,14 +600,10 @@ def _add_summary_embedding_rows(rows: Table, report: JsonObject) -> None:
     if isinstance(embedding_model, str):
         _add_row(rows, "Model", _shorten_model(embedding_model))
     embedding_framework = report.get("embedding_framework")
-    if isinstance(embedding_framework, str) and embedding_framework:
-        _add_row(rows, "Framework", embedding_framework)
-        return
+    framework = embedding_framework if isinstance(embedding_framework, str) and embedding_framework else None
     embedding_endpoint = report.get("embedding_endpoint")
-    if isinstance(embedding_endpoint, str) and embedding_endpoint:
-        endpoint_label = compact_endpoint_target(embedding_endpoint)
-        if endpoint_label:
-            _add_row(rows, "Endpoint", endpoint_label)
+    endpoint = embedding_endpoint if isinstance(embedding_endpoint, str) and embedding_endpoint else None
+    _add_embedding_endpoint_row(rows, endpoint, framework)
 
 
 def _add_identity_rows(rows: Table, report: JsonObject) -> None:

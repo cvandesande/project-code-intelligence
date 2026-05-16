@@ -5,8 +5,8 @@ from __future__ import annotations
 import io
 import re
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
 
 from rich.box import ROUNDED
 from rich.console import Console, Group
@@ -15,6 +15,12 @@ from rich.table import Table
 from rich.text import Text
 
 from project_code_intelligence import console_ui, process
+from project_code_intelligence.embedding.framework import (
+    active_embedding_profile as select_active_embedding_profile,
+)
+from project_code_intelligence.embedding.framework import (
+    option_label,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -41,7 +47,6 @@ STATUS_PILL_TEXT: dict[Status, str] = {
     "fail": "NEEDS ATTENTION",
     "skip": "READY",
 }
-LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 SUMMARY_WIDTH = 78
 SECONDS_AS_MS_THRESHOLD = 10
 
@@ -110,19 +115,6 @@ def summary_issue_items(results: Sequence[CheckResult]) -> list[CheckResult]:
     return [item for item in results if item.status in {"fail", "warn"}]
 
 
-def option_label(name: str) -> str:
-    return {
-        "option-cpu": "CPU",
-        "option-npu": "NPU",
-        "option-gpu-amd": "AMD ROCm",
-        "option-gpu-nvidia": "NVIDIA CUDA",
-        "option-gpu-apple": "Apple MLX",
-        "option-gpu": "GPU",
-        "option-gpu-large-model": "Large GPU model",
-        "option-remote": "Remote",
-    }.get(name, name)
-
-
 def check_label(name: str) -> str:
     if name.startswith("option-"):
         return option_label(name)
@@ -170,14 +162,6 @@ def embedding_config_endpoint(by_name: Mapping[str, CheckResult]) -> str | None:
     return match.group(1) if match else None
 
 
-def remote_embedding_validated(by_name: Mapping[str, CheckResult]) -> bool:
-    endpoint = embedding_config_endpoint(by_name)
-    if not endpoint or not ok_result(by_name, "embedding-endpoint"):
-        return False
-    hostname = (urlsplit(endpoint).hostname or "").lower()
-    return bool(hostname and hostname not in LOOPBACK_HOSTS)
-
-
 def embedding_response_model(by_name: Mapping[str, CheckResult]) -> str | None:
     endpoint = by_name.get("embedding-endpoint")
     if endpoint is None:
@@ -187,34 +171,13 @@ def embedding_response_model(by_name: Mapping[str, CheckResult]) -> str | None:
 
 
 def active_embedding_profile(by_name: Mapping[str, CheckResult]) -> tuple[str, str]:
-    if remote_embedding_validated(by_name):
-        return "remote", "Remote"
-
-    model = (embedding_response_model(by_name) or "").lower()
-    candidates = [
-        ("npu", "NPU", ("embed-gemma" in model or model.endswith("-flm")) and ok_result(by_name, "option-npu")),
-        (
-            "cpu",
-            "CPU",
-            ("jina" in model or "bge" in model or "fastembed" in model) and ok_result(by_name, "option-cpu"),
-        ),
-        ("amdgpu", "AMD ROCm", ("qwen" in model or ".gguf" in model) and ok_result(by_name, "option-gpu-amd")),
-        (
-            "nvidia",
-            "NVIDIA CUDA",
-            ("qwen" in model or ".gguf" in model) and ok_result(by_name, "option-gpu-nvidia"),
-        ),
-        (
-            "apple",
-            "Apple",
-            ok_result(by_name, "option-gpu-apple") and (".gguf" in model or "nomic" in model or "qwen" in model),
-        ),
-        ("gpu", "GPU", "qwen" in model or ".gguf" in model),
-    ]
-    for profile, label, matched in candidates:
-        if matched:
-            return profile, label
-    return "local", "Local endpoint"
+    profile = select_active_embedding_profile(
+        endpoint=embedding_config_endpoint(by_name),
+        response_model=embedding_response_model(by_name),
+        endpoint_ok=ok_result(by_name, "embedding-endpoint"),
+        option_ok=lambda name: ok_result(by_name, name),
+    )
+    return profile.profile, profile.label
 
 
 def local_embedding_startup_commands(by_name: Mapping[str, CheckResult]) -> list[tuple[str, str]]:
@@ -240,25 +203,56 @@ def _shorten_platform(msg: str) -> str:
     return msg
 
 
-def _shorten_gpu(msg: str) -> str:
-    match = re.match(r"(.+):\s*(.*)", msg)
+def _detail_value(detail: str | None, key: str) -> str | None:
+    if not detail:
+        return None
+    match = re.search(rf"(?:^|;\s*){re.escape(key)}=([^;]+)", detail)
+    return match.group(1).strip() if match else None
+
+
+def _shorten_pci_ids(text: str) -> str:
+    return re.sub(
+        r"0x([0-9a-fA-F]+):0x([0-9a-fA-F]+)",
+        lambda match: f"{match.group(1).upper()}:{match.group(2).upper()}",
+        text,
+    )
+
+
+def _shorten_gpu_result(item: CheckResult) -> str:
+    match = re.match(r"(.+):\s*(.*)", item.message)
     if not match:
-        return msg
+        return item.message
     name, rest = match.group(1), match.group(2)
-    name = re.sub(r"\bGPU\b\s*", "", name).strip()
+    name = _shorten_pci_ids(re.sub(r"\bGPU\b\s*", "", name).strip())
+    parts = [name]
+    if driver := _detail_value(item.detail, "driver"):
+        parts.append(driver)
     rest = rest.replace("shared/unified=", "shared ")
     rest = rest.replace("visible VRAM=", "visible ")
     rest = rest.replace("VRAM=", "VRAM ")
     rest = rest.replace("; ", " · ")
     rest = re.sub(r"\b(\d+)\.0 (MiB|GiB)\b", r"\1 \2", rest)
-    return f"{name} · {rest}" if rest else name
+    if rest:
+        parts.append(rest)
+    return " · ".join(parts)
 
 
-def _shorten_npu(msg: str) -> str:
+def _shorten_npu(item: CheckResult) -> str:
+    msg = _shorten_pci_ids(item.message)
     cores = re.search(r"(\d+) cores", msg)
     if "Apple Neural Engine" in msg and cores:
         return f"Apple Neural Engine · {cores.group(1)} cores"
-    return msg
+    if msg.startswith("AMD NPU device detected:"):
+        path = msg.split(":", 1)[1].strip()
+        msg = f"AMD NPU · {Path(path).name}"
+    parts = [msg]
+    if driver := _detail_value(item.detail, "driver"):
+        parts.append(driver)
+    if device := _detail_value(item.detail, "device"):
+        parts.append(device)
+    if len(parts) == 1:
+        return parts[0]
+    return " · ".join(parts)
 
 
 def _shorten_db(msg: str) -> str:
@@ -313,17 +307,17 @@ def _system_section(by_name: Mapping[str, CheckResult], results: Sequence[CheckR
     gpus = matching_results(results, r"gpu-\d+")
     if gpus:
         for gpu in gpus:
-            _row(table, gpu.status, "GPU", _shorten_gpu(gpu.message))
+            _row(table, gpu.status, "GPU", _shorten_gpu_result(gpu))
     elif (gpu := by_name.get("gpu")) is not None:
         if gpu.status == "skip":
             _row(table, "skip", "GPU", "not detected")
         else:
-            _row(table, gpu.status, "GPU", _shorten_gpu(gpu.message))
+            _row(table, gpu.status, "GPU", _shorten_gpu_result(gpu))
     if (npu := by_name.get("npu")) is not None:
         if npu.status == "skip":
             _row(table, "skip", "NPU", "not available")
         else:
-            _row(table, npu.status, "NPU", _shorten_npu(npu.message))
+            _row(table, npu.status, "NPU", _shorten_npu(npu))
     return table
 
 
@@ -347,9 +341,7 @@ def _active_path_section(by_name: Mapping[str, CheckResult]) -> Group | None:
     endpoint = by_name.get("embedding-endpoint")
     if endpoint is None or endpoint.status != "ok":
         return None
-    profile, label = active_embedding_profile(by_name)
-    if profile == "apple":
-        label = "Apple MLX"
+    _profile, label = active_embedding_profile(by_name)
     url = embedding_config_endpoint(by_name)
     header = Table.grid(expand=True)
     header.add_column()

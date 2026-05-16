@@ -11,6 +11,7 @@ from concurrent.futures import ProcessPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
@@ -18,6 +19,9 @@ from project_code_intelligence import config, db, profile_context, progress
 from project_code_intelligence import runtime as runtime_state
 from project_code_intelligence.code_profiles import load_profile
 from project_code_intelligence.common import default_collection, parse_repos, repo_for_source_path
+from project_code_intelligence.doctor.embeddings import check_embedding_options
+from project_code_intelligence.doctor.hardware import check_npu_support, discover_gpus
+from project_code_intelligence.embedding.framework import active_embedding_profile
 from project_code_intelligence.embeddings import (
     EmbeddingBackend,
     EmbeddingContractMismatchError,
@@ -67,6 +71,7 @@ from project_code_intelligence.storage import (
     RecordInsertContext,
     copy_unchanged_parser_failures,
     copy_unchanged_records_and_edges,
+    count_unresolved_edge_targets,
     delete_all_code_intel_data,
     delete_repo_data,
     ensure_schema,
@@ -78,6 +83,7 @@ from project_code_intelligence.storage import (
     insert_snapshot,
     insert_static_runs,
     latest_snapshot_info,
+    pre_resolve_edge_targets,
     previous_file_state_signature,
     previous_file_states,
     prune_old_snapshots,
@@ -878,6 +884,32 @@ def latest_snapshot_ids(collection: str, repos: list[str]) -> list[int]:
     return snapshot_ids
 
 
+@lru_cache(maxsize=1)
+def index_embedding_ok_options() -> frozenset[str]:
+    npu_results = check_npu_support(os.environ)
+    options = check_embedding_options(env=os.environ, gpus=discover_gpus(), npu_results=npu_results)
+    return frozenset(item.name for item in options if item.status == "ok")
+
+
+def index_embedding_option_ok(name: str) -> bool:
+    if name in {"option-cpu", "option-remote"}:
+        return True
+    return name in index_embedding_ok_options()
+
+
+def resolve_index_embedding_framework(endpoint: str | None, response_model: str | None) -> str | None:
+    if endpoint is None:
+        return None
+    profile = active_embedding_profile(
+        endpoint=endpoint,
+        response_model=response_model,
+        endpoint_ok=True,
+        option_ok=index_embedding_option_ok,
+        advertised_framework=resolve_embedding_endpoint_framework(endpoint),
+    )
+    return profile.label
+
+
 def print_embed_only_report(plan: IngestPlan, snapshot_ids: list[int], embedded_records: int | None) -> None:
     args = plan.args
     report: JsonObject = {
@@ -890,7 +922,9 @@ def print_embed_only_report(plan: IngestPlan, snapshot_ids: list[int], embedded_
         "embeddings": True,
         "embedding_model": args.embedding_endpoint_model if args.embedding_endpoint else None,
         "embedding_endpoint": args.embedding_endpoint,
-        "embedding_framework": resolve_embedding_endpoint_framework(args.embedding_endpoint),
+        "embedding_framework": resolve_index_embedding_framework(
+            args.embedding_endpoint, args.embedding_endpoint_model
+        ),
         "embedding_max_chars": args.embedding_max_chars,
         "metrics": runtime_state.active_metrics.snapshot(),
     }
@@ -1295,17 +1329,26 @@ def upload_repo_ingest(
         plan, ingest, insert_context, summary, progress_fn=add_progress
     )
     summary.inserted_records += inserted_records
+    runtime_state.active_metrics.add("inserted_records", inserted_records)
+    runtime_state.active_metrics.set("db_write_op", "preparing edge targets")
+    pre_resolved_edges = pre_resolve_edge_targets(conn, snapshot_id, ingest.edges)
+    runtime_state.active_metrics.add("pre_resolved_edges", pre_resolved_edges)
+    runtime_state.active_metrics.add("resolved_edges", pre_resolved_edges)
     runtime_state.active_metrics.set("db_write_op", "inserting edges")
     inserted_edges = insert_edges(conn, ingest.snapshot, snapshot_id, ingest.edges, progress_fn=add_progress)
-    resolved_edges = resolve_edge_targets(conn, snapshot_id)
     summary.inserted_edges += inserted_edges
+    runtime_state.active_metrics.add("inserted_edges", inserted_edges)
+    runtime_state.active_metrics.set("db_write_op", "resolving remaining edge targets")
+    unresolved_edges = count_unresolved_edge_targets(conn, snapshot_id)
+    runtime_state.active_metrics.add_phase_total(unresolved_edges)
+    resolved_remaining_edges = resolve_edge_targets(conn, snapshot_id, progress_fn=add_progress)
+    resolved_edges = pre_resolved_edges + resolved_remaining_edges
+    runtime_state.active_metrics.add("resolved_edges", resolved_remaining_edges)
     runtime_state.active_metrics.set("db_write_op", "inserting failures")
     inserted_failures = insert_parser_failures(conn, ingest.snapshot, snapshot_id, ingest.parser_failures)
     summary.inserted_parser_failures += inserted_failures
     add_progress(inserted_failures)
     runtime_state.active_metrics.set("db_write_op", None)
-    runtime_state.active_metrics.add("inserted_records", inserted_records)
-    runtime_state.active_metrics.add("inserted_edges", inserted_edges)
     runtime_state.active_metrics.add("inserted_parser_failures", inserted_failures)
     progress_event(
         "code_intel_inserted",
@@ -1356,8 +1399,7 @@ def upload_ingests(plan: IngestPlan, ingests: list[RepoIngest], sarif_ingest: Sa
     try:
         with db.connect(readonly=False) as conn:
             ensure_schema(conn)
-            if plan.mode == "full" and not plan.args.no_replace:
-                replace_repos(conn, plan.collection, plan.repos)
+            replace_repos_for_full_ingests(conn, plan, ingests)
             indexes = StaticSnapshotIndexes()
             for ingest in ingests:
                 upload_repo_ingest(conn, plan, ingest, summary, indexes)
@@ -1368,6 +1410,14 @@ def upload_ingests(plan: IngestPlan, ingests: list[RepoIngest], sarif_ingest: Sa
     finally:
         runtime_state.active_metrics.end_phase("db_upload", "db_upload_seconds")
     return summary
+
+
+def replace_repos_for_full_ingests(conn: db.DbConnection, plan: IngestPlan, ingests: list[RepoIngest]) -> None:
+    if plan.args.no_replace:
+        return
+    repos = sorted({ingest.snapshot.repo for ingest in ingests if ingest.mode == "full"})
+    if repos:
+        replace_repos(conn, plan.collection, repos)
 
 
 def embed_after_upload(plan: IngestPlan, snapshot_ids: list[int]) -> int:
@@ -1421,7 +1471,9 @@ def print_ingest_result(
         ),
         "embedding_endpoint": plan.args.embedding_endpoint if plan.args.embed else None,
         "embedding_framework": (
-            resolve_embedding_endpoint_framework(plan.args.embedding_endpoint) if plan.args.embed else None
+            resolve_index_embedding_framework(plan.args.embedding_endpoint, plan.args.embedding_endpoint_model)
+            if plan.args.embed
+            else None
         ),
         "sarif_files": [relative_to_or_none(path, plan.root) or str(path) for path in plan.sarif_files],
         "sarif_file_count": len(plan.sarif_files),
@@ -1449,7 +1501,7 @@ def resolve_plan_embedding_model(plan: IngestPlan) -> IngestPlan:
 def run_ingest_plan(plan: IngestPlan) -> int:
     plan = resolve_plan_embedding_model(plan)
     embedding_endpoint = plan.args.embedding_endpoint if plan.embedding_requested else None
-    embedding_framework = resolve_embedding_endpoint_framework(embedding_endpoint)
+    embedding_framework = resolve_index_embedding_framework(embedding_endpoint, plan.args.embedding_endpoint_model)
     progress_event(
         "code_intel_plan",
         collection=plan.collection,
