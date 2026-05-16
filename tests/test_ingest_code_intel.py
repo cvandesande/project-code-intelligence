@@ -8,11 +8,12 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 from typing_extensions import override
 
-from project_code_intelligence import profile_context
+from project_code_intelligence import db, profile_context
 from project_code_intelligence.code_profiles import load_profile
 from project_code_intelligence.config import (
     DEFAULT_EMBEDDING_ENDPOINT_MODEL,
@@ -32,6 +33,7 @@ from project_code_intelligence.ingest_code_intel import (
     build_ingest_plan,
     confirm_reset_code_intel,
     discover_plan_sarif_files,
+    replace_repos_for_full_ingests,
     resolve_scan_workers,
     validate_args,
     warning_for_sarif_mtime,
@@ -43,8 +45,15 @@ from project_code_intelligence.mcp.filters import (
     snapshot_scope_response,
     static_finding_clauses,
 )
-from project_code_intelligence.models import IntelFile, JsonValue, Snapshot
-from project_code_intelligence.parsers import go_records, make_records, python_records, rust_records
+from project_code_intelligence.models import IntelFile, JsonValue, RepoIngest, Snapshot
+from project_code_intelligence.parsers import (
+    go_records,
+    javascript_records,
+    make_records,
+    python_records,
+    rust_records,
+    security_records,
+)
 from project_code_intelligence.records import line_for_offset_with_index, line_offsets, line_window_records
 from project_code_intelligence.runtime import RuntimeMetrics
 from project_code_intelligence.sarif import (
@@ -141,6 +150,19 @@ def cli_args(**overrides: object) -> CliArgs:
     }
     values.update(overrides)
     return CliArgs(**values)  # type: ignore[arg-type]
+
+
+def snapshot_for_repo(repo: str) -> Snapshot:
+    return Snapshot(
+        collection="test",
+        repo=repo,
+        repo_role="source",
+        branch="main",
+        commit_sha="commit",
+        tree_sha="tree",
+        dirty=False,
+        metadata={},
+    )
 
 
 class DatabaseSettingsTests(unittest.TestCase):
@@ -401,6 +423,39 @@ class CodeIntelParserTests(unittest.TestCase):
 
 
 class ParserAndRuntimeTests(unittest.TestCase):
+    def test_full_repo_ingest_replaces_rows_even_when_plan_started_incremental(self) -> None:
+        plan = IngestPlan(
+            args=cli_args(),
+            profile=load_profile("generic"),
+            root=Path(),
+            collection="test",
+            repos=["repo-a", "repo-b"],
+            embed_types=set(),
+            sarif_files=[],
+            embedding_requested=False,
+            preembedding_requested=False,
+            mode="incremental",
+        )
+        ingests = [
+            RepoIngest(
+                snapshot=snapshot_for_repo("repo-a"), files=[], records=[], edges=[], parser_failures=[], mode="full"
+            ),
+            RepoIngest(
+                snapshot=snapshot_for_repo("repo-b"),
+                files=[],
+                records=[],
+                edges=[],
+                parser_failures=[],
+                mode="incremental",
+            ),
+        ]
+        conn = cast("db.DbConnection", object())
+
+        with patch("project_code_intelligence.ingest_code_intel.replace_repos") as mocked_replace:
+            replace_repos_for_full_ingests(conn, plan, ingests)
+
+        mocked_replace.assert_called_once_with(conn, "test", ["repo-a"])
+
     def test_line_offsets_are_one_based(self) -> None:
         offsets = line_offsets("one\ntwo\nthree")
 
@@ -503,6 +558,148 @@ class ParserAndRuntimeTests(unittest.TestCase):
         # Noise is gone from the metadata view too — same set drives both.
         for noise in ("let", "pub", "unwrap_or_default", "to_string"):
             self.assertNotIn(noise, names, msg=f"noise {noise!r} leaked into symbols_referenced")
+
+    def test_typescript_template_literals_do_not_emit_shell_backtick_security_records(self) -> None:
+        text = "throw new Error(`Invalid semver version: ${version}`)\n"
+
+        records = security_records(fixture_file("scripts/check-semver.ts", "typescript"), text)
+
+        self.assertFalse([record for record in records if record.rule_id == "shell_backtick_execution"])
+
+    def test_typescript_records_emit_symbols_and_conservative_call_edges(self) -> None:
+        text = "\n".join([
+            "export interface LazyOptions {",
+            "  readonly path: string;",
+            "}",
+            "",
+            "export type LazyFactory = () => unknown;",
+            "",
+            "export const $ZodLazy = createLazyFactory();",
+            "",
+            "export function defineLazy<T>(getter: () => T) {",
+            "  const schema = buildSchema(getter());",
+            "  return parse(schema);",
+            "}",
+            "",
+            "const helper = (value: unknown) => {",
+            "  describe('noise', () => expect(value).toBeDefined());",
+            "  return normalize(value);",
+            "};",
+        ])
+
+        records, edges = javascript_records(fixture_file("core/schemas.ts", "typescript"), text, 2400, 0)
+        symbols = {record.symbol for record in records if record.record_type == "symbol_definition"}
+        targets = {edge.target_symbol for edge in edges}
+
+        self.assertIn("LazyOptions", symbols)
+        self.assertIn("LazyFactory", symbols)
+        self.assertIn("$ZodLazy", symbols)
+        self.assertIn("defineLazy", symbols)
+        self.assertIn("helper", symbols)
+        self.assertIn("buildSchema", targets)
+        self.assertIn("parse", targets)
+        self.assertIn("normalize", targets)
+        for noise in ("describe", "expect"):
+            self.assertNotIn(noise, targets)
+
+    def test_typescript_multiline_function_body_extends_past_signature(self) -> None:
+        text = "\n".join([
+            "export function extractDefs<T extends Schema>(",
+            "  ctx: Context,",
+            "  schema: T",
+            "  // params: EmitParams",
+            "): void {",
+            "  const idToSchema = new Map<string, Schema>();",
+            "  for (const entry of ctx.seen.entries()) {",
+            "    const id = ctx.metadataRegistry.get(entry[0])?.id;",
+            "    if (id) {",
+            '      throw new Error(`Duplicate schema id "${id}" detected during JSON Schema conversion.`);',
+            "    }",
+            "  }",
+            "}",
+        ])
+
+        records, _edges = javascript_records(fixture_file("core/to-json-schema.ts", "typescript"), text, 2400, 0)
+        extract_defs = next(
+            record for record in records if record.record_type == "code_chunk" and record.symbol == "extractDefs"
+        )
+
+        self.assertEqual(extract_defs.line_start, 1)
+        self.assertEqual(extract_defs.line_end, 13)
+        self.assertIn("Duplicate schema id", extract_defs.display_content)
+        self.assertIn("idToSchema", extract_defs.display_content)
+
+    def test_typescript_records_keep_nonblank_lines_searchable(self) -> None:
+        text = "\n".join([
+            'import { z } from "zod";',
+            "",
+            "export interface Options {",
+            "  readonly name: string;",
+            "}",
+            "",
+            "export function build(options: Options) {",
+            "  return z.object({ name: z.string().default(options.name) });",
+            "}",
+            "",
+            "const trailing = build({ name: 'demo' });",
+        ])
+
+        records, _edges = javascript_records(fixture_file("src/app.ts", "typescript"), text, 1200, 0)
+        code_chunks = [record for record in records if record.record_type == "code_chunk"]
+        covered_lines = {
+            line
+            for record in code_chunks
+            if record.line_start is not None and record.line_end is not None
+            for line in range(record.line_start, record.line_end + 1)
+        }
+        nonblank_lines = {idx for idx, line in enumerate(text.splitlines(), 1) if line.strip()}
+
+        self.assertLessEqual(nonblank_lines, covered_lines)
+        coverage_chunks = [
+            record for record in code_chunks if record.metadata.get("fallback_reason") == "coverage line window"
+        ]
+        self.assertTrue(any("trailing" in record.display_content for record in coverage_chunks))
+
+    def test_typescript_records_filter_keyword_builtin_and_member_noise_edges(self) -> None:
+        text = "\n".join([
+            "export const $ZodLazy = makeLazy();",
+            "",
+            "export function bootstrap(object: Record<string, unknown>) {",
+            "  if (object.get) object.get();",
+            "  object.set('x', 1);",
+            "  util.defineLazy(object);",
+            "  core.$ZodLazy.init(object);",
+            "}",
+        ])
+
+        _records, edges = javascript_records(fixture_file("core/schemas.ts", "typescript"), text, 2400, 0)
+        targets = {edge.target_symbol for edge in edges}
+
+        self.assertIn("defineLazy", targets)
+        self.assertIn("$ZodLazy", targets)
+        for noise in ("if", "get", "set", "init"):
+            self.assertNotIn(noise, targets)
+
+    def test_typescript_exported_const_initializers_emit_member_call_edges(self) -> None:
+        text = "\n".join([
+            "export interface FancyLazy {}",
+            "export const FancyLazy: Constructor<FancyLazy> = constructor(",
+            '  "FancyLazy",',
+            "  (inst, def) => {",
+            "    core.$BaseLazy.init(inst, def);",
+            "    WidgetType.init(inst, def);",
+            "  }",
+            ");",
+        ])
+
+        records, edges = javascript_records(fixture_file("src/lazy.ts", "typescript"), text, 2400, 0)
+        symbols = {record.symbol for record in records if record.record_type == "symbol_definition"}
+        targets = {edge.target_symbol for edge in edges}
+
+        self.assertIn("FancyLazy", symbols)
+        self.assertIn("$BaseLazy", targets)
+        self.assertIn("WidgetType", targets)
+        self.assertNotIn("init", targets)
 
     def test_go_records_keep_file_only_metadata_off_records(self) -> None:
         # Simulate what inventory.py does: populate file metadata via the Go

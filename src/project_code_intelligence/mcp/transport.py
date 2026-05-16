@@ -31,7 +31,9 @@ PROTOCOL_VERSION = "2024-11-05"
 
 
 def set_mcp_environment_defaults() -> None:
-    _ = os.environ.setdefault("PROJECT_CODE_INTELLIGENCE_COLLECTION", default_collection(Path.cwd().resolve()))
+    if "PROJECT_CODE_INTELLIGENCE_COLLECTION" not in os.environ:
+        os.environ["PROJECT_CODE_INTELLIGENCE_COLLECTION"] = default_collection(Path.cwd().resolve())
+        os.environ["PROJECT_CODE_INTELLIGENCE_COLLECTION_DEFAULTED"] = "1"
 
 
 def result_response(request_id: JsonValue, result: Json) -> Json:

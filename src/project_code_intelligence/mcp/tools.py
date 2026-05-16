@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias, cast
@@ -79,6 +79,7 @@ STATIC_RULE_COMPACT_KEYS = (
 
 SearchMode: TypeAlias = Literal["search", "enumerate"]
 SearchQueryMode: TypeAlias = Literal["auto", "websearch", "all_terms", "any_terms"]
+RelatedDirection: TypeAlias = Literal["any", "incoming", "outgoing"]
 SearchQueryStrategy: TypeAlias = Literal[
     "list",
     "websearch",
@@ -88,8 +89,11 @@ SearchQueryStrategy: TypeAlias = Literal[
     "any_terms_fallback",
 ]
 
-SEARCH_TERM_RE = re.compile(r"[A-Za-z0-9_./:+@-]+")
+SEARCH_TERM_RE = re.compile(r"[A-Za-z0-9_$./:+@-]+")
+IDENTIFIER_QUERY_RE = re.compile(r"[$A-Za-z_][$A-Za-z0-9_$./:+@-]*\Z")
 SEARCH_OPERATOR_WORDS = frozenset({"and", "or", "not"})
+DEFAULT_MIXED_SEARCH_EXCLUDED_RECORD_TYPES = frozenset({"security_pattern"})
+MIN_CENTERED_SNIPPET_TERM_CHARS = 3
 
 CODE_INTEL_RECORD_SELECT_LIST = """
             SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role, r.branch,
@@ -100,9 +104,10 @@ CODE_INTEL_RECORD_SELECT_LIST = """
                    r.rule_id, r.severity, r.updated_at,
                    r.embedding IS NOT NULL AS has_embedding,
                    NULL::real AS rank,
+                   NULL::real AS match_score,
                    coalesce(f.is_untracked, false) AS is_untracked,
                    coalesce(f.indexed_dirty, false) AS indexed_dirty,
-                   left(r.display_content, 800) AS snippet_raw
+                   left(r.display_content, 12000) AS snippet_raw
             FROM project_code_intel_records r
             LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
             """
@@ -116,9 +121,32 @@ CODE_INTEL_RECORD_SELECT_WEBSEARCH = """
                    r.rule_id, r.severity, r.updated_at,
                    r.embedding IS NOT NULL AS has_embedding,
                    ts_rank_cd(r.search_document, websearch_to_tsquery('english', %s)) AS rank,
+                   (
+                       SELECT coalesce(sum(
+                           CASE WHEN lower(coalesce(r.symbol, '')) = lower(search_terms.term) THEN 40 ELSE 0 END
+                         + CASE WHEN lower(coalesce(r.title, '')) = lower(search_terms.term) THEN 32 ELSE 0 END
+                         + CASE
+                             WHEN coalesce(r.symbol, '') ILIKE search_terms.prefix_pattern ESCAPE '\\' THEN 20
+                             ELSE 0
+                           END
+                         + CASE WHEN coalesce(r.title, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 12 ELSE 0 END
+                         + CASE
+                             WHEN coalesce(r.source_path, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 8
+                             ELSE 0
+                           END
+                         + CASE WHEN coalesce(r.record_id, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 6 ELSE 0 END
+                         + CASE WHEN coalesce(r.summary, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 4 ELSE 0 END
+                         + CASE
+                             WHEN coalesce(r.display_content, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 1
+                             ELSE 0
+                           END
+                       ), 0)::real
+                       FROM unnest(%s::text[], %s::text[], %s::text[])
+                            AS search_terms(term, prefix_pattern, pattern)
+                   ) AS match_score,
                    coalesce(f.is_untracked, false) AS is_untracked,
                    coalesce(f.indexed_dirty, false) AS indexed_dirty,
-                   left(r.display_content, 800) AS snippet_raw
+                   left(r.display_content, 12000) AS snippet_raw
             FROM project_code_intel_records r
             LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
             """
@@ -144,9 +172,71 @@ CODE_INTEL_RECORD_SELECT_TERMS = """
                            r.display_content
                        ) ILIKE search_terms.pattern ESCAPE '\\'
                    ) AS rank,
+                   (
+                       SELECT coalesce(sum(
+                           CASE WHEN lower(coalesce(r.symbol, '')) = lower(search_terms.term) THEN 40 ELSE 0 END
+                         + CASE WHEN lower(coalesce(r.title, '')) = lower(search_terms.term) THEN 32 ELSE 0 END
+                         + CASE
+                             WHEN coalesce(r.symbol, '') ILIKE search_terms.prefix_pattern ESCAPE '\\' THEN 20
+                             ELSE 0
+                           END
+                         + CASE WHEN coalesce(r.title, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 12 ELSE 0 END
+                         + CASE
+                             WHEN coalesce(r.source_path, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 8
+                             ELSE 0
+                           END
+                         + CASE WHEN coalesce(r.record_id, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 6 ELSE 0 END
+                         + CASE WHEN coalesce(r.summary, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 4 ELSE 0 END
+                         + CASE
+                             WHEN coalesce(r.display_content, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 1
+                             ELSE 0
+                           END
+                       ), 0)::real
+                       FROM unnest(%s::text[], %s::text[], %s::text[])
+                            AS search_terms(term, prefix_pattern, pattern)
+                   ) AS match_score,
                    coalesce(f.is_untracked, false) AS is_untracked,
                    coalesce(f.indexed_dirty, false) AS indexed_dirty,
-                   left(r.display_content, 800) AS snippet_raw
+                   left(r.display_content, 12000) AS snippet_raw
+            FROM project_code_intel_records r
+            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
+            """
+
+CODE_INTEL_RECORD_SELECT_MATCHED_LIST = """
+            SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role, r.branch,
+                   r.commit_sha, r.tree_sha, r.source_path, r.language, r.file_role,
+                   r.content_class, r.record_type, r.record_id, r.parent_record_id,
+                   r.title, r.summary, r.line_start, r.line_end, r.symbol,
+                   r.symbol_kind, r.confidence_kind, r.confidence, r.tool,
+                   r.rule_id, r.severity, r.updated_at,
+                   r.embedding IS NOT NULL AS has_embedding,
+                   NULL::real AS rank,
+                   (
+                       SELECT coalesce(sum(
+                           CASE WHEN lower(coalesce(r.symbol, '')) = lower(search_terms.term) THEN 40 ELSE 0 END
+                         + CASE WHEN lower(coalesce(r.title, '')) = lower(search_terms.term) THEN 32 ELSE 0 END
+                         + CASE
+                             WHEN coalesce(r.symbol, '') ILIKE search_terms.prefix_pattern ESCAPE '\\' THEN 20
+                             ELSE 0
+                           END
+                         + CASE WHEN coalesce(r.title, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 12 ELSE 0 END
+                         + CASE
+                             WHEN coalesce(r.source_path, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 8
+                             ELSE 0
+                           END
+                         + CASE WHEN coalesce(r.record_id, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 6 ELSE 0 END
+                         + CASE WHEN coalesce(r.summary, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 4 ELSE 0 END
+                         + CASE
+                             WHEN coalesce(r.display_content, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 1
+                             ELSE 0
+                           END
+                       ), 0)::real
+                       FROM unnest(%s::text[], %s::text[], %s::text[])
+                            AS search_terms(term, prefix_pattern, pattern)
+                   ) AS match_score,
+                   coalesce(f.is_untracked, false) AS is_untracked,
+                   coalesce(f.indexed_dirty, false) AS indexed_dirty,
+                   left(r.display_content, 12000) AS snippet_raw
             FROM project_code_intel_records r
             LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
             """
@@ -204,6 +294,7 @@ _COMPACT_RECORD_STRIP = frozenset({
     "created_at",
     "updated_at",
     "confidence",
+    "match_score",
     "tool",
     "rule_id",
     "severity",
@@ -285,19 +376,65 @@ def _dedup_by_location(rows: list[db.DbRow]) -> list[db.DbRow]:
 DEFAULT_SNIPPET_LENGTH = 300
 
 
-def _extract_snippet(raw: str | None, length: int = DEFAULT_SNIPPET_LENGTH) -> str | None:
-    """Return the first `length` chars of code body from a display_content prefix."""
+def _display_content_body(raw: str | None) -> str | None:
     if not raw:
         return None
     m = _SNIPPET_FENCE_RE.search(raw)
     if m:
-        code = raw[m.end() :]
-        return _SNIPPET_CLOSE_FENCE_RE.sub("", code[:length]).rstrip() or None
+        return _SNIPPET_CLOSE_FENCE_RE.sub("", raw[m.end() :]).rstrip() or None
     return None
 
 
-def _compact_record(row: db.DbRow, snippet_length: int = DEFAULT_SNIPPET_LENGTH) -> dict[str, object]:
-    snippet = _extract_snippet(row.get("snippet_raw"), snippet_length)  # type: ignore[arg-type]
+def _first_snippet_match(code: str, terms: tuple[str, ...]) -> int | None:
+    if not terms:
+        return None
+    lower_code = code.casefold()
+    preferred_terms = [term for term in terms if len(term) >= MIN_CENTERED_SNIPPET_TERM_CHARS] or list(terms)
+    positions = [lower_code.find(term.casefold()) for term in preferred_terms if term]
+    matches = [position for position in positions if position >= 0]
+    return min(matches) if matches else None
+
+
+def _centered_text_window(text: str, center: int | None, length: int) -> str | None:
+    if center is None or len(text) <= length:
+        return text[:length].rstrip()
+    start = max(0, center - (length // 2))
+    end = min(len(text), start + length)
+    start = max(0, end - length)
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(text) else ""
+    body_length = max(0, length - len(prefix) - len(suffix))
+    if body_length != end - start:
+        start = max(0, min(center - (body_length // 2), len(text) - body_length))
+        end = min(len(text), start + body_length)
+        prefix = "..." if start > 0 else ""
+        suffix = "..." if end < len(text) else ""
+    return f"{prefix}{text[start:end].rstrip()}{suffix}" or None
+
+
+def _extract_snippet(
+    raw: str | None,
+    length: int = DEFAULT_SNIPPET_LENGTH,
+    terms: tuple[str, ...] = (),
+) -> str | None:
+    """Return a bounded code-body snippet, centered on a matched search term when available."""
+    code = _display_content_body(raw)
+    if code is None:
+        return None
+    return _centered_text_window(code, _first_snippet_match(code, terms), length)
+
+
+def _row_text(row: db.DbRow, key: str) -> str | None:
+    value = row.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _compact_record(
+    row: db.DbRow,
+    snippet_length: int = DEFAULT_SNIPPET_LENGTH,
+    snippet_terms: tuple[str, ...] = (),
+) -> dict[str, object]:
+    snippet = _extract_snippet(_row_text(row, "snippet_raw"), snippet_length, snippet_terms)
     out: dict[str, object] = {
         k: v
         for k, v in row.items()
@@ -319,9 +456,13 @@ def _compact_record(row: db.DbRow, snippet_length: int = DEFAULT_SNIPPET_LENGTH)
     return out
 
 
-def _verbose_record(row: db.DbRow, snippet_length: int = DEFAULT_SNIPPET_LENGTH) -> dict[str, object]:
-    snippet = _extract_snippet(row.get("snippet_raw"), snippet_length)  # type: ignore[arg-type]
-    out = {k: v for k, v in row.items() if k != "snippet_raw"}
+def _verbose_record(
+    row: db.DbRow,
+    snippet_length: int = DEFAULT_SNIPPET_LENGTH,
+    snippet_terms: tuple[str, ...] = (),
+) -> dict[str, object]:
+    snippet = _extract_snippet(_row_text(row, "snippet_raw"), snippet_length, snippet_terms)
+    out = {k: v for k, v in row.items() if k not in {"snippet_raw", "match_score"}}
     if snippet:
         out["snippet"] = snippet
     return out
@@ -336,12 +477,13 @@ def _format_records(
     *,
     verbose: bool,
     snippet_length: int = DEFAULT_SNIPPET_LENGTH,
+    snippet_terms: tuple[str, ...] = (),
 ) -> list[dict[str, object]]:
     fmt = _verbose_record if verbose else _compact_record
-    return [fmt(row, snippet_length) for row in rows]
+    return [fmt(row, snippet_length, snippet_terms) for row in rows]
 
 
-def _format_edges(rows: list[db.DbRow], *, verbose: bool) -> list[dict[str, object]]:
+def _format_edges(rows: Sequence[Mapping[str, object]], *, verbose: bool) -> list[dict[str, object]]:
     if verbose:
         return [dict(row) for row in rows]
     return [{k: v for k, v in row.items() if k not in _COMPACT_EDGE_STRIP} for row in rows]
@@ -353,6 +495,15 @@ class TextSearchPlan:
     strategy: SearchQueryStrategy
     terms: tuple[str, ...]
     limit: int
+
+
+@dataclass(frozen=True)
+class RelatedQueryContext:
+    record_id: str | None
+    symbol: str | None
+    direction: RelatedDirection
+    scoped_record_ids: tuple[str, ...]
+    parent_record_ids: frozenset[str]
 
 
 def search_query_mode(args: Json) -> SearchQueryMode:
@@ -386,9 +537,39 @@ def search_terms(query: str) -> list[str]:
     return terms[:16]
 
 
+def identifier_like_single_term(terms: tuple[str, ...]) -> bool:
+    if len(terms) != 1:
+        return False
+    term = terms[0]
+    if not IDENTIFIER_QUERY_RE.fullmatch(term):
+        return False
+    return any(char in term for char in "$_./:+@-") or any(char.isdigit() or char.isupper() for char in term)
+
+
+def append_default_mixed_search_exclusions(args: Json, clauses: list[str], alias: str) -> None:
+    if optional_text(args, "record_type") or optional_text(args, "content_class"):
+        return
+    clauses.extend(
+        f"{alias}.record_type <> '{record_type}'" for record_type in sorted(DEFAULT_MIXED_SEARCH_EXCLUDED_RECORD_TYPES)
+    )
+
+
 def like_pattern_for_term(term: str) -> str:
     escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
+
+
+def prefix_like_pattern_for_term(term: str) -> str:
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"{escaped}%"
+
+
+def match_score_params(terms: tuple[str, ...]) -> QueryParams:
+    return [
+        list(terms),
+        [prefix_like_pattern_for_term(term) for term in terms],
+        [like_pattern_for_term(term) for term in terms],
+    ]
 
 
 def run_text_search_query(
@@ -397,43 +578,45 @@ def run_text_search_query(
     plan: TextSearchPlan,
 ) -> list[db.DbRow]:
     clauses, filter_params = code_intel_clauses(args, "r")
+    if plan.query:
+        append_default_mixed_search_exclusions(args, clauses, "r")
     if plan.query and plan.strategy == "websearch":
         clauses.append("r.search_document @@ websearch_to_tsquery('english', %s)")
         query_sql = query_with_where(
             CODE_INTEL_RECORD_SELECT_WEBSEARCH,
             clauses,
             """
-            ORDER BY rank DESC, r.updated_at DESC
+            ORDER BY rank DESC, match_score DESC, r.updated_at DESC
             LIMIT %s
             """,
         )
-        params: QueryParams = [plan.query, *filter_params, plan.query, plan.limit]
+        params: QueryParams = [plan.query, *match_score_params(plan.terms), *filter_params, plan.query, plan.limit]
     elif plan.query and plan.strategy in {"all_terms", "all_terms_fallback", "any_terms", "any_terms_fallback"}:
         require_all = plan.strategy in {"all_terms", "all_terms_fallback"}
         patterns = [like_pattern_for_term(term) for term in plan.terms]
         clauses.append(ALL_TERMS_SEARCH_CLAUSE if require_all else ANY_TERMS_SEARCH_CLAUSE)
-        if plan.strategy == "all_terms_fallback":
-            # Every result matches all terms so rank = count(terms) = constant — not a useful signal.
+        if require_all:
+            # Every result matches all terms, so rank is constant and not useful.
             # Use NULL rank and sort by recency instead.
             query_sql = query_with_where(
-                CODE_INTEL_RECORD_SELECT_LIST,
+                CODE_INTEL_RECORD_SELECT_MATCHED_LIST,
                 clauses,
                 """
-            ORDER BY r.updated_at DESC
+            ORDER BY match_score DESC, r.updated_at DESC
             LIMIT %s
             """,
             )
-            params = [*filter_params, patterns, plan.limit]
+            params = [*match_score_params(plan.terms), *filter_params, patterns, plan.limit]
         else:
             query_sql = query_with_where(
                 CODE_INTEL_RECORD_SELECT_TERMS,
                 clauses,
                 """
-            ORDER BY rank DESC, r.updated_at DESC
+            ORDER BY rank DESC, match_score DESC, r.updated_at DESC
             LIMIT %s
             """,
             )
-            params = [patterns, *filter_params, patterns, plan.limit]
+            params = [patterns, *match_score_params(plan.terms), *filter_params, patterns, plan.limit]
     else:
         query_sql = query_with_where(
             CODE_INTEL_RECORD_SELECT_LIST,
@@ -508,8 +691,49 @@ def static_status_rows(conn: db.DbConnection, filters: StatusFilters) -> tuple[l
     return static_runs, static_findings
 
 
+def _path_has_repo_suffix(path: Path, repo: str) -> bool:
+    repo_parts = tuple(part for part in Path(repo).parts if part not in {"", "."})
+    return bool(repo_parts) and tuple(path.parts[-len(repo_parts) :]) == repo_parts
+
+
+def _snapshot_repo_root_candidates(snapshot: Json) -> list[Path]:
+    cwd = Path.cwd()
+    repo_value = snapshot.get("repo")
+    repo = repo_value if isinstance(repo_value, str) and repo_value else "."
+    candidates: list[Path] = []
+    metadata = snapshot.get("metadata")
+    if isinstance(metadata, dict):
+        repo_path = cast("dict[object, object]", metadata).get("repo_path")
+        if isinstance(repo_path, str) and repo_path:
+            candidates.append(Path(repo_path))
+    if repo == "." or _path_has_repo_suffix(cwd, repo):
+        candidates.append(cwd)
+    if repo != ".":
+        candidates.extend((cwd / repo, cwd.parent / repo))
+    return list(dict.fromkeys(candidates))
+
+
+def _snapshot_head_commit(snapshot: Json) -> str | None:
+    for candidate in _snapshot_repo_root_candidates(snapshot):
+        head = git_utils.run_git(candidate, ["rev-parse", "HEAD"])
+        if head:
+            return head.strip()
+    return None
+
+
+def _annotate_snapshot_head_status(snapshot: Json, head_commit: str | None) -> None:
+    snapshot["head_commit"] = head_commit
+    if head_commit is None:
+        snapshot["head_matches_snapshot"] = None
+        snapshot["head_status"] = "unknown"
+        snapshot["head_status_reason"] = "local_repo_unavailable"
+        return
+    matches = snapshot.get("commit_sha") == head_commit
+    snapshot["head_matches_snapshot"] = matches
+    snapshot["head_status"] = "current" if matches else "stale"
+
+
 def _annotate_status_snapshots(snapshot_rows: list[db.DbRow]) -> list[Json]:
-    head_commit = git_utils.run_git(Path.cwd(), ["rev-parse", "HEAD"])
     now = datetime.datetime.now(datetime.timezone.utc)
     snapshots: list[Json] = []
     for snap in snapshot_rows:
@@ -517,10 +741,7 @@ def _annotate_status_snapshots(snapshot_rows: list[db.DbRow]) -> list[Json]:
         created = snap_dict.get("created_at")
         if created is not None and isinstance(created, datetime.datetime):
             snap_dict["index_age_seconds"] = int((now - created).total_seconds())
-        snap_dict["head_commit"] = head_commit
-        snap_dict["head_matches_snapshot"] = (
-            head_commit is not None and snap_dict.get("commit_sha") == head_commit.strip()
-        )
+        _annotate_snapshot_head_status(snap_dict, _snapshot_head_commit(snap_dict))
         snapshots.append(snap_dict)
     return snapshots
 
@@ -575,6 +796,61 @@ def _status_file_breakdowns(
         [directory_depth, *filters.files.params],
     ).fetchall()
     return {"language": language, "directory": directory}
+
+
+def _positive_int(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return max(0, value)
+    if isinstance(value, float):
+        return max(0, int(value))
+    if isinstance(value, str) and value.isdecimal():
+        return int(value)
+    return 0
+
+
+def _snapshot_embed_record_types(snapshots: list[Json]) -> set[str]:
+    record_types: set[str] = set()
+    for snapshot in snapshots:
+        metadata = snapshot.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        values = cast("dict[object, object]", metadata).get("embed_record_types")
+        if not isinstance(values, list):
+            continue
+        record_types.update(item for item in cast("list[object]", values) if isinstance(item, str) and item)
+    return record_types
+
+
+def _status_queryability(
+    snapshots: list[Json],
+    records_by_type: list[db.DbRow],
+    edges_by_type: list[db.DbRow],
+) -> Json:
+    text_record_types = sorted({
+        str(row.get("record_type"))
+        for row in records_by_type
+        if row.get("record_type") and _positive_int(row.get("count"))
+    })
+    semantic_record_types = sorted({
+        str(row.get("record_type"))
+        for row in records_by_type
+        if row.get("record_type") and _positive_int(row.get("embedded_records"))
+    })
+    configured_embed_record_types = sorted(_snapshot_embed_record_types(snapshots))
+    empty_embed_record_types = sorted(set(configured_embed_record_types) - set(semantic_record_types))
+    edge_types = sorted({
+        str(row.get("edge_type")) for row in edges_by_type if row.get("edge_type") and _positive_int(row.get("edges"))
+    })
+    return {
+        "text_record_types": text_record_types,
+        "semantic_record_types": semantic_record_types,
+        "text_only_record_types": sorted(set(text_record_types) - set(semantic_record_types)),
+        "configured_embed_record_types": configured_embed_record_types,
+        "empty_embed_record_types": empty_embed_record_types,
+        "edge_types": edge_types,
+    }
 
 
 def tool_code_intel_status(args: Json) -> Json:
@@ -676,8 +952,25 @@ def tool_code_intel_status(args: Json) -> Json:
             ),
             filters.edges.params,
         ).fetchall()
+        edge_types = conn.execute(
+            db.query_sql(
+                query_with_where(
+                    """
+            SELECT e.edge_type, count(*) AS edges
+            FROM project_code_intel_edges e
+            """,
+                    filters.edges.clauses,
+                    """
+            GROUP BY e.edge_type
+            ORDER BY e.edge_type
+            """,
+                )
+            ),
+            filters.edges.params,
+        ).fetchall()
         breakdowns = _status_file_breakdowns(conn, filters, directory_depth)
         static_runs, static_findings = static_status_rows(conn, filters)
+    queryability = _status_queryability(snapshots, by_type, edge_types)
     return ok({
         "schema_present": True,
         "schema_versions": schema_versions,
@@ -687,6 +980,7 @@ def tool_code_intel_status(args: Json) -> Json:
         "records": counts,
         "records_by_type": by_type,
         "edges": edges,
+        "queryability": queryability,
         "language_breakdown": breakdowns["language"],
         "directory_breakdown": breakdowns["directory"],
         "static_runs": static_runs,
@@ -715,6 +1009,9 @@ def _execute_text_search(
     elif query_mode == "any_terms":
         strategy = "any_terms"
         rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
+    elif identifier_like_single_term(terms):
+        strategy = "all_terms"
+        rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
     else:
         strategy = "websearch"
         rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
@@ -726,6 +1023,199 @@ def _execute_text_search(
             strategy = "any_terms_fallback"
             rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
     return rows, strategy, fallback_reason
+
+
+def related_direction(args: Json) -> RelatedDirection:
+    value = optional_text(args, "direction") or "any"
+    if value in {"any", "incoming", "outgoing"}:
+        return cast("RelatedDirection", value)
+    raise McpProtocolError("direction must be one of: any, incoming, outgoing")
+
+
+def related_record_ids(conn: db.DbConnection, args: Json, record_id: str) -> tuple[list[str], set[str]]:
+    lookup_args = {key: args[key] for key in ("collection", "repo", "snapshot_id", "include_historical") if key in args}
+    clauses, params = code_intel_clauses(lookup_args, "r")
+    clauses.append("r.record_id = %s")
+    params.append(record_id)
+    row = conn.execute(
+        db.query_sql(
+            query_with_where(
+                """
+            SELECT r.parent_record_id
+            FROM project_code_intel_records r
+            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
+            """,
+                clauses,
+                """
+            ORDER BY r.updated_at DESC, r.id DESC
+            LIMIT 1
+            """,
+            )
+        ),
+        params,
+    ).fetchone()
+    parent_id = row.get("parent_record_id") if row is not None else None
+    if isinstance(parent_id, str) and parent_id and parent_id != record_id:
+        return [record_id, parent_id], {parent_id}
+    return [record_id], set()
+
+
+def related_record_clause(direction: RelatedDirection) -> str:
+    if direction == "outgoing":
+        return "e.source_record_id = ANY(%s)"
+    if direction == "incoming":
+        return "e.target_record_id = ANY(%s)"
+    return "(e.source_record_id = ANY(%s) OR e.target_record_id = ANY(%s))"
+
+
+def related_symbol_clause(direction: RelatedDirection) -> str:
+    if direction == "outgoing":
+        return "e.source_symbol = %s"
+    if direction == "incoming":
+        return "e.target_symbol = %s"
+    return "(e.source_symbol = %s OR e.target_symbol = %s)"
+
+
+def related_clause_params(direction: RelatedDirection, value: object) -> QueryParams:
+    return [value] if direction != "any" else [value, value]
+
+
+def annotate_related_edges(
+    rows: list[db.DbRow],
+    *,
+    context: RelatedQueryContext,
+) -> list[dict[str, object]]:
+    edges = [dict(row) for row in rows]
+    for edge in edges:
+        source = edge.get("source_record_id")
+        target = edge.get("target_record_id")
+        edge_direction = related_edge_direction(edge, context=context)
+        target_resolved = related_edge_target_resolved(edge)
+        edge["direction"] = edge_direction
+        edge["target_resolved"] = target_resolved
+        edge["target_kind"] = "project_symbol" if target_resolved else "unresolved"
+        if context.record_id and context.parent_record_ids:
+            edge["edge_source"] = (
+                "parent_record"
+                if source in context.parent_record_ids or target in context.parent_record_ids
+                else "record"
+            )
+    edges.sort(
+        key=lambda edge: (
+            related_edge_sort_priority(edge, context=context),
+            -_positive_int(edge.get("id")),
+        )
+    )
+    return edges
+
+
+def related_edge_target_resolved(edge: Mapping[str, object]) -> bool:
+    if isinstance(edge.get("target_resolved"), bool):
+        return bool(edge["target_resolved"])
+    return edge.get("target_record_db_id") is not None
+
+
+def related_edge_direction(
+    edge: Mapping[str, object],
+    *,
+    context: RelatedQueryContext,
+) -> str:
+    source = edge.get("source_record_id")
+    target = edge.get("target_record_id")
+    if context.scoped_record_ids:
+        record_ids = set(context.scoped_record_ids)
+        if source in record_ids:
+            return "outgoing"
+        if target in record_ids:
+            return "incoming"
+    if context.symbol:
+        if edge.get("target_symbol") == context.symbol:
+            return "incoming"
+        if edge.get("source_symbol") == context.symbol:
+            return "outgoing"
+    return "outgoing"
+
+
+def related_edge_sort_priority(
+    edge: Mapping[str, object],
+    *,
+    context: RelatedQueryContext,
+) -> int:
+    resolved = related_edge_target_resolved(edge)
+    edge_direction = str(edge.get("direction") or "outgoing")
+    if context.direction != "any":
+        return 0 if resolved else 1
+    if context.symbol and not context.scoped_record_ids:
+        base_priority = 0 if edge_direction == "incoming" else 1
+    else:
+        base_priority = 0 if edge_direction == "outgoing" else 1
+    return base_priority if resolved else base_priority + 2
+
+
+def related_order_clause(
+    *,
+    symbol: str | None,
+    scoped_record_ids: list[str],
+    direction: RelatedDirection,
+) -> tuple[str, QueryParams]:
+    if direction == "any" and symbol and not scoped_record_ids:
+        return (
+            """
+            CASE
+                WHEN e.target_symbol = %s AND tgt.id IS NOT NULL THEN 0
+                WHEN e.source_symbol = %s AND tgt.id IS NOT NULL THEN 1
+                WHEN e.target_symbol = %s THEN 2
+                ELSE 3
+            END,
+            (tgt.id IS NOT NULL) DESC,
+            e.id DESC
+            """,
+            [symbol, symbol, symbol],
+        )
+    if direction == "any" and scoped_record_ids:
+        return (
+            """
+            CASE
+                WHEN e.source_record_id = ANY(%s) AND tgt.id IS NOT NULL THEN 0
+                WHEN e.target_record_id = ANY(%s) AND tgt.id IS NOT NULL THEN 1
+                WHEN e.source_record_id = ANY(%s) THEN 2
+                ELSE 3
+            END,
+            (tgt.id IS NOT NULL) DESC,
+            e.id DESC
+            """,
+            [scoped_record_ids, scoped_record_ids, scoped_record_ids],
+        )
+    return "(tgt.id IS NOT NULL) DESC, e.id DESC", []
+
+
+def related_base_edge_filters(args: Json, direction: RelatedDirection) -> tuple[list[str], QueryParams]:
+    clauses = ["TRUE", "(e.target_record_id IS NULL OR e.source_record_id != e.target_record_id)"]
+    params: QueryParams = []
+    symbol = optional_text(args, "symbol")
+    collection = scoped_collection(args)
+    repo = optional_text(args, "repo")
+    edge_type = optional_text(args, "edge_type")
+    confidence_kind = optional_text(args, "confidence_kind")
+    if symbol:
+        clauses.append(related_symbol_clause(direction))
+        params.extend(related_clause_params(direction, symbol))
+    if repo:
+        clauses.append("e.repo = %s")
+        params.append(repo)
+    if collection:
+        clauses.append("e.collection = %s")
+        params.append(collection)
+    if edge_type:
+        clauses.append("e.edge_type = %s")
+        params.append(edge_type)
+    if confidence_kind:
+        clauses.append("e.confidence_kind = %s")
+        params.append(confidence_kind)
+    snapshot_clauses, snapshot_params = scoped_snapshot_clauses(args, "e")
+    clauses.extend(snapshot_clauses)
+    params.extend(snapshot_params)
+    return clauses, params
 
 
 def tool_search_code_intel_text(args: Json) -> Json:
@@ -747,7 +1237,10 @@ def tool_search_code_intel_text(args: Json) -> Json:
         "query": query,
         "query_strategy": strategy,
         **snapshot_scope_response(args),
-        "results": cast("JsonValue", _format_records(rows, verbose=verbose, snippet_length=snippet_length)),
+        "results": cast(
+            "JsonValue",
+            _format_records(rows, verbose=verbose, snippet_length=snippet_length, snippet_terms=terms),
+        ),
     }
     # Echo mode/query_mode only when explicitly set — inferred defaults are noise.
     if optional_text(args, "mode") is not None:
@@ -802,6 +1295,7 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
     snippet_length = require_int(args, "snippet_length", DEFAULT_SNIPPET_LENGTH, 1, 800)
     clauses, params = code_intel_clauses(args, "r")
     clauses.append("r.embedding IS NOT NULL")
+    append_default_mixed_search_exclusions(args, clauses, "r")
     embedding, embedding_dimensions = query_embedding(query)
     query_params = [embedding, *params, limit]
     with mcp_db.connect() as conn:
@@ -956,40 +1450,26 @@ def tool_related_code_intel(args: Json) -> Json:
     if not record_id and not symbol:
         raise McpProtocolError("record_id or symbol is required")
     limit = require_int(args, "limit", 20, 1, 100)
-    collection = scoped_collection(args)
-    repo = optional_text(args, "repo")
-    edge_type = optional_text(args, "edge_type")
-    confidence_kind = optional_text(args, "confidence_kind")
-
-    clauses = ["TRUE", "(e.target_record_id IS NULL OR e.source_record_id != e.target_record_id)"]
-    params: QueryParams = []
-    if record_id:
-        clauses.append("(e.source_record_id = %s OR e.target_record_id = %s)")
-        params.extend([record_id, record_id])
-    if symbol:
-        clauses.append("(e.source_symbol = %s OR e.target_symbol = %s)")
-        params.extend([symbol, symbol])
-    if repo:
-        clauses.append("e.repo = %s")
-        params.append(repo)
-    if collection:
-        clauses.append("e.collection = %s")
-        params.append(collection)
-    if edge_type:
-        clauses.append("e.edge_type = %s")
-        params.append(edge_type)
-    if confidence_kind:
-        clauses.append("e.confidence_kind = %s")
-        params.append(confidence_kind)
-    snapshot_clauses, snapshot_params = scoped_snapshot_clauses(args, "e")
-    clauses.extend(snapshot_clauses)
-    params.extend(snapshot_params)
-    params.append(limit)
+    direction = related_direction(args)
+    clauses, params = related_base_edge_filters(args, direction)
 
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
         validate_explicit_snapshot_id(conn, args)
+        parent_record_ids: set[str] = set()
+        scoped_record_ids: list[str] = []
+        if record_id:
+            scoped_record_ids, parent_record_ids = related_record_ids(conn, args, record_id)
+            clauses.append(related_record_clause(direction))
+            params.extend(related_clause_params(direction, scoped_record_ids))
+        order_clause, order_params = related_order_clause(
+            symbol=symbol,
+            scoped_record_ids=scoped_record_ids,
+            direction=direction,
+        )
+        params.extend(order_params)
+        params.append(limit)
         edges = conn.execute(
             db.query_sql(
                 query_with_where(
@@ -998,6 +1478,8 @@ def tool_related_code_intel(args: Json) -> Json:
                    e.source_record_id, e.target_record_id, e.edge_type,
                    e.source_symbol, e.target_symbol, e.source_path, e.target_path,
                    e.confidence_kind, e.metadata,
+                   tgt.id IS NOT NULL AS target_resolved,
+                   CASE WHEN tgt.id IS NOT NULL THEN 'project_symbol' ELSE 'unresolved' END AS target_kind,
                    src.id AS source_record_db_id, src.title AS source_title,
                    src.summary AS source_summary, src.record_type AS source_record_type,
                    src.language AS source_language, src.line_start AS source_line_start,
@@ -1013,8 +1495,8 @@ def tool_related_code_intel(args: Json) -> Json:
                 ON tgt.snapshot_id = e.snapshot_id AND tgt.record_id = e.target_record_id
             """,
                     clauses,
-                    """
-            ORDER BY e.id DESC
+                    f"""
+            ORDER BY {order_clause}
             LIMIT %s
             """,
                 )
@@ -1022,7 +1504,21 @@ def tool_related_code_intel(args: Json) -> Json:
             params,
         ).fetchall()
     verbose = optional_bool(args, "verbose") or False
-    return ok({**snapshot_scope_response(args), "edges": cast("JsonValue", _format_edges(edges, verbose=verbose))})
+    related_context = RelatedQueryContext(
+        record_id=record_id,
+        symbol=symbol,
+        direction=direction,
+        scoped_record_ids=tuple(scoped_record_ids),
+        parent_record_ids=frozenset(parent_record_ids),
+    )
+    annotated_edges = annotate_related_edges(
+        edges,
+        context=related_context,
+    )
+    return ok({
+        **snapshot_scope_response(args),
+        "edges": cast("JsonValue", _format_edges(annotated_edges, verbose=verbose)),
+    })
 
 
 def tool_search_static_findings(args: Json) -> Json:
