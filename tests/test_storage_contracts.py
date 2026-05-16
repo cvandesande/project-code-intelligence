@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
 from project_code_intelligence import db, profile_context
 from project_code_intelligence.code_profiles.base import GenericProfile
-from project_code_intelligence.models import PARSER_VERSION, IntelFile, IntelRecord, JsonObject, Snapshot
+from project_code_intelligence.models import PARSER_VERSION, IntelEdge, IntelFile, IntelRecord, JsonObject, Snapshot
 from project_code_intelligence.storage import (
     RecordInsertContext,
     file_signature,
     insert_records,
     parser_failure_metadata,
+    pre_resolve_edge_targets,
+    resolve_edge_targets,
     row_int,
     snapshot_versions_compatible,
 )
@@ -103,6 +106,29 @@ class FakeConnection:
         self.sql = sql
         self.params = params or []
         return self
+
+
+class FakeRows:
+    def __init__(self, rows: list[db.DbRow]) -> None:
+        self.rows = rows
+
+    def fetchall(self) -> list[db.DbRow]:
+        return self.rows
+
+    def fetchone(self) -> db.DbRow | None:
+        return self.rows[0] if self.rows else None
+
+
+class FakeRowsConnection:
+    def __init__(self, row_sets: list[list[db.DbRow]]) -> None:
+        self.row_sets = row_sets
+        self.sql: list[str] = []
+        self.params: list[list[object]] = []
+
+    def execute(self, sql: str, params: list[object] | None = None) -> FakeRows:
+        self.sql.append(sql)
+        self.params.append(params or [])
+        return FakeRows(self.row_sets.pop(0))
 
 
 class StorageContractTests(unittest.TestCase):
@@ -215,6 +241,103 @@ class StorageContractTests(unittest.TestCase):
         self.assertEqual(row["metadata"], {"a": 1, "b": 2})
         self.assertEqual(row["embedding"], "[0.1,0.2]")
         self.assertIn("ON CONFLICT", fake.sql or "")
+
+    def test_insert_records_deduplicates_same_batch_upsert_keys_in_sql(self) -> None:
+        fake = FakeConnection()
+        context = RecordInsertContext(
+            conn=cast("db.DbConnection", fake),
+            snapshot=snapshot_fixture(),
+            snapshot_id=7,
+            file_ids={"src/main.py": 9},
+            file_hashes={"src/main.py": "filesha"},
+        )
+        first = record_fixture()
+        duplicate = replace(
+            first, summary="updated summary", display_content="updated display", metadata={"dupe": True}
+        )
+
+        inserted = insert_records(context, [first, duplicate])
+
+        self.assertEqual(inserted, 2)
+        self.assertIn("DISTINCT ON (snapshot_id, record_type, record_id, embedding_text_hash)", fake.sql or "")
+        self.assertIn("input_order DESC", fake.sql or "")
+        batch = cast("list[dict[str, object]]", json.loads(cast("str", fake.params[0])))
+        self.assertEqual([row["input_order"] for row in batch], [0, 1])
+        self.assertEqual(
+            [(row["snapshot_id"], row["record_type"], row["record_id"], row["embedding_text_hash"]) for row in batch],
+            [
+                (7, "code_chunk", "src/main.py::chunk::000001-000002", batch[0]["embedding_text_hash"]),
+                (7, "code_chunk", "src/main.py::chunk::000001-000002", batch[0]["embedding_text_hash"]),
+            ],
+        )
+
+    def test_pre_resolve_edge_targets_uses_same_file_then_same_directory_priority(self) -> None:
+        fake = FakeRowsConnection([
+            cast(
+                "list[db.DbRow]",
+                [
+                    {
+                        "symbol": "target",
+                        "record_id": "src/other.py::function::target::000001",
+                        "source_path": "src/other.py",
+                    },
+                    {
+                        "symbol": "target",
+                        "record_id": "src/main.py::function::target::000001",
+                        "source_path": "src/main.py",
+                    },
+                ],
+            )
+        ])
+        same_file = IntelEdge(
+            source_record_id="src/main.py::function::caller::000010",
+            edge_type="call_candidate",
+            target_symbol="target",
+            source_path="src/main.py",
+        )
+        same_dir = IntelEdge(
+            source_record_id="src/caller.py::function::caller::000010",
+            edge_type="call_candidate",
+            target_symbol="target",
+            source_path="src/caller.py",
+        )
+        missing = IntelEdge(
+            source_record_id="src/missing.py::function::caller::000010",
+            edge_type="call_candidate",
+            target_symbol="missing",
+            source_path="src/missing.py",
+        )
+
+        resolved = pre_resolve_edge_targets(cast("db.DbConnection", fake), 7, [same_file, same_dir, missing])
+
+        self.assertEqual(resolved, 2)
+        self.assertEqual(same_file.target_record_id, "src/main.py::function::target::000001")
+        self.assertEqual(same_file.target_path, "src/main.py")
+        self.assertEqual(same_dir.target_record_id, "src/main.py::function::target::000001")
+        self.assertEqual(same_dir.target_path, "src/main.py")
+        self.assertIsNone(missing.target_record_id)
+
+    def test_resolve_edge_targets_batches_candidates_and_reports_progress(self) -> None:
+        fake = FakeRowsConnection([
+            cast(
+                "list[db.DbRow]",
+                [{"candidate_count": 3, "last_target_symbol": "target", "last_edge_id": 42, "updated_count": 2}],
+            ),
+            cast(
+                "list[db.DbRow]",
+                [{"candidate_count": 0, "last_target_symbol": None, "last_edge_id": None, "updated_count": 0}],
+            ),
+        ])
+        progress: list[int] = []
+
+        resolved = resolve_edge_targets(cast("db.DbConnection", fake), 7, batch_size=3, progress_fn=progress.append)
+
+        self.assertEqual(resolved, 2)
+        self.assertEqual(progress, [3])
+        self.assertEqual(fake.params[0], [7, None, None, None, 0, 3, 7])
+        self.assertEqual(fake.params[1], [7, "target", "target", "target", 42, 3, 7])
+        self.assertIn("candidate_edges AS MATERIALIZED", fake.sql[0])
+        self.assertIn("IS NOT DISTINCT FROM", fake.sql[0])
 
 
 if __name__ == "__main__":

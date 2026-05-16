@@ -223,8 +223,18 @@ class DoctorTests(unittest.TestCase):
         output = format_summary(
             [
                 CheckResult("platform", "ok", "Python 3.13.5 on Linux 7.0.4+deb13-amd64 (x86_64)"),
-                CheckResult("gpu-0", "ok", "AMD GPU 0x1002:0x1586: VRAM=512.0 MiB; shared/unified=62.5 GiB"),
-                CheckResult("npu", "ok", "AMD NPU device detected: /dev/accel/accel0"),
+                CheckResult(
+                    "gpu-0",
+                    "ok",
+                    "AMD GPU 0x1002:0x1586: VRAM=512.0 MiB; shared/unified=62.5 GiB",
+                    "card=card0; driver=amdgpu",
+                ),
+                CheckResult(
+                    "npu",
+                    "ok",
+                    "AMD NPU 0x1022:0x17f0",
+                    "device=accel0; path=/dev/accel/accel0; driver=amdxdna",
+                ),
                 CheckResult(
                     "database",
                     "ok",
@@ -239,8 +249,10 @@ class DoctorTests(unittest.TestCase):
             color=False,
         )
 
-        self.assertIn("AMD 0x1002:0x1586 · VRAM 512 MiB · shared 62.5 GiB", output)
+        self.assertIn("AMD 1002:1586 · amdgpu · VRAM 512 MiB · shared 62.5 GiB", output)
+        self.assertIn("AMD NPU 1022:17F0 · amdxdna · accel0", output)
         self.assertNotIn("shared/unified=62.5", output)
+        self.assertNotIn("card=card0", output)
         self.assertNotIn("\n│               GiB", output)
 
     def test_format_summary_lists_remote_only_after_endpoint_validation(self) -> None:

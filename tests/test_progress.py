@@ -106,6 +106,7 @@ class ProgressRenderingTests(unittest.TestCase):
         self.assertEqual(emitter.embedding_framework, "Apple MLX")
         self.assertEqual(emitter.embedding_model, "mlx-community/Qwen3-Embedding-0.6B-8bit")
         self.assertEqual(emitter.embedding_endpoint, "http://127.0.0.1:18081/v1/embeddings")
+        self.assertEqual(emitter.endpoint_row_text(), "127.0.0.1:18081 · Apple MLX")
 
     def test_plan_event_without_framework_keeps_endpoint_for_fallback(self) -> None:
         emitter = progress.RichEmitter()
@@ -127,12 +128,26 @@ class ProgressRenderingTests(unittest.TestCase):
             progress.compact_endpoint_target(emitter.embedding_endpoint),
             "127.0.0.1:18081",
         )
+        self.assertEqual(emitter.endpoint_row_text(), "127.0.0.1:18081")
+
+    def test_endpoint_row_text_combines_endpoint_and_framework(self) -> None:
+        self.assertEqual(
+            progress.embedding_endpoint_row_text("http://127.0.0.1:18081/v1/embeddings", "AMD ROCm"),
+            "127.0.0.1:18081 · AMD ROCm",
+        )
 
     def test_compact_endpoint_target_handles_remote_host(self) -> None:
         self.assertEqual(
             progress.compact_endpoint_target("https://f5ai.pd.f5net.com/v1/embeddings"),
             "f5ai.pd.f5net.com",
         )
+
+    def test_live_progress_row_names_count_units(self) -> None:
+        detail = progress.live_progress_row_text({"phase": "embedding", "phase_done": 12, "phase_total": 40})
+
+        if detail is None:
+            raise AssertionError("expected progress row detail")
+        self.assertIn("12/40 embedding records", detail)
 
     def test_live_progress_shows_current_repo_before_discovery_finishes(self) -> None:
         emitter = progress.RichEmitter()

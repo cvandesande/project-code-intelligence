@@ -31,6 +31,7 @@ __all__ = [
     "RecordInsertContext",
     "copy_unchanged_parser_failures",
     "copy_unchanged_records_and_edges",
+    "count_unresolved_edge_targets",
     "ensure_schema",
     "file_signature",
     "insert_edges",
@@ -41,6 +42,7 @@ __all__ = [
     "insert_static_runs",
     "latest_snapshot_info",
     "parser_failure_metadata",
+    "pre_resolve_edge_targets",
     "previous_file_signatures",
     "previous_file_state_signature",
     "previous_file_states",
@@ -85,6 +87,43 @@ class RecordInsertContext:
     snapshot_id: int
     file_ids: dict[str, int]
     file_hashes: dict[str, str | None]
+
+
+@dataclass(frozen=True)
+class _SymbolDefinitionTarget:
+    record_id: str
+    source_path: str
+
+
+@dataclass(frozen=True)
+class _SymbolDefinitionChoices:
+    by_source_path: dict[str, _SymbolDefinitionTarget]
+    by_source_dir: dict[str, _SymbolDefinitionTarget]
+    fallback: _SymbolDefinitionTarget
+
+    def choose(self, source_path: str | None) -> _SymbolDefinitionTarget:
+        if source_path is not None:
+            same_file = self.by_source_path.get(source_path)
+            if same_file is not None:
+                return same_file
+            same_dir = self.by_source_dir.get(_source_dir(source_path))
+            if same_dir is not None:
+                return same_dir
+        return self.fallback
+
+
+def _source_dir(source_path: str) -> str:
+    return source_path.rsplit("/", maxsplit=1)[0] if "/" in source_path else source_path
+
+
+def _symbol_definition_choices(definitions: list[_SymbolDefinitionTarget]) -> _SymbolDefinitionChoices:
+    ordered = sorted(definitions, key=lambda item: (item.source_path, item.record_id))
+    by_source_path: dict[str, _SymbolDefinitionTarget] = {}
+    by_source_dir: dict[str, _SymbolDefinitionTarget] = {}
+    for definition in ordered:
+        _ = by_source_path.setdefault(definition.source_path, definition)
+        _ = by_source_dir.setdefault(_source_dir(definition.source_path), definition)
+    return _SymbolDefinitionChoices(by_source_path=by_source_path, by_source_dir=by_source_dir, fallback=ordered[0])
 
 
 def replace_repos(conn: db.DbConnection, collection: str, repos: list[str]) -> None:
@@ -286,6 +325,7 @@ def insert_records(
         return 0
     payload: list[dict[str, object]] = []
     for record in records:
+        input_order = len(payload)
         title = _strip_nul_str(record.title)
         summary = _strip_nul_str(record.summary)
         embedding_text = _strip_nul_str(record.embedding_text)
@@ -294,6 +334,7 @@ def insert_records(
         embedding_hash = sha256_text(embedding_text)
         display_hash = sha256_text(display_content)
         payload.append({
+            "input_order": input_order,
             "snapshot_id": context.snapshot_id,
             "file_id": context.file_ids.get(record.source_path),
             "collection": record.collection,
@@ -337,6 +378,55 @@ def insert_records(
         batch = payload[i : i + _INSERT_BATCH_SIZE]
         _ = context.conn.execute(
             """
+            WITH input_rows AS (
+                SELECT *
+                FROM jsonb_to_recordset(%s::jsonb) AS r(
+                    input_order bigint,
+                    snapshot_id bigint,
+                    file_id bigint,
+                    collection text,
+                    repo text,
+                    repo_role text,
+                    branch text,
+                    commit_sha text,
+                    tree_sha text,
+                    source_path text,
+                    file_sha256 text,
+                    language text,
+                    file_role text,
+                    content_class text,
+                    record_type text,
+                    record_id text,
+                    parent_record_id text,
+                    title text,
+                    summary text,
+                    embedding_text text,
+                    display_content text,
+                    embedding_text_hash text,
+                    display_hash text,
+                    line_start integer,
+                    line_end integer,
+                    symbol text,
+                    symbol_kind text,
+                    confidence_kind text,
+                    confidence real,
+                    tool text,
+                    rule_id text,
+                    severity text,
+                    analyzer text,
+                    analyzer_version text,
+                    parser text,
+                    parser_version text,
+                    chunker_version text,
+                    metadata jsonb,
+                    embedding text
+                )
+            ),
+            deduped AS (
+                SELECT DISTINCT ON (snapshot_id, record_type, record_id, embedding_text_hash) *
+                FROM input_rows
+                ORDER BY snapshot_id, record_type, record_id, embedding_text_hash, input_order DESC
+            )
             INSERT INTO project_code_intel_records (
                 snapshot_id, file_id, collection, repo, repo_role, branch, commit_sha,
                 tree_sha, source_path, file_sha256, language, file_role,
@@ -356,46 +446,7 @@ def insert_records(
                 symbol, symbol_kind, confidence_kind, confidence, tool,
                 rule_id, severity, analyzer, analyzer_version, parser,
                 parser_version, chunker_version, metadata, embedding::vector
-            FROM jsonb_to_recordset(%s::jsonb) AS r(
-                snapshot_id bigint,
-                file_id bigint,
-                collection text,
-                repo text,
-                repo_role text,
-                branch text,
-                commit_sha text,
-                tree_sha text,
-                source_path text,
-                file_sha256 text,
-                language text,
-                file_role text,
-                content_class text,
-                record_type text,
-                record_id text,
-                parent_record_id text,
-                title text,
-                summary text,
-                embedding_text text,
-                display_content text,
-                embedding_text_hash text,
-                display_hash text,
-                line_start integer,
-                line_end integer,
-                symbol text,
-                symbol_kind text,
-                confidence_kind text,
-                confidence real,
-                tool text,
-                rule_id text,
-                severity text,
-                analyzer text,
-                analyzer_version text,
-                parser text,
-                parser_version text,
-                chunker_version text,
-                metadata jsonb,
-                embedding text
-            )
+            FROM deduped
             ON CONFLICT (snapshot_id, record_type, record_id, embedding_text_hash)
             DO UPDATE SET file_id = EXCLUDED.file_id,
                           file_sha256 = EXCLUDED.file_sha256,
@@ -477,7 +528,80 @@ def insert_edges(
     return len(edges)
 
 
-def resolve_edge_targets(conn: db.DbConnection, snapshot_id: int) -> int:
+def _load_symbol_definition_index(
+    conn: db.DbConnection,
+    snapshot_id: int,
+    target_symbols: set[str],
+) -> dict[str, _SymbolDefinitionChoices]:
+    if not target_symbols:
+        return {}
+    rows = conn.execute(
+        """
+        SELECT symbol, record_id, source_path
+        FROM project_code_intel_records
+        WHERE snapshot_id = %s
+          AND record_type = 'symbol_definition'
+          AND symbol IS NOT NULL
+          AND symbol = ANY(%s::text[])
+        ORDER BY symbol, source_path, record_id
+        """,
+        [snapshot_id, sorted(target_symbols)],
+    ).fetchall()
+    definitions_by_symbol: dict[str, list[_SymbolDefinitionTarget]] = {}
+    for row in rows:
+        symbol = str(row["symbol"])
+        definitions_by_symbol.setdefault(symbol, []).append(
+            _SymbolDefinitionTarget(record_id=str(row["record_id"]), source_path=str(row["source_path"]))
+        )
+    return {
+        symbol: _symbol_definition_choices(definitions)
+        for symbol, definitions in definitions_by_symbol.items()
+        if definitions
+    }
+
+
+def pre_resolve_edge_targets(conn: db.DbConnection, snapshot_id: int, edges: list[IntelEdge]) -> int:
+    """Resolve newly generated edge targets in memory before inserting edge rows."""
+    unresolved_edges = [edge for edge in edges if edge.target_record_id is None and edge.target_symbol]
+    if not unresolved_edges:
+        return 0
+    symbols = _load_symbol_definition_index(conn, snapshot_id, {str(edge.target_symbol) for edge in unresolved_edges})
+    resolved = 0
+    for edge in unresolved_edges:
+        choices = symbols.get(str(edge.target_symbol))
+        if choices is None:
+            continue
+        target = choices.choose(edge.source_path)
+        edge.target_record_id = target.record_id
+        edge.target_path = target.source_path
+        resolved += 1
+    return resolved
+
+
+def count_unresolved_edge_targets(conn: db.DbConnection, snapshot_id: int) -> int:
+    row = conn.execute(
+        """
+        SELECT count(*) AS count
+        FROM project_code_intel_edges
+        WHERE snapshot_id = %s
+          AND target_record_id IS NULL
+          AND target_symbol IS NOT NULL
+        """,
+        [snapshot_id],
+    ).fetchone()
+    return row_int(db.require_row(row, "count unresolved edge targets"), "count")
+
+
+_EDGE_TARGET_RESOLVE_BATCH_SIZE = 5_000
+
+
+def resolve_edge_targets(
+    conn: db.DbConnection,
+    snapshot_id: int,
+    *,
+    batch_size: int = _EDGE_TARGET_RESOLVE_BATCH_SIZE,
+    progress_fn: Callable[[int], None] | None = None,
+) -> int:
     """Fill target_record_id / target_path on edges that have only target_symbol.
 
     call_candidate edges are created with target_symbol (the callee name) but no
@@ -486,45 +610,104 @@ def resolve_edge_targets(conn: db.DbConnection, snapshot_id: int) -> int:
     in the stable record_id string. When multiple records share the same symbol
     name, prefer same-file matches, then same-directory matches, then anything
     else (lexicographic tiebreak) — collisions across unrelated subtrees were
-    otherwise resolving by alphabetical accident.
+    otherwise resolving by alphabetical accident. The resolver walks unresolved
+    edges in bounded batches so large snapshots do not spend minutes in one
+    opaque UPDATE statement.
     """
-    rows = conn.execute(
-        """
-        UPDATE project_code_intel_edges e
-        SET target_record_id = matches.record_id,
-            target_path       = matches.source_path
-        FROM (
-            SELECT e2.id AS edge_id,
-                   r.record_id,
-                   r.source_path
-            FROM   project_code_intel_edges e2
-            CROSS JOIN LATERAL (
-                SELECT record_id, source_path
-                FROM   project_code_intel_records
-                WHERE  snapshot_id = e2.snapshot_id
-                  AND  symbol      = e2.target_symbol
-                  AND  record_type = 'symbol_definition'
-                ORDER  BY
-                    CASE
-                        WHEN source_path = e2.source_path THEN 0
-                        WHEN regexp_replace(source_path, '/[^/]+$', '')
-                           = regexp_replace(e2.source_path, '/[^/]+$', '') THEN 1
-                        ELSE 2
-                    END,
-                    source_path
-                LIMIT  1
-            ) r
-            WHERE  e2.snapshot_id      = %s
-              AND  e2.target_record_id IS NULL
-              AND  e2.target_symbol    IS NOT NULL
-        ) matches
-        WHERE e.id          = matches.edge_id
-          AND e.snapshot_id = %s
-        RETURNING e.id
-        """,
-        [snapshot_id, snapshot_id],
-    ).fetchall()
-    return len(rows)
+    resolved = 0
+    last_target_symbol: str | None = None
+    last_edge_id = 0
+    while True:
+        row = conn.execute(
+            """
+            WITH candidate_edges AS MATERIALIZED (
+                SELECT id, source_path, target_symbol
+                FROM project_code_intel_edges
+                WHERE snapshot_id = %s
+                  AND target_record_id IS NULL
+                  AND target_symbol IS NOT NULL
+                  AND (
+                      %s::text IS NULL
+                      OR target_symbol > %s::text
+                      OR (target_symbol = %s::text AND id > %s)
+                  )
+                ORDER BY target_symbol, id
+                LIMIT %s
+            ),
+            candidate_cursor AS (
+                SELECT
+                    count(*) AS candidate_count,
+                    (array_agg(target_symbol ORDER BY target_symbol DESC, id DESC))[1] AS last_target_symbol,
+                    (array_agg(id ORDER BY target_symbol DESC, id DESC))[1] AS last_edge_id
+                FROM candidate_edges
+            ),
+            resolved_pairs AS MATERIALIZED (
+                SELECT DISTINCT ON (c.source_path, c.target_symbol)
+                       c.source_path AS edge_source_path,
+                       c.target_symbol,
+                       r.record_id,
+                       r.source_path AS target_path
+                FROM candidate_edges c
+                CROSS JOIN LATERAL (
+                    SELECT r.record_id, r.source_path
+                    FROM project_code_intel_records r
+                    WHERE r.snapshot_id = %s
+                      AND r.symbol = c.target_symbol
+                      AND r.record_type = 'symbol_definition'
+                    ORDER BY
+                        CASE
+                            WHEN r.source_path = c.source_path THEN 0
+                            WHEN regexp_replace(r.source_path, '/[^/]+$', '')
+                               = regexp_replace(c.source_path, '/[^/]+$', '') THEN 1
+                            ELSE 2
+                        END,
+                        r.source_path,
+                        r.record_id
+                    LIMIT 1
+                ) r
+                ORDER BY c.source_path, c.target_symbol
+            ),
+            updated AS (
+                UPDATE project_code_intel_edges e
+                SET target_record_id = p.record_id,
+                    target_path = p.target_path
+                FROM candidate_edges c
+                JOIN resolved_pairs p
+                  ON p.target_symbol = c.target_symbol
+                 AND p.edge_source_path IS NOT DISTINCT FROM c.source_path
+                WHERE e.id = c.id
+                RETURNING e.id
+            )
+            SELECT
+                candidate_count,
+                last_target_symbol,
+                last_edge_id,
+                (SELECT count(*) FROM updated) AS updated_count
+            FROM candidate_cursor
+            """,
+            [
+                snapshot_id,
+                last_target_symbol,
+                last_target_symbol,
+                last_target_symbol,
+                last_edge_id,
+                max(1, batch_size),
+                snapshot_id,
+            ],
+        ).fetchone()
+        row = db.require_row(row, "resolve edge targets")
+        candidate_count = row_int(row, "candidate_count")
+        if candidate_count == 0:
+            return resolved
+        updated_count = row_int(row, "updated_count")
+        resolved += updated_count
+        if progress_fn is not None:
+            progress_fn(candidate_count)
+        last_symbol = row["last_target_symbol"]
+        if not isinstance(last_symbol, str):
+            return resolved
+        last_target_symbol = last_symbol
+        last_edge_id = row_int(row, "last_edge_id")
 
 
 def parser_failure_metadata(failure: JsonObject) -> JsonObject:

@@ -81,7 +81,7 @@ def pci_id_parts(value: str | None) -> tuple[str | None, str | None]:
 
 def vendor_name(vendor_id: str | None) -> str:
     normalized = (vendor_id or "").lower()
-    if normalized in {"0x1002", "1002"}:
+    if normalized in {"0x1002", "1002", "0x1022", "1022"}:
         return "AMD"
     if normalized in {"0x10de", "10de"}:
         return "NVIDIA"
@@ -236,6 +236,31 @@ def amd_npu_firmware_versions() -> list[str]:
     return sorted(versions, key=version_tuple)
 
 
+def npu_device_info(path: Path) -> tuple[str, str | None]:
+    sys_device_path = Path("/sys/class/accel") / path.name / "device"
+    uevent = parse_uevent(read_text_file(sys_device_path / "uevent"))
+    vendor_id = read_text_file(sys_device_path / "vendor")
+    device_id = read_text_file(sys_device_path / "device")
+    pci_vendor_id, pci_device_id = pci_id_parts(uevent.get("PCI_ID"))
+    vendor_id = vendor_id or pci_vendor_id
+    device_id = device_id or pci_device_id
+    vendor = vendor_name(vendor_id)
+    identity = f"{vendor} NPU"
+    if vendor_id or device_id:
+        identity += f" {vendor_id or 'unknown'}:{device_id or 'unknown'}"
+    detail = "; ".join(
+        value
+        for value in (
+            f"device={path.name}",
+            f"path={path}" if str(path) != path.name else None,
+            f"driver={driver_name(sys_device_path, uevent)}" if sys_device_path.exists() else None,
+            f"pci={uevent.get('PCI_SLOT_NAME')}" if uevent.get("PCI_SLOT_NAME") else None,
+        )
+        if value
+    )
+    return identity, detail or None
+
+
 def _check_darwin_npu() -> list[CheckResult]:
     return [result("npu", "skip", "Apple Neural Engine is not used; embeddings run via pci-apple-embed-server (MPS).")]
 
@@ -267,12 +292,24 @@ def check_npu_support(env: config.Env) -> list[CheckResult]:
         return results
 
     accessible_paths = [path for path in device_paths if os.access(path, os.R_OK | os.W_OK)]
+    identity, npu_detail = npu_device_info(device_paths[0])
+    if len(device_paths) > 1:
+        npu_detail = "; ".join(value for value in (npu_detail, f"devices={device_names}") if value)
     results.append(
         result(
             "npu",
             "ok" if accessible_paths else status_for_requirement(ok=False, required=required),
-            f"AMD NPU device detected: {device_names}",
-            None if accessible_paths else "The current user needs read/write access, usually through the render group.",
+            identity,
+            npu_detail
+            if accessible_paths
+            else "; ".join(
+                value
+                for value in (
+                    npu_detail,
+                    "The current user needs read/write access, usually through the render group.",
+                )
+                if value
+            ),
         )
     )
 
