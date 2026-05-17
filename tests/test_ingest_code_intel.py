@@ -1120,12 +1120,12 @@ class RustParserRegressionTests(unittest.TestCase):
         self.assertNotIn("initial", targets)
         self.assertNotIn("has_remaining", targets)
 
-    def test_rust_records_skip_callable_function_parameter_edges(self) -> None:
+    def test_rust_records_skip_callable_function_parameter_edges_with_lifetimes(self) -> None:
         text = "\n".join([
             "impl<T> AsyncFdReadyGuard<'_, T> {",
-            "    pub(crate) fn try_io<R>(",
+            "    pub(crate) fn try_io<'a, R>(",
             "        &self,",
-            "        f: impl FnOnce(&AsyncFd<T>) -> io::Result<R>,",
+            "        f: impl FnOnce(&'a AsyncFd<Inner>) -> io::Result<R>,",
             "    ) -> io::Result<R> {",
             "        let result = f(self.async_fd);",
             "        self.finish();",
