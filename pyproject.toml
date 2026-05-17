@@ -218,7 +218,7 @@ source = ["project_code_intelligence"]
 [tool.coverage.report]
 # Current unit-test baseline. Keep this passing and ratchet upward with focused
 # tests rather than excluding low-coverage modules.
-fail_under = 67.75
+fail_under = 70
 precision = 2
 show_missing = true
 skip_covered = false
