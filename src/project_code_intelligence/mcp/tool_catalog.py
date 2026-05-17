@@ -102,7 +102,6 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "is_generated": {"type": "boolean", "description": _BOOLEAN_FILTER_DESC},
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
-                "diversify": {"type": "boolean"},
                 "verbose": {"type": "boolean"},
                 "snippet_length": {
                     "type": "integer",
@@ -139,6 +138,12 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "is_generated": {"type": "boolean", "description": _BOOLEAN_FILTER_DESC},
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
+                "diversify": {
+                    "type": "boolean",
+                    "description": (
+                        "Semantic search defaults to parent-diverse results; false preserves raw rank order."
+                    ),
+                },
                 "verbose": {"type": "boolean"},
                 "snippet_length": {
                     "type": "integer",

@@ -32,6 +32,7 @@ from project_code_intelligence.mcp.protocol import (
     result_text,
 )
 from project_code_intelligence.mcp.tool_catalog import TOOL_DEFINITIONS, validate_tool_arguments
+from project_code_intelligence.mcp.tool_inputs import TOOL_INPUT_MODELS
 from project_code_intelligence.mcp.transport import (
     error_message,
     handle_jsonrpc_value,
@@ -1762,6 +1763,12 @@ class McpContractTests(unittest.TestCase):
         properties = cast("dict[str, dict[str, object]]", schema["properties"])
         self.assertEqual(properties["limit"]["description"], "Max results, 1-50.")
         self.assertIn("Exact indexed search", text_search.description)
+        self.assertNotIn("diversify", properties)
+
+        semantic_search = TOOL_DEFINITIONS["search_code_intel_semantic"]
+        semantic_schema = cast("dict[str, object]", semantic_search.input_schema)
+        semantic_properties = cast("dict[str, dict[str, object]]", semantic_schema["properties"])
+        self.assertIn("diversify", semantic_properties)
 
         _ = validate_tool_arguments(text_search, {"query": "hello", "limit": 10})
         _ = validate_tool_arguments(text_search, {"query": "hello world", "query_mode": "all_terms"})
@@ -1899,6 +1906,16 @@ class McpArgumentNormalizationTests(unittest.TestCase):
 
 
 class McpToolSchemaCompatibilityTests(unittest.TestCase):
+    def test_tool_schemas_match_argument_models(self) -> None:
+        self.assertEqual(set(TOOL_DEFINITIONS), set(TOOL_INPUT_MODELS))
+        for name, definition in TOOL_DEFINITIONS.items():
+            with self.subTest(tool=name):
+                schema = cast("dict[str, object]", definition.input_schema)
+                properties = cast("dict[str, object]", schema["properties"])
+                advertised_args = set(properties)
+                accepted_args = set(TOOL_INPUT_MODELS[name].model_fields)
+                self.assertEqual(advertised_args, accepted_args)
+
     def test_tool_schemas_are_client_compatible_at_top_level(self) -> None:
         forbidden = {"oneOf", "anyOf", "allOf", "enum", "not"}
         for name, definition in TOOL_DEFINITIONS.items():
