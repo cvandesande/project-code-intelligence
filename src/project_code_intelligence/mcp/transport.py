@@ -165,6 +165,8 @@ def request_id_from_jsonrpc_value(request_value: object) -> JsonValue:
 
 
 def error_message(exc: BaseException) -> str:
+    if isinstance(exc, db.DatabaseConnectionError):
+        return str(exc)
     if isinstance(exc, (TypeError, ValueError, PermissionError, json.JSONDecodeError, UnicodeDecodeError)):
         return str(exc)
     if mcp_debug_errors():

@@ -370,7 +370,7 @@ def js_symbol_records(
         **common_extracts(spec.body),
         "symbols_defined": [spec.name],
         "symbols_referenced": ref_symbols,
-        "security_sensitive_apis": security_api_refs(spec.body),
+        "security_sensitive_apis": security_api_refs(spec.body, language=intel_file.language),
         "bounded_symbol_parser": True,
     }
     record_id = f"{intel_file.source_path}::{spec.kind}::{spec.name}::{spec.line_start:06d}"

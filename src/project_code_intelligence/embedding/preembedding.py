@@ -163,6 +163,7 @@ def consume_preembedding_results(
     state: PreEmbeddingState,
     *,
     block: bool,
+    progress_fn: Callable[[int], None] | None = None,
 ) -> int:
     inserted = 0
     while True:
@@ -180,7 +181,7 @@ def consume_preembedding_results(
                 remaining_batches=len(remaining_batches),
             )
             flattened = [record for batch in remaining_batches for record in batch]
-            inserted += insert_records(insert_context, flattened)
+            inserted += insert_records(insert_context, flattened, progress_fn=progress_fn)
             state.consumed_batches = len(state.batches)
             return inserted
         state.processed_records += len(result.batch)
@@ -188,7 +189,7 @@ def consume_preembedding_results(
         state.skipped += result.skipped
         runtime_state.active_metrics.add("preembedded_records", result.embedded)
         runtime_state.active_metrics.add("embedded_records", result.embedded)
-        inserted += insert_records(insert_context, result.batch)
+        inserted += insert_records(insert_context, result.batch, progress_fn=progress_fn)
         progress_event(
             "code_intel_preembedded",
             snapshot_id=insert_context.snapshot_id,
@@ -214,8 +215,8 @@ def insert_records_with_preembedding(
         inserted += insert_records(
             insert_context, non_embedding_records[offset : offset + 1000], progress_fn=progress_fn
         )
-        inserted += consume_preembedding_results(insert_context, state, block=False)
-    inserted += consume_preembedding_results(insert_context, state, block=False)
+        inserted += consume_preembedding_results(insert_context, state, block=False, progress_fn=progress_fn)
+    inserted += consume_preembedding_results(insert_context, state, block=False, progress_fn=progress_fn)
     if state.consumed_batches < len(state.batches):
         state.cancel_event.set()
         remaining_batches = state.batches[state.consumed_batches :]

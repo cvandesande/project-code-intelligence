@@ -156,11 +156,13 @@ class ProgressRenderingTests(unittest.TestCase):
         self.assertIn("30%", detail)
         self.assertNotIn("12/40 embedding records", detail)
 
-    def test_live_embeddings_row_is_suppressed_during_embedding_phase(self) -> None:
-        counts: JsonObject = {"embedded_records": 12, "preembedded_records": 0, "embedded_records_per_second": 4.8}
+    def test_live_embeddings_row_labels_preembedding_during_upload(self) -> None:
+        counts: JsonObject = {"embedded_records": 12, "preembedded_records": 5, "embedded_records_per_second": 4.8}
 
         self.assertIsNone(progress.live_embeddings_row_text(counts, {"phase": "embedding"}))
-        self.assertEqual(progress.live_embeddings_row_text(counts, {"phase": "db_upload"}), "12 · 4.8 embeddings/s")
+        self.assertEqual(progress.live_embeddings_row_text(counts, {"phase": "db_upload"}), "5 ready")
+        self.assertIsNone(progress.live_endpoint_embedding_rate(counts, {"phase": "db_upload"}))
+        self.assertEqual(progress.live_endpoint_embedding_rate(counts, {"phase": "embedding"}), 4.8)
 
     def test_live_progress_shows_current_repo_before_discovery_finishes(self) -> None:
         emitter = progress.RichEmitter()

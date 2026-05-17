@@ -91,12 +91,15 @@ PROJECT_CODE_INTELLIGENCE_DATABASE_URL=postgresql://user:password@host:5432?sslm
 
 For first-use bootstrap, use PostgreSQL admin credentials once with
 `pci-doctor --init-postgres`. Doctor creates/updates the cluster-level
-`pci_index_admin` role, installs pgvector into `template1`, and prints the
-`PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_*` exports to keep for `pci-index`;
-it does not create a project database. Then
-`pci-index` creates the inferred project database and schema before indexing.
-Use `pci-index --init-db` when you want to initialize the database/schema and
-exit without scanning:
+`pci_index_admin` role, installs pgvector into `template1`, writes the
+non-superuser `pci-index` credentials to
+`${XDG_CONFIG_HOME:-~/.config}/project-code-intelligence/pci-index.env` with
+`0600` permissions, and prints the same
+`PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_*` exports for copy/paste or secret
+manager use. It does not create a project database. Then `pci-index` loads the
+user config when those variables are unset and creates the inferred project
+database and schema before indexing. Use `pci-index --init-db` when you want to
+initialize the database/schema and exit without scanning:
 
 ```sh
 PROJECT_CODE_INTELLIGENCE_DATABASE_URL=postgresql://host:5432?sslmode=prefer
@@ -104,10 +107,12 @@ PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER=postgres
 PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD=admin-password
 pci-doctor --init-postgres
 
-# Use the PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_* exports printed above.
 pci-index --init-db .
 pci-index .
 ```
+
+Use `pci-doctor --init-postgres --no-write-config` when you want only printed
+exports and no user config file.
 
 When admin variables are set for an inferred database, generated scoped roles
 override credentials embedded in `PROJECT_CODE_INTELLIGENCE_DATABASE_URL`.
@@ -130,8 +135,8 @@ When `PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER` and
 prints the project-specific `Export for pci-mcp (RO)` block after
 `pci-index --init-db` and ordinary index runs.
 
-To print copy/paste-ready client configuration instead of shell exports, use
-`--mcp-config`:
+To print copy/paste-ready project-scoped client configuration and the required
+shell exports, use `--mcp-config`:
 
 ```sh
 pci-index --init-db --mcp-config codex .
@@ -139,8 +144,19 @@ pci-index --init-db --mcp-config claude .
 pci-index --init-db --mcp-config opencode .
 ```
 
-Use `--mcp-server-name NAME` when you want a stable client-specific server key
-instead of the default `pci-<collection>` name.
+Generated client config uses the generic server key
+`project-code-intelligence`. That key is intentionally reused because the
+config belongs to the indexed repo/workspace, not to global client config. Do
+not paste generated snippets into a global MCP config. Generated client config
+references environment variables instead of embedding credential values; the
+export block printed after the config contains the project read-only
+credentials. The collection is inferred from the project `cwd`; use
+`PROJECT_CODE_INTELLIGENCE_COLLECTION` only as an explicit MCP runtime scope.
+For index runs, prefer `pci-index --collection NAME`; an inherited collection
+environment variable is ignored unless
+`PROJECT_CODE_INTELLIGENCE_ALLOW_COLLECTION_OVERRIDE=1` is also set. Use
+`--mcp-server-name NAME` only when you are deliberately creating a
+non-project-scoped setup.
 
 If those MCP-specific variables are unset, `pci-mcp` falls back to the generic
 database variables.
@@ -171,19 +187,33 @@ a fixed database name.
 `pci-index --reset .` drops only the inferred PCI-managed database for that
 repo/workspace scope. Use `pci-doctor --clean` for broad local cleanup.
 
-Do not commit real database credentials. Put private values in user-local MCP
-configuration, a local ignored file, or your system secret manager.
+Do not commit real database credentials or private export files. Generated
+project-scoped snippets reference environment variables and are suitable to
+share only when the repo path and server command are also acceptable to share.
+The MCP export block contains read-only database credentials; load those values
+from your shell, direnv, a private env file, or a system secret manager. The
+`pci-doctor --init-postgres` user config contains non-superuser credentials for
+`pci-index`; keep it private and at `0600`.
 
 ## Codex
 
-Codex stores MCP config in `~/.codex/config.toml`, or in a project-scoped
-`.codex/config.toml` for trusted projects. The CLI and the VSCode Codex
-extension share this configuration.
+`pci-index --mcp-config codex` emits config for the indexed repo's
+`.codex/config.toml`.
 
-Prefer generating the snippet from the indexed repo/workspace:
+Generate the snippet from the indexed repo/workspace:
 
 ```sh
 pci-index --init-db --mcp-config codex .
+```
+
+The command prints the project target path before the TOML:
+
+```text
+Codex project-scoped MCP config
+Write this snippet to: /home/you/src/project-code-intelligence/.codex/config.toml
+This snippet is project-scoped and references environment variables for credentials.
+Load the required environment variables below before starting the MCP client.
+Do not paste this into a global MCP config; the server key is intentionally reused per project.
 ```
 
 ```toml
@@ -192,62 +222,40 @@ command = "/home/you/.local/bin/pci-mcp"
 cwd = "/home/you/src/project-code-intelligence"
 startup_timeout_sec = 20
 tool_timeout_sec = 120
-
-[mcp_servers.project-code-intelligence.env]
-PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL = "postgresql://host:5432?sslmode=prefer"
-PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH = "/home/you/src/project-code-intelligence"
-PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER = "project_ro"
-PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD = "password"
+env_vars = [
+  "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL",
+  "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER",
+  "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD",
+  "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH",
+]
 ```
 
-For a single-repo local setup using the Compose database, the environment block
-can be omitted.
+```sh
+export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL='postgresql://host:5432?sslmode=prefer'
+export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER=project_ro
+export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD=password
+export PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH=/home/you/src/project-code-intelligence
+```
+
+For a single-repo local setup using the Compose database, you can omit the
+`env_vars` list and export block if the MCP client launches `pci-mcp` from the
+repo root and the default local database credentials are acceptable.
 
 ## Claude Code
 
-Claude Code supports local, user, and project MCP scopes. Project-scoped MCP
-servers are stored in `.mcp.json`; user/local scoped servers are private to the
-user. The CLI and the `anthropic.claude-code` VSCode extension share this
-configuration.
+`pci-index --mcp-config claude` emits config for the indexed repo's
+project-scoped `.mcp.json`.
 
-Use project-scoped `.mcp.json` only for non-secret shared configuration. Keep
-credentials in local/user configuration or environment variables.
-
-Generate a private config snippet from the indexed repo/workspace:
+Generate the snippet from the indexed repo/workspace:
 
 ```sh
 pci-index --init-db --mcp-config claude .
 ```
 
-```json
-{
-  "mcpServers": {
-    "project-code-intelligence": {
-      "type": "stdio",
-      "command": "/home/you/.local/bin/pci-mcp",
-      "args": [],
-      "cwd": "/home/you/src/project-code-intelligence",
-      "env": {
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://host:5432?sslmode=prefer",
-        "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/home/you/src/project-code-intelligence",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "project_ro",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "password"
-      }
-    }
-  }
-}
-```
-
-## Cline
-
-The Cline VSCode extension (`saoudrizwan.claude-dev`) stores MCP server
-configuration at a user-scoped JSON file. The simplest way to edit it is the
-MCP Servers icon in the Cline panel, which opens the file. The schema uses a
-top-level `mcpServers` key.
-
-- macOS: `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json`
-- Linux: `~/.config/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json`
-- Windows: `%APPDATA%\Code\User\globalStorage\saoudrizwan.claude-dev\settings\cline_mcp_settings.json`
+Claude Code treats `.mcp.json` as project scoped and prompts before using it in
+a trusted workspace. The generated `.mcp.json` uses Claude's `${VAR}`
+environment expansion, so credentials stay in the accompanying export block or
+your secret manager.
 
 ```json
 {
@@ -258,69 +266,32 @@ top-level `mcpServers` key.
       "args": [],
       "cwd": "/home/you/src/project-code-intelligence",
       "env": {
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://host:5432?sslmode=prefer",
-        "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/home/you/src/project-code-intelligence",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "project_ro",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "password"
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "${PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL}",
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "${PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER}",
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "${PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD}",
+        "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "${PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH}"
       }
     }
   }
 }
 ```
 
-The MCP Servers panel in Cline lists running servers and the tools each
-exposes.
-
-## GitHub Copilot Chat (VSCode)
-
-Copilot Chat reads MCP server configuration from a user-scoped `mcp.json`, or
-from a workspace `.vscode/mcp.json`. Add a server with the Command Palette
-command `MCP: Add Server`, or edit the file directly. The schema uses a
-top-level `servers` key (not `mcpServers`).
-
-User-scoped file:
-
-- macOS: `~/Library/Application Support/Code/User/mcp.json`
-- Linux: `~/.config/Code/User/mcp.json`
-- Windows: `%APPDATA%\Code\User\mcp.json`
-
-```json
-{
-  "servers": {
-    "project-code-intelligence": {
-      "type": "stdio",
-      "command": "/home/you/.local/bin/pci-mcp",
-      "args": [],
-      "cwd": "/home/you/src/project-code-intelligence",
-      "env": {
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://host:5432?sslmode=prefer",
-        "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/home/you/src/project-code-intelligence",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "project_ro",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "password"
-      }
-    }
-  },
-  "inputs": []
-}
-```
-
-After saving, click the inline `Start` action above the server entry in
-`mcp.json`, or run `MCP: List Servers` from the Command Palette to view status.
-The tools appear in the Tools picker when Copilot Chat is in agent mode.
-
-For a workspace-scoped configuration that ships with the repo, place the same
-content (without secret credentials) in `.vscode/mcp.json` at the workspace
-root.
+Use the export block printed after the JSON before launching Claude Code.
 
 ## OpenCode
 
-OpenCode config is JSON or JSONC and defines MCP servers under `mcp`.
+`pci-index --mcp-config opencode` emits config for the indexed repo's
+`opencode.json`. OpenCode config is JSON or JSONC and defines MCP servers under
+`mcp`.
 
-Generate a private config snippet from the indexed repo/workspace:
+Generate the snippet from the indexed repo/workspace:
 
 ```sh
 pci-index --init-db --mcp-config opencode .
 ```
+
+The generated `opencode.json` uses OpenCode's `{env:VAR}` substitution, so
+credentials stay in the accompanying export block or your secret manager.
 
 ```jsonc
 {
@@ -332,15 +303,23 @@ pci-index --init-db --mcp-config opencode .
       "enabled": true,
       "cwd": "/home/you/src/project-code-intelligence",
       "environment": {
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://host:5432?sslmode=prefer",
-        "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/home/you/src/project-code-intelligence",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "project_ro",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "password"
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "{env:PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL}",
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "{env:PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER}",
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "{env:PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD}",
+        "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "{env:PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH}"
       }
     }
   }
 }
 ```
+
+Use the export block printed after the JSON before launching OpenCode.
+
+## Other MCP Clients
+
+`pci-index --mcp-config` intentionally emits project-scoped config only for
+Codex, Claude Code, and OpenCode. For other clients, use the `env` export block
+with that client's project/workspace configuration if it has one.
 
 ## Agent Guidance
 
@@ -351,6 +330,8 @@ The important behavior for assistants is:
 
 1. Call `code_intel_status` first.
 2. Use the collection and repo keys reported by `code_intel_status`.
-3. Use repo filters such as `openwrt`, `ask-cmm`, or `fci`, not absolute paths.
-4. Treat the MCP index as a navigation aid and verify important behavior
+3. For implementation questions, pass `file_role: source` when you want to
+   exclude tests and docs rather than just rank source higher.
+4. Use repo filters such as `openwrt`, `ask-cmm`, or `fci`, not absolute paths.
+5. Treat the MCP index as a navigation aid and verify important behavior
    against the working tree.

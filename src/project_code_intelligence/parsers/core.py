@@ -36,6 +36,9 @@ class SymbolChunkSpec:
     # SQL resolver binds by name and would bind builtins to any same-named
     # user symbol in the codebase.
     non_resolvable_targets: frozenset[str] = frozenset()
+    referenced_symbols: list[str] | None = None
+    file_role: str | None = None
+    content_class: str | None = None
 
 
 def make_profile_record(intel_file: IntelFile, spec: ProfileRecord, *, default_body: str = "") -> IntelRecord:
@@ -150,12 +153,15 @@ def bounded_brace_body(
 
 
 def make_symbol_chunk(intel_file: IntelFile, spec: SymbolChunkSpec) -> tuple[IntelRecord, IntelRecord, list[IntelEdge]]:
-    refs = [ref for ref in extract_referenced_symbols(spec.body) if ref not in spec.non_resolvable_targets]
+    source_refs = (
+        spec.referenced_symbols if spec.referenced_symbols is not None else extract_referenced_symbols(spec.body)
+    )
+    refs = sorted({ref for ref in source_refs if ref not in spec.non_resolvable_targets})[:160]
     meta = {
         **common_extracts(spec.body),
         "symbols_defined": [spec.name],
         "symbols_referenced": refs,
-        "security_sensitive_apis": security_api_refs(spec.body),
+        "security_sensitive_apis": security_api_refs(spec.body, language=intel_file.language),
         **(spec.metadata or {}),
     }
     record_id = f"{intel_file.source_path}::{spec.kind}::{spec.name}::{spec.line_start:06d}"
@@ -173,6 +179,8 @@ def make_symbol_chunk(intel_file: IntelFile, spec: SymbolChunkSpec) -> tuple[Int
             symbol_kind=spec.kind,
             metadata=meta,
             confidence_kind=spec.confidence_kind,
+            file_role=spec.file_role,
+            content_class=spec.content_class,
         ),
     )
     chunk_record = make_record(
@@ -192,6 +200,8 @@ def make_symbol_chunk(intel_file: IntelFile, spec: SymbolChunkSpec) -> tuple[Int
             confidence_kind=(
                 "approximate_fact" if spec.confidence_kind == "high_confidence_fact" else spec.confidence_kind
             ),
+            file_role=spec.file_role,
+            content_class=spec.content_class,
         ),
     )
     edges = [

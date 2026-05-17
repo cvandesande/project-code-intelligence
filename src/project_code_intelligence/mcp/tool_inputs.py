@@ -11,15 +11,57 @@ contract exposed via `tools/list`; the models below mirror them.
 
 from __future__ import annotations
 
-from typing import Literal
+from types import UnionType
+from typing import Literal, Union, cast, get_args, get_origin
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+def _is_optional_string_like_annotation(annotation: object) -> bool:
+    origin = get_origin(annotation)
+    if origin is not Union and origin is not UnionType:
+        return False
+    args = cast("tuple[object, ...]", get_args(annotation))
+    if type(None) not in args:
+        return False
+    string_like_args = 0
+    for arg in args:
+        if arg is type(None):
+            continue
+        arg_origin = get_origin(arg)
+        if arg is str:
+            string_like_args += 1
+            continue
+        literal_choices = cast("tuple[object, ...]", get_args(arg))
+        if arg_origin is Literal and all(isinstance(choice, str) for choice in literal_choices):
+            string_like_args += 1
+            continue
+        return False
+    return string_like_args > 0
 
 
 class StrictArgs(BaseModel):
     """Base for all tool-input models: forbid extras, no implicit coercion."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def empty_optional_strings_are_omitted(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        values = cast("dict[object, object]", data)
+        normalized: dict[object, object] | None = None
+        for key, value in values.items():
+            if not isinstance(key, str) or not isinstance(value, str) or value:
+                continue
+            field = cls.model_fields.get(key)
+            if field is None or not _is_optional_string_like_annotation(field.annotation):
+                continue
+            if normalized is None:
+                normalized = dict(values)
+            normalized[key] = None
+        return values if normalized is None else normalized
 
 
 class CodeIntelStatusArgs(StrictArgs):
@@ -68,19 +110,30 @@ class SearchCodeIntelTextArgs(_SearchFilterArgs):
 
 
 class SearchCodeIntelSemanticArgs(_SearchFilterArgs):
-    query: str
+    query: str = Field(min_length=1)
     limit: int | None = Field(default=None, ge=1, le=50)
     snippet_length: int | None = Field(default=None, ge=1, le=800)
 
 
 class GetCodeIntelRecordArgs(StrictArgs):
-    record_id: str | None = Field(default=None, min_length=1)
-    record_ids: list[str] | None = Field(default=None, min_length=1, max_length=100)
+    record_id: str = Field(min_length=1)
     collection: str | None = None
     repo: str | None = None
     snapshot_id: int | None = Field(default=None, ge=1)
     include_historical: bool | None = None
     include_content: bool | None = None
+    include_metadata: bool | None = None
+    verbose: bool | None = None
+
+
+class GetCodeIntelRecordsArgs(StrictArgs):
+    record_ids: list[str] = Field(min_length=1, max_length=100)
+    collection: str | None = None
+    repo: str | None = None
+    snapshot_id: int | None = Field(default=None, ge=1)
+    include_historical: bool | None = None
+    include_content: bool | None = None
+    include_metadata: bool | None = None
     verbose: bool | None = None
 
 
@@ -90,6 +143,7 @@ class RelatedCodeIntelArgs(StrictArgs):
     direction: Literal["any", "incoming", "outgoing"] | None = None
     edge_type: str | None = None
     confidence_kind: str | None = None
+    include_unresolved: bool | None = None
     collection: str | None = None
     repo: str | None = None
     limit: int | None = Field(default=None, ge=1, le=100)
@@ -164,6 +218,7 @@ TOOL_INPUT_MODELS: dict[str, type[StrictArgs]] = {
     "search_code_intel_text": SearchCodeIntelTextArgs,
     "search_code_intel_semantic": SearchCodeIntelSemanticArgs,
     "get_code_intel_record": GetCodeIntelRecordArgs,
+    "get_code_intel_records": GetCodeIntelRecordsArgs,
     "related_code_intel": RelatedCodeIntelArgs,
     "list_code_intel_files": ListCodeIntelFilesArgs,
     "list_code_intel_parser_failures": ListCodeIntelParserFailuresArgs,

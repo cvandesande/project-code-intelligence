@@ -1,5 +1,9 @@
 # Agent Instructions
 
+This repo has a project-code-intelligence MCP server. For non-trivial code
+discovery, use it before broad rg/find or speculative file reads. Use rg/direct
+reads for known small files and final verification.
+
 This repository builds `project-code-intelligence`: an MCP server that gives
 coding agents structured access to indexed Git repositories — semantic
 search, lexical search, a candidate-edge graph, and static-analysis findings

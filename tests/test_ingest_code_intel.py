@@ -32,12 +32,17 @@ from project_code_intelligence.ingest_code_intel import (
     CliArgs,
     IngestPlan,
     build_ingest_plan,
+    claude_mcp_config_block,
     codex_mcp_config_block,
     confirm_reset_code_intel,
     database_bootstrap_report,
+    default_mcp_server_name,
     discover_plan_sarif_files,
+    mcp_config_block,
     mcp_config_context,
+    mcp_project_config_path,
     mcp_ro_export_block,
+    opencode_mcp_config_block,
     replace_repos_for_full_ingests,
     resolve_scan_workers,
     run_ingest_plan,
@@ -257,6 +262,23 @@ class DatabaseSettingsTests(unittest.TestCase):
             "PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD=<set>",
         )
 
+    def test_mcp_database_url_reports_mcp_credential_sources(self) -> None:
+        settings = DatabaseSettings.from_env(
+            {
+                "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://example.invalid/db",
+                "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "project_ro",
+                "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "-".join(("ro", "credential")),
+            },
+            role="mcp",
+        )
+
+        self.assertEqual(
+            settings.connection_hint(),
+            "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL=<hidden> "
+            "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER=<set> "
+            "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD=<set>",
+        )
+
     def test_accept_legacy_pgvector_dsn_without_individual_parts(self) -> None:
         settings = DatabaseSettings.from_env({"PGVECTOR_DSN": "postgresql://example.invalid/db"})
 
@@ -433,7 +455,11 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         self.assertIn("export PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH=/work/demo-workspace", output)
         self.assertNotIn("pci_demo_ro:ro%20fixture@", output)
 
-    def test_codex_mcp_config_block_renders_copyable_toml(self) -> None:
+    def test_default_mcp_server_name_is_generic(self) -> None:
+        self.assertEqual(default_mcp_server_name("demo-workspace"), "project-code-intelligence")
+        self.assertEqual(default_mcp_server_name("hexyl"), "project-code-intelligence")
+
+    def test_codex_mcp_config_block_references_inherited_environment(self) -> None:
         ro_value = " ".join(("ro", "fixture"))
         plan = build_ingest_plan(
             cli_args(collection="demo-workspace", root=Path.cwd(), repos=".", mcp_server_name="pci-demo")
@@ -462,15 +488,94 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         self.assertIn("[mcp_servers.pci-demo]", output)
         self.assertIn('command = "/usr/bin/pci-mcp"', output)
         self.assertIn('cwd = "/work/demo-workspace"', output)
+        self.assertIn("env_vars = [", output)
+        self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL"', output)
+        self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER"', output)
+        self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD"', output)
+        self.assertIn('"PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH"', output)
+        self.assertNotIn('"PROJECT_CODE_INTELLIGENCE_COLLECTION"', output)
+        self.assertNotIn("postgresql://db.example.invalid", output)
+        self.assertNotIn("pci_demo_ro", output)
+        self.assertNotIn("ro fixture", output)
+        self.assertNotIn("pci_demo_ro:ro%20fixture@", output)
+
+    def test_claude_and_opencode_mcp_config_blocks_reference_environment(self) -> None:
+        ro_value = "-".join(("ro", "fixture"))
+        plan = build_ingest_plan(cli_args(collection="demo-workspace", root=Path.cwd(), repos="."))
+        bootstrap = db.DatabaseBootstrapResult(
+            dbname="pci_demo",
+            ro_role=db.DatabaseRole(
+                name="pci_demo_ro",
+                password=ro_value,
+                created=True,
+                database_url="postgresql://pci_demo_ro:ro-fixture@db.example.invalid:5432/pci_demo?sslmode=prefer",
+            ),
+        )
+        context = mcp_config_context(plan, bootstrap, command="/usr/bin/pci-mcp")
+
+        if context is None:
+            raise AssertionError("expected MCP config context")
+
+        claude_output = claude_mcp_config_block(context)
+        opencode_output = opencode_mcp_config_block(context)
+        credential_key = "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_" + "PASSWORD"
+
+        self.assertIn(f'"{credential_key}": "${{{credential_key}}}"', claude_output)
+        self.assertIn(f'"{credential_key}": "{{env:{credential_key}}}"', opencode_output)
+        self.assertNotIn("PROJECT_CODE_INTELLIGENCE_COLLECTION", claude_output)
+        self.assertNotIn("PROJECT_CODE_INTELLIGENCE_COLLECTION", opencode_output)
+        self.assertNotIn(ro_value, claude_output)
+        self.assertNotIn(ro_value, opencode_output)
+        self.assertNotIn("postgresql://db.example.invalid", claude_output)
+        self.assertNotIn("postgresql://db.example.invalid", opencode_output)
+
+    def test_mcp_config_block_wraps_client_config_with_project_scoped_guidance(self) -> None:
+        ro_value = " ".join(("ro", "fixture"))
+        plan = build_ingest_plan(cli_args(collection="demo-workspace", root=Path.cwd(), repos="."))
+        bootstrap = db.DatabaseBootstrapResult(
+            dbname="pci_demo",
+            ro_role=db.DatabaseRole(
+                name="pci_demo_ro",
+                password=ro_value,
+                created=True,
+                database_url="postgresql://pci_demo_ro:ro%20fixture@db.example.invalid:5432/pci_demo?sslmode=prefer",
+            ),
+        )
+
+        with patch.dict(
+            os.environ,
+            {"PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/work/demo-workspace"},
+            clear=False,
+        ):
+            context = mcp_config_context(plan, bootstrap, command="/usr/bin/pci-mcp")
+
+        if context is None:
+            raise AssertionError("expected MCP config context")
+
+        self.assertEqual(mcp_project_config_path(context, "codex"), "/work/demo-workspace/.codex/config.toml")
+        self.assertEqual(mcp_project_config_path(context, "claude"), "/work/demo-workspace/.mcp.json")
+        self.assertEqual(mcp_project_config_path(context, "opencode"), "/work/demo-workspace/opencode.json")
+
+        output = mcp_config_block(context, "codex")
+
+        if output is None:
+            raise AssertionError("expected MCP config block")
+        self.assertIn("Codex project-scoped MCP config", output)
+        self.assertIn("Write this snippet to: /work/demo-workspace/.codex/config.toml", output)
+        self.assertIn("references environment variables for credentials", output)
+        self.assertIn("Do not paste this into a global MCP config", output)
+        self.assertIn("[mcp_servers.project-code-intelligence]", output)
+        self.assertIn("Required environment variables for pci-mcp (RO)", output)
         self.assertIn(
-            'PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL = "postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer"',
+            "export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL='postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer'",
             output,
         )
-        self.assertIn('PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER = "pci_demo_ro"', output)
-        self.assertIn('PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD = "ro fixture"', output)
-        self.assertIn('PROJECT_CODE_INTELLIGENCE_COLLECTION = "demo-workspace"', output)
-        self.assertIn('PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH = "/work/demo-workspace"', output)
-        self.assertNotIn("pci_demo_ro:ro%20fixture@", output)
+        self.assertIn("export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD='ro fixture'", output)
+        self.assertNotIn("export PROJECT_CODE_INTELLIGENCE_COLLECTION=", output)
+
+        project_config = output.split("Required environment variables for pci-mcp (RO)", maxsplit=1)[0]
+        self.assertNotIn("ro fixture", project_config)
+        self.assertNotIn("postgresql://db.example.invalid", project_config)
 
     def test_codex_mcp_config_block_quotes_non_bare_toml_server_names(self) -> None:
         ro_value = "-".join(("ro", "fixture"))
@@ -807,6 +912,25 @@ class ParserAndRuntimeTests(unittest.TestCase):
         for noise in ("let", "pub", "ref", "unwrap", "ok_or_else", "map_err", "to_string"):
             self.assertNotIn(noise, targets, msg=f"unexpected edge to {noise!r}")
 
+        budget_text = "\n".join([
+            "pub struct Budget(Option<usize>);",
+            "impl Budget {",
+            "    pub fn poll(&self) -> Option<bool> {",
+            "        Some(self.has_remaining())",
+            "    }",
+            "    pub fn has_remaining(&self) -> bool {",
+            "        self.0.map_or(false, |value| value > 0)",
+            "    }",
+            "}",
+        ])
+
+        _budget_records, budget_edges = rust_records(fixture_file("task/coop/mod.rs", "rust"), budget_text, 2400, 0)
+        budget_targets = {edge.target_symbol for edge in budget_edges}
+
+        self.assertIn("Budget::has_remaining", budget_targets)
+        for noise in ("Some", "map_or", "Option"):
+            self.assertNotIn(noise, budget_targets, msg=f"unexpected edge to {noise!r}")
+
     def test_rust_records_strip_noise_from_symbols_referenced(self) -> None:
         text = "\n".join([
             "pub fn handler(&self) {",
@@ -827,12 +951,83 @@ class ParserAndRuntimeTests(unittest.TestCase):
         for noise in ("let", "pub", "unwrap_or_default", "to_string"):
             self.assertNotIn(noise, names, msg=f"noise {noise!r} leaked into symbols_referenced")
 
+        long_body = [f"    let value_{idx} = {idx};" for idx in range(205)]
+        long_body.extend([
+            "    let printer = PrinterBuilder::new();",
+            "    printer.print_all();",
+        ])
+        text = "\n".join([
+            "pub struct PrinterBuilder;",
+            "impl PrinterBuilder {",
+            "    pub fn new() -> Self {",
+            "        Self",
+            "    }",
+            "    pub fn print_all(&self) {}",
+            "}",
+            "pub struct GroupSize;",
+            "impl From<GroupSize> for usize {",
+            "    fn from(value: GroupSize) -> Self {",
+            "        1",
+            "    }",
+            "}",
+            "pub fn run() {",
+            *long_body,
+            "}",
+            "#[cfg(test)]",
+            "mod tests {",
+            "    #[test]",
+            "    fn empty_file_passes() {}",
+            "}",
+        ])
+
+        records, edges = rust_records(fixture_file("src/main.rs", "rust"), text, 2400, 0)
+        symbols = {record.symbol for record in records if record.record_type == "symbol_definition"}
+
+        self.assertIn("PrinterBuilder::new", symbols)
+        self.assertIn("PrinterBuilder::print_all", symbols)
+        self.assertIn("From<GroupSize>::from", symbols)
+        self.assertNotIn("new", symbols)
+
+        run_record = next(
+            record for record in records if record.record_type == "symbol_definition" and record.symbol == "run"
+        )
+        self.assertEqual(run_record.line_end, 222)
+        self.assertIn("PrinterBuilder::new", run_record.display_content)
+
+        subchunks = [record for record in records if record.metadata.get("rust_symbol_subchunk")]
+        self.assertTrue(any("PrinterBuilder::new" in record.display_content for record in subchunks))
+
+        method = next(record for record in records if record.symbol == "PrinterBuilder::new")
+        self.assertEqual(method.metadata["impl_owner"], "PrinterBuilder")
+        trait_method = next(record for record in records if record.symbol == "From<GroupSize>::from")
+        self.assertEqual(trait_method.metadata["impl_owner"], "usize")
+        self.assertEqual(trait_method.metadata["impl_trait"], "From<GroupSize>")
+        self.assertIn("PrinterBuilder::new", {edge.target_symbol for edge in edges})
+
+        inline_test = next(record for record in records if record.symbol == "empty_file_passes")
+        self.assertEqual(inline_test.file_role, "test")
+        self.assertTrue(inline_test.metadata["rust_test"])
+
     def test_typescript_template_literals_do_not_emit_shell_backtick_security_records(self) -> None:
-        text = "throw new Error(`Invalid semver version: ${version}`)\n"
+        text = "\n".join([
+            "export function failOnConsole(message: string) {",
+            "  throw new Error(`Invalid console output: ${message}`);",
+            "}",
+        ])
 
         records = security_records(fixture_file("scripts/check-semver.ts", "typescript"), text)
 
         self.assertFalse([record for record in records if record.rule_id == "shell_backtick_execution"])
+
+        records, _edges = javascript_records(fixture_file("scripts/fail-on-console.ts", "typescript"), text, 2400, 0)
+        records_with_security_metadata = [record for record in records if "security_sensitive_apis" in record.metadata]
+
+        self.assertTrue(records_with_security_metadata)
+        for record in records_with_security_metadata:
+            sensitive_apis = record.metadata.get("security_sensitive_apis", [])
+            if not isinstance(sensitive_apis, list):
+                self.fail("security_sensitive_apis should be a list")
+            self.assertNotIn("shell_backtick_execution", sensitive_apis)
 
     def test_typescript_records_emit_symbols_and_conservative_call_edges(self) -> None:
         text = "\n".join([

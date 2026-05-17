@@ -16,9 +16,11 @@ from project_code_intelligence.mcp import db as mcp_db
 from project_code_intelligence.mcp.filters import (
     StatusFilters,
     code_intel_clauses,
+    normalize_source_path_filter,
     query_with_where,
     scoped_collection_repo_clauses,
     scoped_snapshot_clauses,
+    scoped_snapshot_table_collection_repo_clauses,
     snapshot_scope_response,
     source_path_clauses,
     static_finding_clauses,
@@ -93,6 +95,14 @@ SEARCH_TERM_RE = re.compile(r"[A-Za-z0-9_$./:+@-]+")
 IDENTIFIER_QUERY_RE = re.compile(r"[$A-Za-z_][$A-Za-z0-9_$./:+@-]*\Z")
 SEARCH_OPERATOR_WORDS = frozenset({"and", "or", "not"})
 DEFAULT_MIXED_SEARCH_EXCLUDED_RECORD_TYPES = frozenset({"security_pattern"})
+SECURITY_PATTERN_QUERY_TERMS = frozenset({
+    "cve",
+    "cwe",
+    "security",
+    "security_pattern",
+    "vulnerability",
+    "vulnerabilities",
+})
 MIN_CENTERED_SNIPPET_TERM_CHARS = 3
 
 CODE_INTEL_RECORD_SELECT_LIST = """
@@ -316,6 +326,7 @@ _COMPACT_RECORD_STRIP = frozenset({
     "updated_at",
     "confidence",
     "match_score",
+    "distance",
     "tool",
     "rule_id",
     "severity",
@@ -485,6 +496,8 @@ def _compact_record(
     row: db.DbRow,
     snippet_length: int = DEFAULT_SNIPPET_LENGTH,
     snippet_terms: tuple[str, ...] = (),
+    *,
+    include_metadata: bool = True,
 ) -> dict[str, object]:
     snippet = _extract_snippet(_row_text(row, "snippet_raw"), snippet_length, snippet_terms)
     out: dict[str, object] = {
@@ -492,17 +505,20 @@ def _compact_record(
         for k, v in row.items()
         if not _is_compact_noise(k, v) and k not in _COMPACT_RECORD_STRIP and k != "snippet_raw"
     }
-    metadata = out.get("metadata")
-    if isinstance(metadata, dict):
-        metadata_dict = cast("dict[str, object]", metadata)
-        trimmed = {
-            k: v for k, v in metadata_dict.items() if k not in _HEAVY_METADATA_KEYS and not _is_compact_noise(k, v)
-        }
-        if trimmed != metadata_dict:
-            if trimmed:
-                out["metadata"] = trimmed
-            else:
-                del out["metadata"]
+    if include_metadata:
+        metadata = out.get("metadata")
+        if isinstance(metadata, dict):
+            metadata_dict = cast("dict[str, object]", metadata)
+            trimmed = {
+                k: v for k, v in metadata_dict.items() if k not in _HEAVY_METADATA_KEYS and not _is_compact_noise(k, v)
+            }
+            if trimmed != metadata_dict:
+                if trimmed:
+                    out["metadata"] = trimmed
+                else:
+                    del out["metadata"]
+    else:
+        _ = out.pop("metadata", None)
     if snippet:
         out["snippet"] = snippet
     return out
@@ -583,7 +599,10 @@ def search_mode(args: Json, query: str | None) -> SearchMode:
     if value == "search" and not query:
         raise McpProtocolError("mode=search requires a non-empty query")
     if value == "enumerate" and query:
-        raise McpProtocolError("mode=enumerate must not be combined with a query")
+        raise McpProtocolError(
+            "mode=enumerate lists records by filters and must not be combined with query; "
+            "omit mode for search, or use symbol/record_type/source_path filters"
+        )
     return cast("SearchMode", value)
 
 
@@ -607,12 +626,88 @@ def identifier_like_single_term(terms: tuple[str, ...]) -> bool:
     return any(char in term for char in "$_./:+@-") or any(char.isdigit() or char.isupper() for char in term)
 
 
+def query_implies_security_patterns(args: Json) -> bool:
+    terms = {term.casefold() for term in search_terms(optional_text(args, "query") or "")}
+    return bool(terms & SECURITY_PATTERN_QUERY_TERMS) or any(term.startswith(("cve-", "cwe-")) for term in terms)
+
+
 def append_default_mixed_search_exclusions(args: Json, clauses: list[str], alias: str) -> None:
-    if optional_text(args, "record_type") or optional_text(args, "content_class"):
+    if optional_text(args, "record_type") or query_implies_security_patterns(args):
         return
     clauses.extend(
         f"{alias}.record_type <> '{record_type}'" for record_type in sorted(DEFAULT_MIXED_SEARCH_EXCLUDED_RECORD_TYPES)
     )
+
+
+def _path_scope_matches_repo_root(args: Json) -> bool:
+    raw_prefix = optional_text(args, "source_path_prefix")
+    if not raw_prefix:
+        return False
+    prefix = normalize_source_path_filter(raw_prefix, "source_path_prefix")
+    repo = optional_text(args, "repo")
+    if repo and prefix == normalize_source_path_filter(repo, "repo"):
+        return True
+    collection = scoped_collection(args)
+    return bool(collection and prefix == normalize_source_path_filter(collection, "collection"))
+
+
+def repo_scope_exists(conn: db.DbConnection, args: Json) -> bool | None:
+    if not optional_text(args, "repo"):
+        return None
+    clauses, params = scoped_snapshot_table_collection_repo_clauses(args, "s")
+    return (
+        conn.execute(
+            db.query_sql(
+                query_with_where(
+                    """
+            SELECT 1
+            FROM project_code_intel_snapshots s
+            """,
+                    clauses,
+                    """
+            LIMIT 1
+            """,
+                )
+            ),
+            params,
+        ).fetchone()
+        is not None
+    )
+
+
+def _scope_filter_warnings(args: Json, rows: Sequence[object], *, repo_exists: bool | None = None) -> list[Json]:
+    warnings: list[Json] = []
+    source_path = optional_text(args, "source_path")
+    source_path_prefix = optional_text(args, "source_path_prefix")
+    repo = optional_text(args, "repo")
+    if _path_scope_matches_repo_root(args):
+        warnings.append({
+            "kind": "repo_root_path_scope",
+            "message": "source_path_prefix points at the repo root and is equivalent to a broad repo filter",
+            "source_path_prefix": source_path_prefix,
+        })
+    if rows:
+        return warnings
+    if repo and repo_exists is False:
+        warnings.append({
+            "kind": "empty_repo_scope",
+            "repo": repo,
+            "message": "no results matched this repo filter; run code_intel_status without repo to see valid repo keys",
+        })
+    if source_path or source_path_prefix:
+        warning: Json = {
+            "kind": "empty_path_scope",
+            "message": (
+                "no results matched this path scope; source_path and source_path_prefix are repo-relative, "
+                "and directories should use source_path_prefix"
+            ),
+        }
+        if source_path:
+            warning["source_path"] = source_path
+        if source_path_prefix:
+            warning["source_path_prefix"] = source_path_prefix
+        warnings.append(warning)
+    return warnings
 
 
 def like_pattern_for_term(term: str) -> str:
@@ -631,6 +726,69 @@ def match_score_params(terms: tuple[str, ...]) -> QueryParams:
         [prefix_like_pattern_for_term(term) for term in terms],
         [like_pattern_for_term(term) for term in terms],
     ]
+
+
+SEMANTIC_BOOST_STOP_WORDS = frozenset({
+    "about",
+    "after",
+    "before",
+    "does",
+    "happen",
+    "happens",
+    "into",
+    "that",
+    "the",
+    "then",
+    "this",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with",
+})
+MIN_SEMANTIC_BOOST_TERM_CHARS = 3
+MAX_SEMANTIC_BOOST_TERMS = 8
+SEMANTIC_SOURCE_ROLE_DISTANCE_BOOST = 0.16
+SEMANTIC_NON_SOURCE_QUERY_TERMS = frozenset({
+    "doc",
+    "docs",
+    "documentation",
+    "example",
+    "examples",
+    "fixture",
+    "fixtures",
+    "guide",
+    "guides",
+    "mock",
+    "mocks",
+    "readme",
+    "spec",
+    "specs",
+    "test",
+    "testing",
+    "tests",
+    "unit",
+})
+
+
+def semantic_boost_terms(query: str) -> tuple[str, ...]:
+    return tuple(
+        term
+        for term in search_terms(query)
+        if len(term) >= MIN_SEMANTIC_BOOST_TERM_CHARS and term.casefold() not in SEMANTIC_BOOST_STOP_WORDS
+    )[:MAX_SEMANTIC_BOOST_TERMS]
+
+
+def semantic_source_role_distance_boost(args: Json, query: str) -> float:
+    if optional_text(args, "file_role"):
+        return 0.0
+    content_class = optional_text(args, "content_class")
+    if content_class and content_class != "source":
+        return 0.0
+    query_terms = {term.casefold() for term in search_terms(query)}
+    if query_terms & SEMANTIC_NON_SOURCE_QUERY_TERMS:
+        return 0.0
+    return SEMANTIC_SOURCE_ROLE_DISTANCE_BOOST
 
 
 def run_text_search_query(
@@ -807,12 +965,16 @@ def _annotate_status_snapshots(snapshot_rows: list[db.DbRow]) -> list[Json]:
     return snapshots
 
 
-def _compact_status_snapshots(snapshots: list[Json], *, omit_collection: bool) -> list[Json]:
+def _compact_status_snapshots(snapshots: list[Json], *, omit_collection: bool, omit_repo: bool) -> list[Json]:
     compact: list[Json] = []
     for snapshot in snapshots:
         item: Json = {}
         for key in _COMPACT_STATUS_SNAPSHOT_KEYS:
             if omit_collection and key == "collection":
+                continue
+            if omit_repo and key == "repo":
+                continue
+            if key == "head_commit" and snapshot.get("head_commit") == snapshot.get("commit_sha"):
                 continue
             if key in snapshot:
                 item[key] = snapshot[key]
@@ -820,28 +982,92 @@ def _compact_status_snapshots(snapshots: list[Json], *, omit_collection: bool) -
     return compact
 
 
-def _status_rows_for_response(rows: list[db.DbRow], *, omit_collection: bool) -> list[Json]:
-    if not omit_collection:
+def _status_rows_for_response(rows: list[db.DbRow], *, omit_collection: bool, omit_repo: bool) -> list[Json]:
+    if not omit_collection and not omit_repo:
         return [{key: cast("JsonValue", value) for key, value in row.items()} for row in rows]
     result: list[Json] = []
     for row in rows:
         item: Json = {}
         for key, value in row.items():
-            if key != "collection":
-                item[key] = cast("JsonValue", value)
+            if omit_collection and key == "collection":
+                continue
+            if omit_repo and key == "repo":
+                continue
+            item[key] = cast("JsonValue", value)
         result.append(item)
     return result
 
 
-def _status_json_rows_for_response(rows: list[Json], *, omit_collection: bool) -> list[Json]:
-    if not omit_collection:
+def _status_json_rows_for_response(rows: list[Json], *, omit_collection: bool, omit_repo: bool) -> list[Json]:
+    if not omit_collection and not omit_repo:
         return rows
     result: list[Json] = []
     for row in rows:
         item = dict(row)
-        _ = item.pop("collection", None)
+        if omit_collection:
+            _ = item.pop("collection", None)
+        if omit_repo:
+            _ = item.pop("repo", None)
         result.append(item)
     return result
+
+
+def _copy_snapshot_warning_fields(warning: Json, snapshot: Json, keys: tuple[str, ...]) -> None:
+    for key in keys:
+        value = snapshot.get(key)
+        if value is not None:
+            warning[key] = cast("JsonValue", value)
+
+
+def _snapshot_dirty_paths_count(snapshot: Json) -> int | None:
+    metadata = snapshot.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    dirty_paths = metadata.get("dirty_paths")
+    if not isinstance(dirty_paths, list):
+        return None
+    return sum(1 for item in dirty_paths if isinstance(item, str))
+
+
+def _status_snapshot_warnings(snapshots: list[Json]) -> list[Json]:
+    warnings: list[Json] = []
+    for snapshot in snapshots:
+        status = snapshot.get("head_status")
+        if status == "stale":
+            warning: Json = {
+                "kind": "snapshot_stale",
+                "message": "snapshot is stale; verify with local source",
+            }
+        elif status == "unknown":
+            warning = {
+                "kind": "snapshot_freshness_unknown",
+                "message": "snapshot freshness could not be checked against local source",
+            }
+        else:
+            warning = {}
+        if warning:
+            _copy_snapshot_warning_fields(
+                warning,
+                snapshot,
+                ("id", "collection", "repo", "commit_sha", "head_commit", "head_status_reason"),
+            )
+            warnings.append(warning)
+        if snapshot.get("dirty") is True:
+            dirty_warning: Json = {
+                "kind": "snapshot_dirty",
+                "message": "snapshot was indexed from a dirty working tree; verify dirty paths against local source",
+                "dirty": True,
+            }
+            dirty_paths_count = _snapshot_dirty_paths_count(snapshot)
+            if dirty_paths_count is not None:
+                dirty_warning["dirty_paths_count"] = dirty_paths_count
+            _copy_snapshot_warning_fields(
+                dirty_warning,
+                snapshot,
+                ("id", "collection", "repo", "commit_sha", "head_commit", "head_status"),
+            )
+            warnings.append(dirty_warning)
+    return warnings
 
 
 def _status_file_breakdowns(
@@ -1143,6 +1369,7 @@ def tool_code_intel_status(args: Json) -> Json:
     includes = _status_include_flags(args)
     scope_response, collection_scoped = _status_scope_response(args)
     omit_scoped_collection = collection_scoped and not includes.verbose
+    omit_scoped_repo = optional_text(args, "repo") is not None and not includes.verbose
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"schema_present": False})
@@ -1159,19 +1386,40 @@ def tool_code_intel_status(args: Json) -> Json:
         "schema_versions": rows.schema_versions,
         **scope_response,
         "snapshots": (
-            _status_json_rows_for_response(rows.snapshots, omit_collection=omit_scoped_collection)
+            _status_json_rows_for_response(
+                rows.snapshots,
+                omit_collection=omit_scoped_collection,
+                omit_repo=omit_scoped_repo,
+            )
             if includes.snapshots
-            else _compact_status_snapshots(rows.snapshots, omit_collection=omit_scoped_collection)
+            else _compact_status_snapshots(
+                rows.snapshots,
+                omit_collection=omit_scoped_collection,
+                omit_repo=omit_scoped_repo,
+            )
         ),
-        "files": _status_rows_for_response(rows.files, omit_collection=omit_scoped_collection),
-        "records": _status_rows_for_response(rows.records, omit_collection=omit_scoped_collection),
-        "edges": _status_rows_for_response(rows.edges, omit_collection=omit_scoped_collection),
+        "files": _status_rows_for_response(
+            rows.files,
+            omit_collection=omit_scoped_collection,
+            omit_repo=omit_scoped_repo,
+        ),
+        "records": _status_rows_for_response(
+            rows.records,
+            omit_collection=omit_scoped_collection,
+            omit_repo=omit_scoped_repo,
+        ),
+        "edges": _status_rows_for_response(
+            rows.edges,
+            omit_collection=omit_scoped_collection,
+            omit_repo=omit_scoped_repo,
+        ),
         "queryability": queryability,
     }
     if includes.record_types:
         response["records_by_type"] = _status_rows_for_response(
             rows.records_by_type,
             omit_collection=omit_scoped_collection,
+            omit_repo=omit_scoped_repo,
         )
     if rows.breakdowns is not None:
         response["language_breakdown"] = rows.breakdowns["language"]
@@ -1180,6 +1428,9 @@ def tool_code_intel_status(args: Json) -> Json:
         static_runs, static_findings = rows.static_rows
         response["static_runs"] = static_runs
         response["static_findings"] = static_findings
+    warnings = _status_snapshot_warnings(rows.snapshots)
+    if warnings:
+        response["warnings"] = warnings
     return ok(response)
 
 
@@ -1218,6 +1469,19 @@ def _execute_text_search(
             strategy = "any_terms_fallback"
             rows = run_text_search_query(conn, args, TextSearchPlan(query, strategy, terms, limit))
     return rows, strategy, fallback_reason
+
+
+def _text_search_warnings(strategy: SearchQueryStrategy, fallback_reason: str | None) -> list[Json]:
+    if not strategy.endswith("_fallback"):
+        return []
+    warning: Json = {
+        "kind": "query_strategy_fallback",
+        "query_strategy": strategy,
+        "message": "text search used a broader fallback strategy; ranking may be less precise",
+    }
+    if fallback_reason:
+        warning["fallback_reason"] = fallback_reason
+    return [warning]
 
 
 def related_direction(args: Json) -> RelatedDirection:
@@ -1302,6 +1566,18 @@ def annotate_related_edges(
         )
     )
     return edges
+
+
+def _related_edge_warnings(edges: Sequence[Mapping[str, object]]) -> list[Json]:
+    if not any(edge.get("confidence_kind") == "heuristic_candidate" for edge in edges):
+        return []
+    return [
+        {
+            "kind": "heuristic_candidate_relationships",
+            "confidence_kind": "heuristic_candidate",
+            "message": "related_code_intel returns heuristic candidates; verify important relationships in source",
+        }
+    ]
 
 
 def unresolved_edge_target_kind(edge: Mapping[str, object]) -> str:
@@ -1399,6 +1675,7 @@ def related_base_edge_filters(args: Json, direction: RelatedDirection) -> tuple[
     repo = optional_text(args, "repo")
     edge_type = optional_text(args, "edge_type")
     confidence_kind = optional_text(args, "confidence_kind")
+    include_unresolved = optional_bool(args, "include_unresolved")
     if symbol:
         clauses.append(related_symbol_clause(direction))
         params.extend(related_clause_params(direction, symbol))
@@ -1414,6 +1691,8 @@ def related_base_edge_filters(args: Json, direction: RelatedDirection) -> tuple[
     if confidence_kind:
         clauses.append("e.confidence_kind = %s")
         params.append(confidence_kind)
+    if not include_unresolved:
+        clauses.append("(e.confidence_kind <> 'heuristic_candidate' OR e.target_record_id IS NOT NULL)")
     snapshot_clauses, snapshot_params = scoped_snapshot_clauses(args, "e")
     clauses.extend(snapshot_clauses)
     params.extend(snapshot_params)
@@ -1427,11 +1706,14 @@ def tool_search_code_intel_text(args: Json) -> Json:
     terms = tuple(search_terms(query)) if query else ()
     limit = require_int(args, "limit", 10, 1, 50)
     snippet_length = require_int(args, "snippet_length", DEFAULT_SNIPPET_LENGTH, 1, 800)
+    repo_exists: bool | None = None
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
         validate_explicit_snapshot_id(conn, args)
         rows, strategy, fallback_reason = _execute_text_search(conn, args, terms, limit)
+        if not rows:
+            repo_exists = repo_scope_exists(conn, args)
     if not optional_text(args, "record_type"):
         rows = _dedup_by_location(rows)
     verbose = optional_bool(args, "verbose") or False
@@ -1453,6 +1735,12 @@ def tool_search_code_intel_text(args: Json) -> Json:
         response["terms"] = list(terms)
     if fallback_reason:
         response["fallback_reason"] = fallback_reason
+    warnings = [
+        *_text_search_warnings(strategy, fallback_reason),
+        *_scope_filter_warnings(args, rows, repo_exists=repo_exists),
+    ]
+    if warnings:
+        response["warnings"] = warnings
     return ok(response)
 
 
@@ -1499,7 +1787,10 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
     clauses.append("r.embedding IS NOT NULL")
     append_default_mixed_search_exclusions(args, clauses, "r")
     embedding, embedding_dimensions = query_embedding(query)
-    query_params = [embedding, *params, limit]
+    lexical_terms = semantic_boost_terms(query)
+    source_role_boost = semantic_source_role_distance_boost(args, query)
+    query_params = [embedding, *match_score_params(lexical_terms), *params, source_role_boost, limit]
+    repo_exists: bool | None = None
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
@@ -1508,31 +1799,73 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
             db.query_sql(
                 query_with_where(
                     """
+            SELECT *
+            FROM (
             SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role,
                    r.branch, r.commit_sha, r.source_path, r.language, r.file_role,
                    r.content_class, r.record_type, r.record_id, r.parent_record_id,
                    r.title, r.summary, r.line_start, r.line_end, r.symbol,
                    r.symbol_kind, r.confidence_kind, r.confidence, r.tool, r.rule_id,
-                   r.severity, r.embedding <=> %s::vector AS distance,
+                   r.severity, r.updated_at, r.embedding <=> %s::vector AS distance,
+                   (
+                       SELECT coalesce(sum(
+                           CASE WHEN lower(coalesce(r.symbol, '')) = lower(search_terms.term) THEN 40 ELSE 0 END
+                         + CASE WHEN lower(coalesce(r.title, '')) = lower(search_terms.term) THEN 32 ELSE 0 END
+                         + CASE
+                             WHEN coalesce(r.symbol, '') ILIKE search_terms.prefix_pattern ESCAPE '\\' THEN 20
+                             ELSE 0
+                           END
+                         + CASE WHEN coalesce(r.title, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 12 ELSE 0 END
+                         + CASE
+                             WHEN coalesce(r.source_path, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 8
+                             ELSE 0
+                           END
+                         + CASE WHEN coalesce(r.record_id, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 6 ELSE 0 END
+                         + CASE WHEN coalesce(r.summary, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 4 ELSE 0 END
+                         + CASE
+                             WHEN coalesce(r.display_content, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 1
+                             ELSE 0
+                           END
+                       ), 0)::real
+                       FROM unnest(%s::text[], %s::text[], %s::text[])
+                            AS search_terms(term, prefix_pattern, pattern)
+                   ) AS match_score,
                    left(r.display_content, 800) AS snippet_raw
             FROM project_code_intel_records r
+            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
             """,
                     clauses,
                     """
-            ORDER BY distance ASC, r.updated_at DESC
+            ) ranked
+            ORDER BY (
+                         ranked.distance
+                         - LEAST(ranked.match_score, 80) * 0.01
+                         - CASE WHEN ranked.file_role = 'source' THEN %s::real ELSE 0 END
+                     ) ASC,
+                     ranked.distance ASC,
+                     ranked.updated_at DESC
             LIMIT %s
             """,
                 )
             ),
             query_params,
         ).fetchall()
+        if not rows:
+            repo_exists = repo_scope_exists(conn, args)
     verbose = optional_bool(args, "verbose") or False
-    return ok({
+    response: Json = {
         "query": query,
         "embedding_dimensions": embedding_dimensions,
         **snapshot_scope_response(args),
-        "results": cast("JsonValue", _format_records(rows, verbose=verbose, snippet_length=snippet_length)),
-    })
+        "results": cast(
+            "JsonValue",
+            _format_records(rows, verbose=verbose, snippet_length=snippet_length, snippet_terms=lexical_terms),
+        ),
+    }
+    warnings = _scope_filter_warnings(args, rows, repo_exists=repo_exists)
+    if warnings:
+        response["warnings"] = warnings
+    return ok(response)
 
 
 _RECORD_PROJECTION_WITH_CONTENT = """
@@ -1625,6 +1958,7 @@ def _build_record_lookup(args: Json, ids: list[str], *, batch: bool, include_con
 def tool_get_code_intel_record(args: Json) -> Json:
     ids, batch = _get_record_ids_arg(args)
     include_content = optional_bool(args, "include_content")
+    include_metadata = optional_bool(args, "include_metadata")
     verbose = optional_bool(args, "verbose") or False
     query_sql, params = _build_record_lookup(args, ids, batch=batch, include_content=include_content)
     with mcp_db.connect() as conn:
@@ -1636,9 +1970,9 @@ def tool_get_code_intel_record(args: Json) -> Json:
             row = cursor.fetchone()
             if row is None:
                 return ok({"found": False})
-            return ok({"result": dict(row) if verbose else _compact_record(row)})
+            return ok({"result": dict(row) if verbose else _compact_record(row, include_metadata=include_metadata)})
         rows = cursor.fetchall()
-    formatted = [dict(row) if verbose else _compact_record(row) for row in rows]
+    formatted = [dict(row) if verbose else _compact_record(row, include_metadata=include_metadata) for row in rows]
     missing = [rid for rid in ids if rid not in {str(row["record_id"]) for row in rows}]
     response: Json = {"results": cast("JsonValue", formatted)}
     if missing:
@@ -1717,16 +2051,21 @@ def tool_related_code_intel(args: Json) -> Json:
         edges,
         context=related_context,
     )
-    return ok({
+    response: Json = {
         **snapshot_scope_response(args),
         "edges": cast("JsonValue", _format_edges(annotated_edges, verbose=verbose)),
-    })
+    }
+    response["warnings"] = _related_edge_warnings(annotated_edges)
+    if not response["warnings"]:
+        del response["warnings"]
+    return ok(response)
 
 
 def tool_search_static_findings(args: Json) -> Json:
     limit = require_int(args, "limit", 10, 1, 100)
     clauses, params = static_finding_clauses(args)
     params.append(limit)
+    repo_exists: bool | None = None
     with mcp_db.connect() as conn:
         if not table_regclass_exists(conn, "project_code_intel_static_findings"):
             return ok({"error": "static-analysis schema is not initialized"})
@@ -1754,7 +2093,13 @@ def tool_search_static_findings(args: Json) -> Json:
             ),
             params,
         ).fetchall()
-    return ok({**snapshot_scope_response(args), "results": rows})
+        if not rows:
+            repo_exists = repo_scope_exists(conn, args)
+    response: Json = {**snapshot_scope_response(args), "results": cast("JsonValue", rows)}
+    warnings = _scope_filter_warnings(args, rows, repo_exists=repo_exists)
+    if warnings:
+        response["warnings"] = warnings
+    return ok(response)
 
 
 def row_to_json(row: db.DbRow | None) -> Json | None:
@@ -1976,6 +2321,7 @@ def tool_list_code_intel_files(args: Json) -> Json:
             FROM project_code_intel_files f
             """
 
+    repo_exists: bool | None = None
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
@@ -1993,8 +2339,14 @@ def tool_list_code_intel_files(args: Json) -> Json:
             ),
             params,
         ).fetchall()
+        if not rows:
+            repo_exists = repo_scope_exists(conn, args)
     files: list[object] = list(rows) if verbose else [_compact_file(row) for row in rows]
-    return ok({**snapshot_scope_response(args), "files": cast("JsonValue", files)})
+    response: Json = {**snapshot_scope_response(args), "files": cast("JsonValue", files)}
+    warnings = _scope_filter_warnings(args, rows, repo_exists=repo_exists)
+    if warnings:
+        response["warnings"] = warnings
+    return ok(response)
 
 
 def tool_list_code_intel_parser_failures(args: Json) -> Json:
@@ -2010,6 +2362,7 @@ def tool_list_code_intel_parser_failures(args: Json) -> Json:
     params.extend(path_params)
     params.append(limit)
 
+    repo_exists: bool | None = None
     with mcp_db.connect() as conn:
         if not table_regclass_exists(conn, "project_code_intel_parser_failures"):
             return ok({"error": "code intelligence schema is not initialized"})
@@ -2032,7 +2385,13 @@ def tool_list_code_intel_parser_failures(args: Json) -> Json:
             ),
             params,
         ).fetchall()
-    return ok({**snapshot_scope_response(args), "parser_failures": rows})
+        if not rows:
+            repo_exists = repo_scope_exists(conn, args)
+    response: Json = {**snapshot_scope_response(args), "parser_failures": cast("JsonValue", rows)}
+    warnings = _scope_filter_warnings(args, rows, repo_exists=repo_exists)
+    if warnings:
+        response["warnings"] = warnings
+    return ok(response)
 
 
 ToolHandler = Callable[[Json], Json]
@@ -2044,6 +2403,7 @@ TOOLS: ToolRegistry = {
     "search_code_intel_text": (TOOL_DEFINITIONS["search_code_intel_text"], tool_search_code_intel_text),
     "search_code_intel_semantic": (TOOL_DEFINITIONS["search_code_intel_semantic"], tool_search_code_intel_semantic),
     "get_code_intel_record": (TOOL_DEFINITIONS["get_code_intel_record"], tool_get_code_intel_record),
+    "get_code_intel_records": (TOOL_DEFINITIONS["get_code_intel_records"], tool_get_code_intel_record),
     "related_code_intel": (TOOL_DEFINITIONS["related_code_intel"], tool_related_code_intel),
     "list_code_intel_files": (TOOL_DEFINITIONS["list_code_intel_files"], tool_list_code_intel_files),
     "list_code_intel_parser_failures": (

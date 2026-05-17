@@ -42,6 +42,7 @@ __all__ = [
     "insert_static_runs",
     "latest_snapshot_info",
     "parser_failure_metadata",
+    "pre_resolvable_edge_count",
     "pre_resolve_edge_targets",
     "previous_file_signatures",
     "previous_file_state_signature",
@@ -143,6 +144,12 @@ def _symbol_definition_choices(definitions: list[_SymbolDefinitionTarget]) -> _S
 
 def edge_target_resolvable(edge: IntelEdge) -> bool:
     return edge.metadata.get("target_resolvable") is not False
+
+
+def pre_resolvable_edge_count(edges: list[IntelEdge]) -> int:
+    return sum(
+        1 for edge in edges if edge.target_record_id is None and edge.target_symbol and edge_target_resolvable(edge)
+    )
 
 
 def replace_repos(conn: db.DbConnection, collection: str, repos: list[str]) -> None:
@@ -548,23 +555,42 @@ def _load_symbol_definition_index(
     }
 
 
-def pre_resolve_edge_targets(conn: db.DbConnection, snapshot_id: int, edges: list[IntelEdge]) -> int:
+_EDGE_TARGET_PRE_RESOLVE_BATCH_SIZE = 5_000
+
+
+def pre_resolve_edge_targets(
+    conn: db.DbConnection,
+    snapshot_id: int,
+    edges: list[IntelEdge],
+    *,
+    batch_size: int = _EDGE_TARGET_PRE_RESOLVE_BATCH_SIZE,
+    progress_fn: Callable[[int], None] | None = None,
+) -> int:
     """Resolve newly generated edge targets in memory before inserting edge rows."""
     unresolved_edges = [
         edge for edge in edges if edge.target_record_id is None and edge.target_symbol and edge_target_resolvable(edge)
     ]
     if not unresolved_edges:
         return 0
-    symbols = _load_symbol_definition_index(conn, snapshot_id, {str(edge.target_symbol) for edge in unresolved_edges})
+    batch_size = max(1, batch_size)
+    symbols: dict[str, _SymbolDefinitionChoices | None] = {}
     resolved = 0
-    for edge in unresolved_edges:
-        choices = symbols.get(str(edge.target_symbol))
-        if choices is None:
-            continue
-        target = choices.choose(edge.source_path)
-        edge.target_record_id = target.record_id
-        edge.target_path = target.source_path
-        resolved += 1
+    for offset in range(0, len(unresolved_edges), batch_size):
+        batch = unresolved_edges[offset : offset + batch_size]
+        missing_symbols = {str(edge.target_symbol) for edge in batch if str(edge.target_symbol) not in symbols}
+        loaded_symbols = _load_symbol_definition_index(conn, snapshot_id, missing_symbols)
+        for symbol in missing_symbols:
+            symbols[symbol] = loaded_symbols.get(symbol)
+        for edge in batch:
+            choices = symbols.get(str(edge.target_symbol))
+            if choices is None:
+                continue
+            target = choices.choose(edge.source_path)
+            edge.target_record_id = target.record_id
+            edge.target_path = target.source_path
+            resolved += 1
+        if progress_fn is not None:
+            progress_fn(len(batch))
     return resolved
 
 

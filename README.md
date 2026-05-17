@@ -102,7 +102,12 @@ The full list of installed commands lives in [docs/PUBLIC_API.md](docs/PUBLIC_AP
 
 ## MCP Setup
 
-Point Codex, Claude Code, OpenCode, or another MCP client at the installed `pci-mcp` command. `pci-index --init-db --mcp-config codex .` prints a read-only Codex snippet for the current repo; `claude` and `opencode` are also supported. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md) for setup examples, database configuration, and collection/repo filter guidance.
+Point Codex, Claude Code, or OpenCode at the installed `pci-mcp` command.
+`pci-index --init-db --mcp-config codex .` prints a project-scoped read-only
+Codex snippet for the current repo plus the required environment exports with
+read-only credentials; `claude` and `opencode` are also supported.
+See [docs/MCP_SETUP.md](docs/MCP_SETUP.md) for setup examples, database
+configuration, and collection/repo filter guidance.
 
 ## Indexing
 

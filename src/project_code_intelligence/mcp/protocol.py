@@ -79,9 +79,16 @@ def scoped_collection(args: Json) -> str | None:
     requested = optional_text(args, "collection")
     configured = config.configured_collection()
     if configured and requested and requested != configured and not config.collection_override_allowed():
+        if config.configured_collection_defaulted():
+            raise McpWritePermissionError(
+                "collection does not match the MCP server's inferred cwd scope; "
+                "omit collection and pass repo for repo-only lookup, or pass collection='' to ignore "
+                "the inferred scope"
+            )
         raise McpWritePermissionError(
-            "collection override is disabled by PROJECT_CODE_INTELLIGENCE_COLLECTION; "
-            "set PROJECT_CODE_INTELLIGENCE_ALLOW_COLLECTION_OVERRIDE=1 for trusted multi-collection access"
+            "collection does not match PROJECT_CODE_INTELLIGENCE_COLLECTION; "
+            "omit collection to use the configured scope, or set "
+            "PROJECT_CODE_INTELLIGENCE_ALLOW_COLLECTION_OVERRIDE=1 for trusted multi-collection access"
         )
     if not requested and optional_text(args, "repo") and config.configured_collection_defaulted():
         return None
