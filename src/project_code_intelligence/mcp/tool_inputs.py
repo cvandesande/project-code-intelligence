@@ -76,6 +76,7 @@ class CodeIntelStatusArgs(StrictArgs):
     include_queryability: bool | None = None
     include_breakdowns: bool | None = None
     include_static_summary: bool | None = None
+    include_runtime: bool | None = None
 
 
 class _SearchFilterArgs(StrictArgs):

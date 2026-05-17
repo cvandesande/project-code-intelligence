@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
+import importlib.metadata
+import os
 import re
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -106,6 +110,8 @@ SECURITY_PATTERN_QUERY_TERMS = frozenset({
     "vulnerabilities",
 })
 MIN_CENTERED_SNIPPET_TERM_CHARS = 3
+SERVER_STARTED_AT = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+PACKAGE_NAME = "project-code-intelligence"
 
 CODE_INTEL_RECORD_SELECT_LIST = """
             SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role, r.branch,
@@ -1451,6 +1457,7 @@ class StatusIncludeFlags:
     queryability: bool
     breakdowns: bool
     static_summary: bool
+    runtime: bool
 
 
 @dataclass(frozen=True)
@@ -1475,6 +1482,7 @@ def _status_include_flags(args: Json) -> StatusIncludeFlags:
         queryability=verbose or (optional_bool(args, "include_queryability") or False),
         breakdowns=verbose or (optional_bool(args, "include_breakdowns") or False),
         static_summary=verbose or (optional_bool(args, "include_static_summary") or False),
+        runtime=verbose or (optional_bool(args, "include_runtime") or False),
     )
 
 
@@ -1487,6 +1495,68 @@ def _status_scope_response(args: Json) -> tuple[Json, bool]:
     if repo:
         result["repo"] = repo
     return result, collection is not None
+
+
+def _package_version() -> str | None:
+    try:
+        return importlib.metadata.version(PACKAGE_NAME)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _source_git_root(module_path: Path) -> Path | None:
+    for candidate in (module_path.parent, *module_path.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _source_git_commit(module_path: Path) -> str | None:
+    git_root = _source_git_root(module_path)
+    if git_root is None:
+        return None
+    commit = git_utils.run_git(git_root, ["rev-parse", "HEAD"])
+    return commit.strip() if commit else None
+
+
+def _database_runtime_identity() -> Json:
+    settings = db.inferred_database_role_settings(config.DatabaseSettings.from_env(role="mcp"), "ro")
+    target = settings.display_target()
+    return {
+        "target": target,
+        "fingerprint": hashlib.sha256(target.encode("utf-8")).hexdigest()[:16],
+        "dsn_source": settings.dsn_source,
+        "user_source": settings.dsn_user_source if settings.dsn_user else "PGVECTOR_USER",
+        "password_source": settings.dsn_auth_source if settings.dsn_password else "PGVECTOR_PASS",
+        "password_set": bool(settings.dsn_password or settings.password),
+        "database_inferred": settings.database_inferred,
+        "scope_path": str(config.configured_database_scope_path()),
+    }
+
+
+def server_runtime_identity() -> Json:
+    module_path = Path(__file__).resolve(strict=False)
+    user_config_path = config.pci_index_user_config_path()
+    user_config_exists = user_config_path.exists() if user_config_path is not None else False
+    return {
+        "package": {
+            "name": PACKAGE_NAME,
+            "version": _package_version(),
+            "module_path": str(module_path),
+            "source_git_commit": _source_git_commit(module_path),
+        },
+        "process": {
+            "pid": os.getpid(),
+            "executable": sys.executable,
+            "started_at": SERVER_STARTED_AT,
+            "cwd": str(Path.cwd()),
+        },
+        "database": _database_runtime_identity(),
+        "config": {
+            "user_config_path": str(user_config_path) if user_config_path is not None else None,
+            "user_config_exists": user_config_exists,
+        },
+    }
 
 
 def _load_status_rows(
@@ -1623,7 +1693,10 @@ def tool_code_intel_status(args: Json) -> Json:
     omit_scoped_repo = optional_text(args, "repo") is not None and not includes.verbose
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
-            return ok({"schema_present": False})
+            missing_schema_response: Json = {"schema_present": False}
+            if includes.runtime:
+                missing_schema_response["runtime"] = server_runtime_identity()
+            return ok(missing_schema_response)
         validate_explicit_snapshot_id(conn, args)
         rows = _load_status_rows(conn, filters, includes, directory_depth)
     queryability = _status_queryability(
@@ -1680,6 +1753,8 @@ def tool_code_intel_status(args: Json) -> Json:
         static_runs, static_findings = rows.static_rows
         response["static_runs"] = static_runs
         response["static_findings"] = static_findings
+    if includes.runtime:
+        response["runtime"] = server_runtime_identity()
     if _status_repo_not_found(args, rows):
         response["found"] = False
     warnings = [
@@ -2953,6 +3028,53 @@ LIST_CODE_INTEL_FILES_SELECT_FULL = """
             """
 
 
+LIST_CODE_INTEL_FILES_BOOLEAN_FILTERS = (
+    "is_test",
+    "is_doc",
+    "is_generated",
+    "is_vendor",
+    "is_source",
+    "is_build",
+    "is_config",
+    "is_untracked",
+)
+OVERCONSTRAINED_FALSE_BOOLEAN_FILTER_MIN_COUNT = 5
+OVERCONSTRAINED_FALSE_BOOLEAN_FILTER_WITH_PATH_MIN_COUNT = 2
+
+
+def _explicit_false_file_boolean_filters(args: Json) -> list[str]:
+    return [
+        arg_name
+        for arg_name in LIST_CODE_INTEL_FILES_BOOLEAN_FILTERS
+        if arg_name in args and not optional_bool(args, arg_name)
+    ]
+
+
+def _looks_like_overconstrained_boolean_filter(args: Json, false_filter_count: int) -> bool:
+    if false_filter_count >= OVERCONSTRAINED_FALSE_BOOLEAN_FILTER_MIN_COUNT:
+        return True
+    path_scoped = (
+        optional_text(args, "source_path") is not None or optional_text(args, "source_path_prefix") is not None
+    )
+    return path_scoped and false_filter_count >= OVERCONSTRAINED_FALSE_BOOLEAN_FILTER_WITH_PATH_MIN_COUNT
+
+
+def _overconstrained_boolean_filter_warning(args: Json, rows: Sequence[object]) -> Json | None:
+    if rows:
+        return None
+    filters = _explicit_false_file_boolean_filters(args)
+    if not _looks_like_overconstrained_boolean_filter(args, len(filters)):
+        return None
+    return {
+        "kind": "overconstrained_boolean_filters",
+        "message": (
+            "Omit boolean filters unless you want to filter for that exact boolean value; "
+            "false is an active filter, not a default."
+        ),
+        "filters": filters,
+    }
+
+
 def tool_list_code_intel_files(args: Json) -> Json:
     limit = require_int(args, "limit", 50, 1, 500)
     clauses, params = scoped_collection_repo_clauses(args, "f")
@@ -3006,6 +3128,9 @@ def tool_list_code_intel_files(args: Json) -> Json:
     files: list[object] = list(rows) if verbose else [_compact_file(row) for row in rows]
     response: Json = {**snapshot_scope_response(args), "files": cast("JsonValue", files)}
     warnings = _scope_filter_warnings(args, rows, repo_exists=repo_exists)
+    false_filter_warning = _overconstrained_boolean_filter_warning(args, rows)
+    if false_filter_warning:
+        warnings.append(false_filter_warning)
     if warnings:
         response["warnings"] = warnings
     return ok(response)
