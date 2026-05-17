@@ -269,6 +269,15 @@ class CodeIntelProfile:
             globs.extend([f"{prefix}**/*.sarif", f"{prefix}**/*.sarif.json"])
         return globs
 
+    def static_source_origin_metadata(
+        self,
+        source_path: str | None,
+        repos: list[str],
+        known_source_paths: set[str],
+    ) -> JsonObject:
+        del source_path, repos, known_source_paths
+        return {}
+
 
 class GenericProfile(CodeIntelProfile):
     name = "generic"

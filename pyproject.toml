@@ -58,10 +58,14 @@ dev = [
   "bandit>=1.7.10",
   "basedpyright>=1.39",
   "coverage[toml]>=7.14.0",
+  "deptry>=0.25.1",
+  "import-linter>=2.11",
   "pip-audit>=2.7",
   "pre-commit>=3.7",
   "ruff>=0.15.12",
+  "semgrep>=1.163.0",
   "typing-extensions>=4.12",
+  "vulture>=2.16",
 ]
 
 [project.urls]
@@ -82,6 +86,43 @@ exclude_dirs = ["build", "dist", ".venv", "src/project_code_intelligence.egg-inf
 # B603: subprocess call is safe; same wrapper enforces shell=False and argument-vector calls only.
 # B310: urllib.request usage is intentional; http_client.py validates scheme/netloc before any call.
 skips = ["B404", "B603", "B310"]
+
+[tool.deptry]
+known_first_party = ["project_code_intelligence"]
+no_ansi = true
+package_module_name_map = { "mlx-lm" = "mlx_lm", fastembed = "fastembed" }
+
+[tool.importlinter]
+root_package = "project_code_intelligence"
+
+[[tool.importlinter.contracts]]
+name = "MCP server stays independent of indexing and doctor orchestration"
+type = "forbidden"
+source_modules = [
+  "project_code_intelligence.mcp",
+  "project_code_intelligence.server",
+]
+forbidden_modules = [
+  "project_code_intelligence.cli",
+  "project_code_intelligence.doctor",
+  "project_code_intelligence.ingest_code_intel",
+]
+
+[[tool.importlinter.contracts]]
+name = "Library packages stay independent of MCP and CLI entrypoints"
+type = "forbidden"
+source_modules = [
+  "project_code_intelligence.code_profiles",
+  "project_code_intelligence.embedding",
+  "project_code_intelligence.language_profiles",
+  "project_code_intelligence.parsers",
+  "project_code_intelligence.sarif",
+  "project_code_intelligence.storage",
+]
+forbidden_modules = [
+  "project_code_intelligence.cli",
+  "project_code_intelligence.mcp",
+]
 
 [tool.ruff]
 line-length = 120
@@ -148,3 +189,15 @@ ignore = [
 # Override of BaseHTTPRequestHandler.log_message must keep the name "format".
 "tests/test_apple_embed_server.py" = ["A002"]
 "typings/**/*.pyi" = ["ANN401"]
+
+[tool.coverage.run]
+branch = true
+source = ["project_code_intelligence"]
+
+[tool.coverage.report]
+# Current unit-test baseline. Keep this passing and ratchet upward with focused
+# tests rather than excluding low-coverage modules.
+fail_under = 67.75
+precision = 2
+show_missing = true
+skip_covered = false

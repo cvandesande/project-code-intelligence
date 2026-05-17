@@ -5,6 +5,10 @@ COVERAGE ?= $(if $(wildcard .venv/bin/coverage),.venv/bin/coverage,coverage)
 BANDIT ?= $(if $(wildcard .venv/bin/bandit),.venv/bin/bandit,bandit)
 BASEDPYRIGHT ?= $(if $(wildcard .venv/bin/basedpyright),.venv/bin/basedpyright,basedpyright)
 PIP_AUDIT ?= $(if $(wildcard .venv/bin/pip-audit),.venv/bin/pip-audit,pip-audit)
+VULTURE ?= $(if $(wildcard .venv/bin/vulture),.venv/bin/vulture,vulture)
+DEPTRY ?= $(if $(wildcard .venv/bin/deptry),.venv/bin/deptry,deptry)
+LINT_IMPORTS ?= $(if $(wildcard .venv/bin/lint-imports),.venv/bin/lint-imports,lint-imports)
+SEMGREP ?= $(if $(wildcard .venv/bin/semgrep),.venv/bin/semgrep,semgrep)
 UV_CACHE_DIR ?= .uv-cache
 # Container engine: docker preferred, podman as drop-in replacement.
 # Override with `make ... DOCKER=podman` or by setting DOCKER in the environment.
@@ -26,9 +30,9 @@ SHELL_FILES := \
 	docker/llamacpp-cuda/entrypoint.sh \
 	docker/llamacpp-rocm/entrypoint.sh
 
-.PHONY: check lint format-check format shellcheck shell-format-check shell-format test coverage typecheck security security-audit deps-audit doctor integration-smoke scan scan-dry-run mcp-smoke embedding-bench amd-rocm-bundle compose-check compose-up compose-cpu compose-npu compose-amdgpu compose-nvidia compose-down tool-install
+.PHONY: check lint format-check format shellcheck shell-format-check shell-format test coverage dead-code dependency-check architecture-check semgrep-check quality-strict typecheck security security-audit deps-audit doctor integration-smoke scan scan-dry-run mcp-smoke embedding-bench amd-rocm-bundle compose-check compose-up compose-cpu compose-npu compose-amdgpu compose-nvidia compose-down tool-install
 
-check: format-check shell-format-check lint shellcheck test typecheck security deps-audit compose-check
+check: format-check shell-format-check lint shellcheck test dead-code dependency-check architecture-check semgrep-check coverage typecheck security deps-audit compose-check
 
 lint:
 	$(RUFF) check $(RUFF_TARGETS)
@@ -64,8 +68,23 @@ test:
 	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m unittest discover -s tests -v
 
 coverage:
+	$(COVERAGE) erase
 	PYTHONPATH=$(PYTHONPATH) $(COVERAGE) run -m unittest discover -s tests -v
-	$(COVERAGE) report -m
+	$(COVERAGE) report -m --sort=cover
+
+dead-code:
+	$(VULTURE) src tests scripts vulture_whitelist.py --min-confidence 0 --sort-by-size
+
+dependency-check:
+	$(DEPTRY) src scripts
+
+architecture-check:
+	$(LINT_IMPORTS) --config pyproject.toml
+
+semgrep-check:
+	$(SEMGREP) scan --config semgrep.yml --error --strict --metrics=off --disable-version-check --quiet src scripts tests
+
+quality-strict: dead-code dependency-check architecture-check semgrep-check coverage
 
 typecheck:
 	$(BASEDPYRIGHT) --warnings

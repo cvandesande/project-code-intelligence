@@ -32,6 +32,21 @@ from project_code_intelligence.embedding.http_common import parse_json_body as _
 from project_code_intelligence.process import PopenOptions
 from project_code_intelligence.runtime import estimate_embedding_tokens
 
+_mlx_lm_module: object | None
+_mlx_lm_import_error: ImportError | None
+if not TYPE_CHECKING and sys.platform == "darwin":
+    try:
+        import mlx_lm as _imported_mlx_lm
+    except ImportError as exc:
+        _mlx_lm_module = None
+        _mlx_lm_import_error = exc
+    else:
+        _mlx_lm_module = _imported_mlx_lm
+        _mlx_lm_import_error = None
+else:
+    _mlx_lm_module = None
+    _mlx_lm_import_error = None
+
 _STATE_DIR = Path.home() / ".local" / "state" / "project-code-intelligence"
 APPLE_EMBED_SERVER_PID_FILE = _STATE_DIR / "pci-apple-embed-server.pid"
 APPLE_EMBED_SERVER_LOG_FILE = _STATE_DIR / "pci-apple-embed-server.log"
@@ -81,11 +96,11 @@ class _MlxArray(Protocol):
     """Minimal structural type for MLX arrays used in embedding inference."""
 
     def __getitem__(self, key: object) -> _MlxArray: ...
-    def __sub__(self, other: object) -> _MlxArray: ...
-    def __truediv__(self, other: object) -> _MlxArray: ...
-    def __itruediv__(self, other: object) -> _MlxArray: ...
-    def __pow__(self, other: int | float) -> _MlxArray: ...
-    def sum(self, axis: int = ..., *, keepdims: bool = ...) -> _MlxArray: ...
+    def __sub__(self, _other: object) -> _MlxArray: ...
+    def __truediv__(self, _other: object) -> _MlxArray: ...
+    def __itruediv__(self, _other: object) -> _MlxArray: ...
+    def __pow__(self, _other: int | float) -> _MlxArray: ...
+    def sum(self, *args: object, **kwargs: object) -> _MlxArray: ...
     def tolist(self) -> list[object]: ...
 
 
@@ -98,24 +113,19 @@ class _MlxLmModel(Protocol):
 class _AutoTokenizerClass(Protocol):
     """Minimal structural type for transformers.AutoTokenizer."""
 
-    def from_pretrained(self, pretrained_model_name_or_path: str) -> object: ...
-
-
-class _TransformersModule(Protocol):
-    """Minimal structural type for the transformers module."""
-
-    AutoTokenizer: _AutoTokenizerClass
+    def from_pretrained(self, _pretrained_model_name_or_path: str) -> object: ...
 
 
 def _load_model(model_name: str) -> tuple[_MlxLmModel, object]:
     """Load an MLX model and tokenizer via mlx_lm. Returns (model, HF tokenizer)."""
-    try:
-        mlx_lm = import_module("mlx_lm")
-    except ImportError as exc:
+    if _mlx_lm_module is None:
         raise RuntimeError(
             "mlx_lm is not installed. Run: uv tool install --reinstall project-code-intelligence"
-        ) from exc
-    load_fn = cast("Callable[[str], tuple[_MlxLmModel, object]]", mlx_lm.load)
+        ) from _mlx_lm_import_error
+    load_value = cast("object", getattr(_mlx_lm_module, "load", None))
+    if not callable(load_value):
+        raise TypeError("mlx_lm.load was not available")
+    load_fn = cast("Callable[[str], tuple[_MlxLmModel, object]]", load_value)
     model, wrapper = load_fn(model_name)
     # mlx_lm returns a TokenizerWrapper designed for text generation; we need the
     # underlying HuggingFace tokenizer to call it with padding=True / truncation=True.
@@ -123,8 +133,8 @@ def _load_model(model_name: str) -> tuple[_MlxLmModel, object]:
     # ever disappears in a future mlx_lm release.
     hf_tokenizer: object = getattr(wrapper, "_tokenizer", None)
     if hf_tokenizer is None:
-        transformers_module = cast("_TransformersModule", import_module("transformers"))
-        hf_tokenizer = transformers_module.AutoTokenizer.from_pretrained(model_name)
+        auto_tokenizer = cast("_AutoTokenizerClass", import_module("transformers").AutoTokenizer)
+        hf_tokenizer = auto_tokenizer.from_pretrained(model_name)
     _err(f"  Backend: MLX (Apple Silicon) — model: {model_name}")
     return model, hf_tokenizer
 

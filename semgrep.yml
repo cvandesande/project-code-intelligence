@@ -1,0 +1,43 @@
+rules:
+  - id: project.no-direct-subprocess-import
+    message: Use project_code_intelligence.process so subprocess execution remains centralized and shell-free.
+    languages:
+      - python
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: import subprocess
+          - pattern: from subprocess import $NAME
+    paths:
+      exclude:
+        - src/project_code_intelligence/process.py
+
+  - id: project.no-direct-urllib-request-import
+    message: Use project_code_intelligence.http_client so URL validation remains centralized.
+    languages:
+      - python
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: import urllib.request
+          - pattern: from urllib.request import $NAME
+    paths:
+      exclude:
+        - src/project_code_intelligence/http_client.py
+
+  - id: project.no-direct-psycopg-connection-import
+    message: Use project_code_intelligence.db for PostgreSQL connection and SQL helper APIs.
+    languages:
+      - python
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: import psycopg
+          - pattern: from psycopg import $NAME
+          - pattern: from psycopg.conninfo import $NAME
+          - pattern: from psycopg.rows import $NAME
+          - pattern: from psycopg.sql import $NAME
+      - pattern-not: from psycopg.errors import $NAME
+    paths:
+      exclude:
+        - src/project_code_intelligence/db.py

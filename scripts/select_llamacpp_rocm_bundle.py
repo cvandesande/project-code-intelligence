@@ -32,14 +32,9 @@ from project_code_intelligence.rocm_bundles import (  # noqa: E402
 )
 
 
-class GitHubAsset(TypedDict):
-    name: str
-    browser_download_url: str
-
-
 class GitHubRelease(TypedDict):
     tag_name: str
-    assets: list[GitHubAsset]
+    assets: list[dict[str, str]]
 
 
 class Selection(TypedDict):
@@ -160,7 +155,7 @@ def latest_release(repo: str) -> GitHubRelease:
     if not isinstance(tag_name, str) or not isinstance(assets_value, list):
         fail(f"latest release response from {normalized_repo} did not include tag_name and assets")
 
-    typed_assets: list[GitHubAsset] = []
+    typed_assets: list[dict[str, str]] = []
     assets = cast("list[object]", assets_value)
     for item in assets:
         if not isinstance(item, dict):

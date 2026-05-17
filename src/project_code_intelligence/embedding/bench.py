@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from project_code_intelligence.models import JsonObject
 
 DEFAULT_ENDPOINT = config.DEFAULT_FASTEMBED_EMBEDDING_ENDPOINT
-DEFAULT_MODEL = "local"
 MIN_REPOSITORY_TEXT_CHARS = 100
 
 
