@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 from project_code_intelligence import config
@@ -40,6 +40,9 @@ from project_code_intelligence.mcp.transport import (
     set_mcp_environment_defaults,
 )
 from project_code_intelligence.server import vector_literal_dimensions
+
+if TYPE_CHECKING:
+    from project_code_intelligence.models import JsonObject
 
 
 class FakeCursor:
@@ -562,6 +565,21 @@ class McpTextSearchExecutionTests(unittest.TestCase):
         payload = mcp_text_payload(response)
         self.assertEqual(payload["mode"], "enumerate")
 
+    def test_text_search_enumerate_uses_prefix_stable_ordering(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            _ = mcp_tools.tool_search_code_intel_text({"mode": "enumerate", "limit": 2})
+
+        query, _params = conn.calls[0]
+        self.assertIn("ORDER BY r.source_path ASC", query)
+        self.assertIn("r.line_start ASC NULLS LAST", query)
+        self.assertIn("r.record_id ASC", query)
+        self.assertNotIn("ORDER BY r.updated_at DESC", query)
+
 
 class McpPathFilterTests(unittest.TestCase):
     def test_text_search_accepts_source_path_prefix(self) -> None:
@@ -691,6 +709,7 @@ class McpSemanticSearchTests(unittest.TestCase):
                         "record_type": "code_chunk",
                         "distance": 0.42,
                         "match_score": 12.0,
+                        "quality_penalty": 0.0,
                         "snippet_raw": "```rust\nreceiver.close();\n```",
                     }
                 ]
@@ -709,8 +728,11 @@ class McpSemanticSearchTests(unittest.TestCase):
 
         query, params = conn.calls[0]
         self.assertIn("match_score", query)
+        self.assertIn("split_part(coalesce(r.embedding_text", query)
+        self.assertIn("quality_penalty", query)
         self.assertIn("r.updated_at", query)
         self.assertIn("LEAST(ranked.match_score, 80)", query)
+        self.assertIn("+ ranked.quality_penalty", query)
         self.assertIn("ranked.file_role = 'source'", query)
         self.assertIn("oneshot", cast("list[str]", params[1]))
         self.assertEqual(params[-2], mcp_tools.SEMANTIC_SOURCE_ROLE_DISTANCE_BOOST)
@@ -719,6 +741,7 @@ class McpSemanticSearchTests(unittest.TestCase):
         result = cast("list[dict[str, object]]", payload["results"])[0]
         self.assertNotIn("distance", result)
         self.assertNotIn("match_score", result)
+        self.assertNotIn("quality_penalty", result)
 
     def test_semantic_search_disables_source_role_boost_for_test_queries(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[])])
@@ -735,7 +758,10 @@ class McpSemanticSearchTests(unittest.TestCase):
         self.assertEqual(params[-2], 0.0)
 
     def test_semantic_search_record_type_filter_can_request_security_patterns(self) -> None:
-        conn = QueuedConnection([FakeCursor(many=[])])
+        conn = QueuedConnection([
+            FakeCursor(one={"record_count": 2, "embedded_records": 2}),
+            FakeCursor(many=[]),
+        ])
 
         with (
             patch.dict(os.environ, {}, clear=True),
@@ -750,8 +776,32 @@ class McpSemanticSearchTests(unittest.TestCase):
 
         payload = mcp_text_payload(response)
         self.assertEqual(payload["results"], [])
-        query, _params = conn.calls[0]
+        query, _params = conn.calls[1]
         self.assertNotIn("r.record_type <> 'security_pattern'", query)
+
+    def test_semantic_search_warns_for_text_only_record_type_filter(self) -> None:
+        conn = QueuedConnection([FakeCursor(one={"record_count": 3, "embedded_records": 0})])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)) as query_embedding,
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_search_code_intel_semantic({
+                "query": "defineLazy",
+                "record_type": "symbol_definition",
+            })
+
+        query_embedding.assert_not_called()
+        payload = mcp_text_payload(response)
+        self.assertEqual(payload["results"], [])
+        warnings = cast("list[dict[str, object]]", payload["warnings"])
+        self.assertEqual(warnings[0]["kind"], "semantic_filter_has_no_embeddings")
+        self.assertEqual(warnings[0]["record_type"], "symbol_definition")
+        self.assertIn("search_code_intel_text", cast("str", warnings[0]["message"]))
+        query, _params = conn.calls[0]
+        self.assertIn("count(r.embedding) AS embedded_records", query)
 
     def test_semantic_search_content_class_filter_still_excludes_security_patterns(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[])])
@@ -905,6 +955,25 @@ class McpRelatedCodeIntelTests(unittest.TestCase):
         self.assertIn("e.source_record_id = ANY(%s)", edge_query)
         self.assertIn("e.target_record_id = ANY(%s)", edge_query)
         self.assertIn([chunk_id, parent_id], edge_params)
+
+    def test_related_missing_record_id_reports_found_false(self) -> None:
+        record_id = "src/app.ts::function::missing::000001"
+        conn = QueuedConnection([FakeCursor(one=None)])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_related_code_intel({"record_id": record_id})
+
+        payload = mcp_text_payload(response)
+        self.assertFalse(payload["found"])
+        self.assertEqual(payload["edges"], [])
+        warnings = cast("list[dict[str, object]]", payload["warnings"])
+        self.assertEqual(warnings[0]["kind"], "record_not_found")
+        self.assertEqual(warnings[0]["record_id"], record_id)
+        self.assertEqual(len(conn.calls), 1)
 
     def test_related_symbol_defaults_to_incoming_resolved_callers_first(self) -> None:
         conn = QueuedConnection([
@@ -1164,6 +1233,19 @@ class McpContractTests(unittest.TestCase):
         self.assertNotIn("r.collection = %s", clauses)
         self.assertIn("r.repo = %s", clauses)
         self.assertIn("zod", params)
+
+        with patch.dict(
+            os.environ,
+            {
+                "PROJECT_CODE_INTELLIGENCE_COLLECTION": "project-code-intelligence",
+                "PROJECT_CODE_INTELLIGENCE_COLLECTION_DEFAULTED": "1",
+            },
+            clear=True,
+        ):
+            clauses, params = code_intel_clauses({"collection": ""}, "r")
+
+        self.assertNotIn("r.collection = %s", clauses)
+        self.assertNotIn("project-code-intelligence", params)
 
     def test_jsonrpc_error_paths_preserve_request_id(self) -> None:
         request = {
@@ -1649,11 +1731,29 @@ class McpStatusWarningTests(unittest.TestCase):
                     "collection": "zod",
                     "repo": "zod",
                     "commit_sha": "abc123",
-                    "head_commit": "abc123",
                     "head_status": "current",
                 }
             ],
         )
+
+    def test_status_unknown_repo_reports_found_false_warning(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[]) for _ in range(6)])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools, "table_regclass_exists", return_value=False),
+            patch.object(mcp_tools, "schema_migration_versions", return_value=[]),
+            patch.object(mcp_tools.git_utils, "run_git", return_value="abc123"),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_code_intel_status({"repo": "missing-repo"})
+
+        payload = mcp_text_payload(response)
+        self.assertFalse(payload["found"])
+        warnings = cast("list[dict[str, object]]", payload["warnings"])
+        self.assertEqual(warnings[0]["kind"], "empty_repo_scope")
+        self.assertEqual(warnings[0]["repo"], "missing-repo")
 
 
 class McpParserFailureToolTests(unittest.TestCase):
@@ -1853,56 +1953,59 @@ class McpToolShapeTests(unittest.TestCase):
             })
 
     def test_status_default_uses_compact_freshness_snapshots(self) -> None:
-        created_at = datetime.now(timezone.utc) - timedelta(seconds=42)
-        conn = QueuedConnection([
-            FakeCursor(
-                many=[
-                    {
-                        "id": 1,
-                        "collection": "zod",
-                        "repo": "zod",
-                        "repo_role": "project",
-                        "branch": "main",
-                        "commit_sha": "abc123",
-                        "tree_sha": "tree123",
-                        "dirty": False,
-                        "metadata": {"embed_record_types": ["code_chunk"], "large": "omitted"},
-                        "created_at": created_at,
-                    }
-                ]
-            ),
-            FakeCursor(many=[]),
-            FakeCursor(many=[{"record_type": "code_chunk", "count": 1, "embedded_records": 1}]),
-            FakeCursor(many=[]),
-            FakeCursor(many=[]),
-            FakeCursor(many=[]),
-        ])
+        status_args: tuple[JsonObject, ...] = ({}, {"include_snapshots": True})
+        for args in status_args:
+            with self.subTest(args=args):
+                created_at = datetime.now(timezone.utc) - timedelta(seconds=42)
+                conn = QueuedConnection([
+                    FakeCursor(
+                        many=[
+                            {
+                                "id": 1,
+                                "collection": "zod",
+                                "repo": "zod",
+                                "repo_role": "project",
+                                "branch": "main",
+                                "commit_sha": "abc123",
+                                "tree_sha": "tree123",
+                                "dirty": False,
+                                "metadata": {"embed_record_types": ["code_chunk"], "large": "omitted"},
+                                "created_at": created_at,
+                            }
+                        ]
+                    ),
+                    FakeCursor(many=[]),
+                    FakeCursor(many=[{"record_type": "code_chunk", "count": 1, "embedded_records": 1}]),
+                    FakeCursor(many=[]),
+                    FakeCursor(many=[]),
+                    FakeCursor(many=[]),
+                ])
 
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools, "table_regclass_exists", return_value=False),
-            patch.object(mcp_tools, "schema_migration_versions", return_value=[]),
-            patch.object(mcp_tools.git_utils, "run_git", return_value="abc123"),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
-        ):
-            response = mcp_tools.tool_code_intel_status({})
+                with (
+                    patch.dict(os.environ, {}, clear=True),
+                    patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+                    patch.object(mcp_tools, "table_regclass_exists", return_value=False),
+                    patch.object(mcp_tools, "schema_migration_versions", return_value=[]),
+                    patch.object(mcp_tools.git_utils, "run_git", return_value="abc123"),
+                    patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+                ):
+                    response = mcp_tools.tool_code_intel_status(args)
 
-        payload = mcp_text_payload(response)
-        snapshots = cast("list[dict[str, object]]", payload["snapshots"])
-        self.assertEqual(snapshots[0]["repo"], "zod")
-        self.assertEqual(snapshots[0]["branch"], "main")
-        self.assertEqual(snapshots[0]["commit_sha"], "abc123")
-        self.assertNotIn("head_commit", snapshots[0])
-        self.assertFalse(cast("bool", snapshots[0]["dirty"]))
-        self.assertEqual(snapshots[0]["head_status"], "current")
-        self.assertIsInstance(snapshots[0]["index_age_seconds"], int)
-        self.assertNotIn("metadata", snapshots[0])
-        self.assertNotIn("tree_sha", snapshots[0])
-        self.assertNotIn("warnings", payload)
-        self.assertNotIn("records_by_type", payload)
-        self.assertNotIn("language_breakdown", payload)
-        self.assertNotIn("static_findings", payload)
+                payload = mcp_text_payload(response)
+                snapshots = cast("list[dict[str, object]]", payload["snapshots"])
+                self.assertEqual(snapshots[0]["repo"], "zod")
+                self.assertEqual(snapshots[0]["branch"], "main")
+                self.assertEqual(snapshots[0]["commit_sha"], "abc123")
+                self.assertNotIn("head_commit", snapshots[0])
+                self.assertFalse(cast("bool", snapshots[0]["dirty"]))
+                self.assertEqual(snapshots[0]["head_status"], "current")
+                self.assertIsInstance(snapshots[0]["index_age_seconds"], int)
+                self.assertNotIn("metadata", snapshots[0])
+                self.assertNotIn("tree_sha", snapshots[0])
+                self.assertNotIn("warnings", payload)
+                self.assertNotIn("records_by_type", payload)
+                self.assertNotIn("language_breakdown", payload)
+                self.assertNotIn("static_findings", payload)
 
     def test_status_omits_redundant_scope_when_scoped(self) -> None:
         conn = QueuedConnection([
@@ -2265,8 +2368,8 @@ class McpToolShapeTests(unittest.TestCase):
         conn = QueuedConnection([
             FakeCursor(
                 many=[
-                    {"id": 1, "record_id": "a::doc::000001", "source_path": "a.md"},
                     {"id": 2, "record_id": "b::doc::000001", "source_path": "b.md"},
+                    {"id": 1, "record_id": "a::doc::000001", "source_path": "a.md"},
                 ]
             ),
         ])
@@ -2282,7 +2385,7 @@ class McpToolShapeTests(unittest.TestCase):
 
         payload = mcp_text_payload(response)
         results = cast("list[dict[str, object]]", payload["results"])
-        self.assertEqual({r["record_id"] for r in results}, {"a::doc::000001", "b::doc::000001"})
+        self.assertEqual([r["record_id"] for r in results], ["a::doc::000001", "b::doc::000001"])
         self.assertEqual(payload["missing"], ["missing::doc::000001"])
 
         query, _ = conn.calls[0]

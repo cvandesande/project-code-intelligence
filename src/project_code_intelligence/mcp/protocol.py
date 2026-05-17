@@ -76,8 +76,14 @@ def mcp_debug_errors() -> bool:
 
 
 def scoped_collection(args: Json) -> str | None:
-    requested = optional_text(args, "collection")
+    raw_requested = args.get("collection")
+    requested_empty = isinstance(raw_requested, str) and not raw_requested
+    requested = None if requested_empty else optional_text(args, "collection")
     configured = config.configured_collection()
+    if requested_empty and (
+        not configured or config.configured_collection_defaulted() or config.collection_override_allowed()
+    ):
+        return None
     if configured and requested and requested != configured and not config.collection_override_allowed():
         if config.configured_collection_defaulted():
             raise McpWritePermissionError(

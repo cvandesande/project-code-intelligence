@@ -11,16 +11,19 @@ from project_code_intelligence.parsers.security import security_api_refs
 from project_code_intelligence.records import (
     RecordSpec,
     common_extracts,
+    extract_referenced_symbols,
     line_window_records,
     make_code_record,
     make_record,
 )
 
 JS_IDENTIFIER = r"[$A-Za-z_][$A-Za-z0-9_$]*"
+JS_DECL_ANNOTATION = r"(?:/\*[^*]*\*/\s*)*"
 MIN_MEMBER_CALL_PARTS = 2
 MIN_INSTANCE_MEMBER_CALL_PARTS = 3
 JS_FUNCTION_DEF_RE = re.compile(
-    rf"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+({JS_IDENTIFIER})"
+    rf"^\s*(?:export\s+)?{JS_DECL_ANNOTATION}(?:default\s+)?{JS_DECL_ANNOTATION}"
+    rf"(?:async\s+)?{JS_DECL_ANNOTATION}function\s+({JS_IDENTIFIER})"
     r"(?:<[^>{}\n]+>)?\s*\("
 )
 JS_CLASS_DEF_RE = re.compile(rf"^\s*(?:export\s+)?(?:default\s+)?class\s+({JS_IDENTIFIER})\b")
@@ -40,6 +43,8 @@ JS_CALL_RE = re.compile(rf"(?<![A-Za-z0-9_$.])({JS_IDENTIFIER})\s*(?:<[^>\n]+>)?
 JS_MEMBER_CALL_RE = re.compile(rf"(?<![A-Za-z0-9_$])({JS_IDENTIFIER}(?:\.{JS_IDENTIFIER})+)\s*(?:<[^>\n]+>)?\(")
 JS_OWNER_TARGET_METHODS = frozenset({"init"})
 JS_UNRESOLVED_MEMBER_METHODS = frozenset({"run"})
+TINY_COVERAGE_EMBEDDING_MAX_CHARS = 80
+TINY_COVERAGE_EMBEDDING_MAX_LINES = 3
 
 JS_NOISE_CALLS = frozenset({
     "Array",
@@ -320,6 +325,27 @@ def covered_code_ranges(records: list[IntelRecord]) -> list[tuple[int, int]]:
     ]
 
 
+def coverage_record_should_skip_embedding(lines: list[tuple[int, str]]) -> bool:
+    body = "\n".join(line.strip() for _lineno, line in lines if line.strip())
+    if not body or len(lines) > TINY_COVERAGE_EMBEDDING_MAX_LINES or len(body) >= TINY_COVERAGE_EMBEDDING_MAX_CHARS:
+        return False
+    extracts = common_extracts(body)
+    if any(extracts.values()):
+        return False
+    return not extract_referenced_symbols(body)
+
+
+def make_coverage_record(intel_file: IntelFile, lines: list[tuple[int, str]], ordinal: int) -> IntelRecord:
+    record = make_code_record(intel_file, lines, ordinal, "coverage line window")
+    if coverage_record_should_skip_embedding(lines):
+        record.metadata = {
+            **record.metadata,
+            "embedding_skipped": True,
+            "embedding_skip_reason": "tiny coverage chunk omitted from semantic embedding",
+        }
+    return record
+
+
 def coverage_line_window_records(
     intel_file: IntelFile,
     text: str,
@@ -337,7 +363,7 @@ def coverage_line_window_records(
         if lineno in covered:
             if current:
                 ordinal += 1
-                records.append(make_code_record(intel_file, current, ordinal, "coverage line window"))
+                records.append(make_coverage_record(intel_file, current, ordinal))
                 current = []
                 current_chars = 0
             continue
@@ -349,14 +375,14 @@ def coverage_line_window_records(
         add_chars = len(chunk_line) + 1
         if current and current_chars + add_chars > max_chars:
             ordinal += 1
-            records.append(make_code_record(intel_file, current, ordinal, "coverage line window"))
+            records.append(make_coverage_record(intel_file, current, ordinal))
             current = current[-overlap_lines:] if overlap_lines else []
             current_chars = sum(len(item[1]) + 1 for item in current)
         current.append((lineno, chunk_line))
         current_chars += add_chars
     if current:
         ordinal += 1
-        records.append(make_code_record(intel_file, current, ordinal, "coverage line window"))
+        records.append(make_coverage_record(intel_file, current, ordinal))
     return records
 
 

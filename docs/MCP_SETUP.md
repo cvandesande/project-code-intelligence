@@ -120,8 +120,9 @@ Set `PROJECT_CODE_INTELLIGENCE_DATABASE_USER` and
 `PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD` only when you intentionally want
 to force explicit runtime credentials.
 
-For MCP clients, set the same base URL and scope path so `pci-mcp` infers the
-same project database as `pci-index`:
+For generic MCP clients or custom launchers that cannot set the server working
+directory, set the same base URL and scope path so `pci-mcp` infers the same
+project database as `pci-index`:
 
 ```sh
 PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL=postgresql://host:5432?sslmode=prefer
@@ -135,25 +136,38 @@ When `PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER` and
 prints the project-specific `Export for pci-mcp (RO)` block after
 `pci-index --init-db` and ordinary index runs.
 
-To print copy/paste-ready project-scoped client configuration and the required
-shell exports, use `--mcp-config`:
+To print copy/paste-ready MCP client configuration, use `--mcp-config`:
 
 ```sh
 pci-index --init-db --mcp-config codex .
 pci-index --init-db --mcp-config claude .
 pci-index --init-db --mcp-config opencode .
+pci-index --init-db --mcp-config vscode .
+pci-index --init-db --mcp-config cline .
+pci-index --init-db --mcp-config zed .
 ```
 
 Generated client config uses the generic server key
-`project-code-intelligence`. That key is intentionally reused because the
-config belongs to the indexed repo/workspace, not to global client config. Do
-not paste generated snippets into a global MCP config. Generated client config
-references environment variables instead of embedding credential values; the
-export block printed after the config contains the project read-only
-credentials. The collection is inferred from the project `cwd`; use
-`PROJECT_CODE_INTELLIGENCE_COLLECTION` only as an explicit MCP runtime scope.
-For index runs, prefer `pci-index --collection NAME`; an inherited collection
-environment variable is ignored unless
+`project-code-intelligence`. That key is intentionally reused when the config
+belongs to the indexed repo/workspace. Do not paste project-scoped snippets
+into global MCP config. Codex, Claude Code, OpenCode, and VS Code Copilot
+snippets reference environment variables instead of embedding credential
+values; the export block printed after the config contains the project
+read-only credentials. Zed's `.zed/settings.json` snippet is project-scoped and
+contains the read-only database values directly because Zed does not document
+environment-variable interpolation for MCP `env` values; keep it local and do
+not commit it. Codex, Claude Code, and OpenCode configs set the server `cwd`,
+so they do not need
+`PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH` in their generated environment
+blocks. Cline's VS Code extension MCP settings are user-scoped, so the
+generated Cline snippet also contains the read-only database values directly
+and must stay local. The collection is inferred from the project `cwd` for
+clients that support it; VS Code Copilot, Cline, and Zed pass the collection
+explicitly because their documented config shapes do not include a server
+working directory. Use `PROJECT_CODE_INTELLIGENCE_COLLECTION` only as an
+explicit MCP runtime scope. For index runs, prefer
+`pci-index --collection NAME`; an inherited collection environment variable is
+ignored unless
 `PROJECT_CODE_INTELLIGENCE_ALLOW_COLLECTION_OVERRIDE=1` is also set. Use
 `--mcp-server-name NAME` only when you are deliberately creating a
 non-project-scoped setup.
@@ -188,10 +202,12 @@ a fixed database name.
 repo/workspace scope. Use `pci-doctor --clean` for broad local cleanup.
 
 Do not commit real database credentials or private export files. Generated
-project-scoped snippets reference environment variables and are suitable to
-share only when the repo path and server command are also acceptable to share.
-The MCP export block contains read-only database credentials; load those values
-from your shell, direnv, a private env file, or a system secret manager. The
+project-scoped snippets for Codex, Claude Code, OpenCode, and VS Code Copilot
+avoid embedding credentials and are suitable to share only when the repo path
+and server command are also acceptable to share. Zed project settings embed
+read-only database credentials and must stay local. The MCP export block
+contains read-only database credentials; load those values from your shell,
+direnv, a private env file, or a system secret manager. The
 `pci-doctor --init-postgres` user config contains non-superuser credentials for
 `pci-index`; keep it private and at `0600`.
 
@@ -226,7 +242,6 @@ env_vars = [
   "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL",
   "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER",
   "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD",
-  "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH",
 ]
 ```
 
@@ -234,7 +249,6 @@ env_vars = [
 export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL='postgresql://host:5432?sslmode=prefer'
 export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER=project_ro
 export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD=password
-export PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH=/home/you/src/project-code-intelligence
 ```
 
 For a single-repo local setup using the Compose database, you can omit the
@@ -268,8 +282,7 @@ your secret manager.
       "env": {
         "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "${PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL}",
         "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "${PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER}",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "${PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD}",
-        "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "${PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH}"
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "${PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD}"
       }
     }
   }
@@ -305,8 +318,7 @@ credentials stay in the accompanying export block or your secret manager.
       "environment": {
         "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "{env:PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL}",
         "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "{env:PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER}",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "{env:PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD}",
-        "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "{env:PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH}"
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "{env:PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD}"
       }
     }
   }
@@ -315,10 +327,130 @@ credentials stay in the accompanying export block or your secret manager.
 
 Use the export block printed after the JSON before launching OpenCode.
 
+## VS Code Copilot
+
+`pci-index --mcp-config vscode` emits config for the indexed repo's
+`.vscode/mcp.json`. `--mcp-config copilot` is an alias for the same output.
+
+Generate the snippet from the indexed repo/workspace:
+
+```sh
+pci-index --init-db --mcp-config vscode .
+```
+
+VS Code stores MCP servers under top-level `servers` in `.vscode/mcp.json`.
+The generated config uses VS Code's `${env:VAR}` substitution, so credentials
+stay in the accompanying export block or your secret manager.
+
+```json
+{
+  "servers": {
+    "project-code-intelligence": {
+      "type": "stdio",
+      "command": "/home/you/.local/bin/pci-mcp",
+      "args": [],
+      "env": {
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "${env:PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL}",
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "${env:PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER}",
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "${env:PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD}",
+        "PROJECT_CODE_INTELLIGENCE_COLLECTION": "${env:PROJECT_CODE_INTELLIGENCE_COLLECTION}",
+        "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "${env:PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH}"
+      }
+    }
+  }
+}
+```
+
+Use the export block printed after the JSON before launching VS Code. It
+includes `PROJECT_CODE_INTELLIGENCE_COLLECTION` because VS Code's documented
+stdio MCP config does not define a server `cwd` field.
+
+## Zed
+
+`pci-index --mcp-config zed` emits JSON for Zed project settings. Add or merge
+the generated snippet into `.zed/settings.json` in the indexed repo/workspace.
+
+Generate the snippet from the indexed repo/workspace:
+
+```sh
+pci-index --init-db --mcp-config zed .
+```
+
+The generated Zed snippet contains the read-only database values directly
+because Zed does not document environment-variable interpolation for MCP `env`
+values. Keep `.zed/settings.json` local and do not commit it. The snippet also
+sets explicit collection and scope values because Zed's MCP server config does
+not include a server `cwd`. After adding project settings, trust the worktree in
+Zed so project settings can start MCP servers.
+
+Write or merge this into `.zed/settings.json`:
+
+```json
+{
+  "context_servers": {
+    "project-code-intelligence": {
+      "command": "/home/you/.local/bin/pci-mcp",
+      "args": [],
+      "env": {
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://host:5432/project_db?sslmode=prefer",
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "project_ro",
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "password",
+        "PROJECT_CODE_INTELLIGENCE_COLLECTION": "project-code-intelligence",
+        "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/home/you/src/project-code-intelligence"
+      }
+    }
+  }
+}
+```
+
+## Cline (VS Code)
+
+`pci-index --mcp-config cline` emits a JSON snippet for Cline's VS Code
+extension MCP settings. Add or merge the generated entry under `mcpServers` in
+Cline's MCP settings JSON:
+
+1. Open the MCP Servers icon in the Cline panel.
+2. Open the Configure tab.
+3. Click Configure MCP Servers.
+
+Generate the snippet from the indexed repo/workspace:
+
+```sh
+pci-index --init-db --mcp-config cline .
+```
+
+Cline's VS Code MCP settings are user-scoped, not repository-scoped. The
+generated JSON contains the read-only database values directly because Cline's
+documented VS Code config shape does not describe VS Code-style environment
+substitution for `env` values. Keep this settings file local and do not commit
+it. Use `--mcp-server-name NAME` if you need distinct keys for multiple
+projects.
+
+```json
+{
+  "mcpServers": {
+    "project-code-intelligence": {
+      "command": "/home/you/.local/bin/pci-mcp",
+      "args": [],
+      "env": {
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://host:5432/project_db?sslmode=prefer",
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "project_ro",
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "password",
+        "PROJECT_CODE_INTELLIGENCE_COLLECTION": "project-code-intelligence",
+        "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/home/you/src/project-code-intelligence"
+      },
+      "autoApprove": [],
+      "disabled": false
+    }
+  }
+}
+```
+
 ## Other MCP Clients
 
 `pci-index --mcp-config` intentionally emits project-scoped config only for
-Codex, Claude Code, and OpenCode. For other clients, use the `env` export block
+Codex, Claude Code, OpenCode, VS Code Copilot, and Zed, plus user-scoped Cline
+config for the VS Code extension. For other clients, use the `env` export block
 with that client's project/workspace configuration if it has one.
 
 ## Agent Guidance

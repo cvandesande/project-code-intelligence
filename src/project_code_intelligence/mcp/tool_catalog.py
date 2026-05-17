@@ -44,7 +44,10 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "include_historical": {"type": "boolean"},
                 "directory_depth": {"type": "integer", "minimum": 1, "maximum": 5},
                 "verbose": {"type": "boolean"},
-                "include_snapshots": {"type": "boolean"},
+                "include_snapshots": {
+                    "type": "boolean",
+                    "description": "Deprecated; compact status already includes snapshots.",
+                },
                 "include_record_types": {"type": "boolean"},
                 "include_queryability": {
                     "type": "boolean",
@@ -160,7 +163,8 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         },
     ),
     "get_code_intel_records": ToolDefinition(
-        "Fetch records by record_ids. Compact by default; include_content/include_metadata add body/metadata.",
+        "Fetch records by record_ids in input order. "
+        "Compact by default; include_content/include_metadata add body/metadata.",
         {
             "type": "object",
             "properties": {

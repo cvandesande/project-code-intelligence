@@ -33,6 +33,7 @@ from project_code_intelligence.ingest_code_intel import (
     IngestPlan,
     build_ingest_plan,
     claude_mcp_config_block,
+    cline_mcp_config_block,
     codex_mcp_config_block,
     confirm_reset_code_intel,
     database_bootstrap_report,
@@ -48,7 +49,9 @@ from project_code_intelligence.ingest_code_intel import (
     run_ingest_plan,
     run_reset_only,
     validate_args,
+    vscode_mcp_config_block,
     warning_for_sarif_mtime,
+    zed_mcp_config_block,
 )
 from project_code_intelligence.language_profiles.go import go_file_metadata
 from project_code_intelligence.mcp.filters import (
@@ -492,14 +495,14 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL"', output)
         self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER"', output)
         self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD"', output)
-        self.assertIn('"PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH"', output)
+        self.assertNotIn('"PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH"', output)
         self.assertNotIn('"PROJECT_CODE_INTELLIGENCE_COLLECTION"', output)
         self.assertNotIn("postgresql://db.example.invalid", output)
         self.assertNotIn("pci_demo_ro", output)
         self.assertNotIn("ro fixture", output)
         self.assertNotIn("pci_demo_ro:ro%20fixture@", output)
 
-    def test_claude_and_opencode_mcp_config_blocks_reference_environment(self) -> None:
+    def test_json_mcp_config_blocks_reference_environment(self) -> None:
         ro_value = "-".join(("ro", "fixture"))
         plan = build_ingest_plan(cli_args(collection="demo-workspace", root=Path.cwd(), repos="."))
         bootstrap = db.DatabaseBootstrapResult(
@@ -518,16 +521,69 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
 
         claude_output = claude_mcp_config_block(context)
         opencode_output = opencode_mcp_config_block(context)
+        vscode_output = vscode_mcp_config_block(context)
+        zed_output = zed_mcp_config_block(context)
         credential_key = "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_" + "PASSWORD"
 
         self.assertIn(f'"{credential_key}": "${{{credential_key}}}"', claude_output)
         self.assertIn(f'"{credential_key}": "{{env:{credential_key}}}"', opencode_output)
+        self.assertIn(f'"{credential_key}": "${{env:{credential_key}}}"', vscode_output)
+        self.assertIn('"type": "stdio"', vscode_output)
+        self.assertIn('"servers": {', vscode_output)
+        self.assertIn(
+            '"PROJECT_CODE_INTELLIGENCE_COLLECTION": "${env:PROJECT_CODE_INTELLIGENCE_COLLECTION}"',
+            vscode_output,
+        )
+        self.assertIn('"context_servers": {', zed_output)
+        self.assertIn('"project-code-intelligence": {', zed_output)
+        self.assertIn('"command": "/usr/bin/pci-mcp"', zed_output)
+        self.assertIn('"PROJECT_CODE_INTELLIGENCE_COLLECTION": "demo-workspace"', zed_output)
+        self.assertIn('"PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH":', zed_output)
+        self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "ro-fixture"', zed_output)
+        self.assertIn(
+            '"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer"',
+            zed_output,
+        )
         self.assertNotIn("PROJECT_CODE_INTELLIGENCE_COLLECTION", claude_output)
         self.assertNotIn("PROJECT_CODE_INTELLIGENCE_COLLECTION", opencode_output)
+        self.assertNotIn("PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH", claude_output)
+        self.assertNotIn("PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH", opencode_output)
         self.assertNotIn(ro_value, claude_output)
         self.assertNotIn(ro_value, opencode_output)
+        self.assertNotIn(ro_value, vscode_output)
         self.assertNotIn("postgresql://db.example.invalid", claude_output)
         self.assertNotIn("postgresql://db.example.invalid", opencode_output)
+        self.assertNotIn("postgresql://db.example.invalid", vscode_output)
+
+    def test_cline_mcp_config_block_embeds_user_scoped_environment(self) -> None:
+        ro_value = "-".join(("ro", "fixture"))
+        plan = build_ingest_plan(cli_args(collection="demo-workspace", root=Path.cwd(), repos="."))
+        bootstrap = db.DatabaseBootstrapResult(
+            dbname="pci_demo",
+            ro_role=db.DatabaseRole(
+                name="pci_demo_ro",
+                password=ro_value,
+                created=True,
+                database_url="postgresql://pci_demo_ro:ro-fixture@db.example.invalid:5432/pci_demo?sslmode=prefer",
+            ),
+        )
+        context = mcp_config_context(plan, bootstrap, command="/usr/bin/pci-mcp")
+
+        if context is None:
+            raise AssertionError("expected MCP config context")
+
+        output = cline_mcp_config_block(context)
+
+        self.assertIn('"mcpServers": {', output)
+        self.assertIn('"command": "/usr/bin/pci-mcp"', output)
+        self.assertIn('"autoApprove": []', output)
+        self.assertIn('"disabled": false', output)
+        self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "ro-fixture"', output)
+        self.assertIn('"PROJECT_CODE_INTELLIGENCE_COLLECTION": "demo-workspace"', output)
+        self.assertIn(
+            '"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer"',
+            output,
+        )
 
     def test_mcp_config_block_wraps_client_config_with_project_scoped_guidance(self) -> None:
         ro_value = " ".join(("ro", "fixture"))
@@ -555,6 +611,9 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         self.assertEqual(mcp_project_config_path(context, "codex"), "/work/demo-workspace/.codex/config.toml")
         self.assertEqual(mcp_project_config_path(context, "claude"), "/work/demo-workspace/.mcp.json")
         self.assertEqual(mcp_project_config_path(context, "opencode"), "/work/demo-workspace/opencode.json")
+        self.assertEqual(mcp_project_config_path(context, "vscode"), "/work/demo-workspace/.vscode/mcp.json")
+        self.assertEqual(mcp_project_config_path(context, "copilot"), "/work/demo-workspace/.vscode/mcp.json")
+        self.assertEqual(mcp_project_config_path(context, "cline"), "Cline MCP settings JSON")
 
         output = mcp_config_block(context, "codex")
 
@@ -572,10 +631,81 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         )
         self.assertIn("export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD='ro fixture'", output)
         self.assertNotIn("export PROJECT_CODE_INTELLIGENCE_COLLECTION=", output)
+        self.assertNotIn("export PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH=", output)
 
         project_config = output.split("Required environment variables for pci-mcp (RO)", maxsplit=1)[0]
         self.assertNotIn("ro fixture", project_config)
         self.assertNotIn("postgresql://db.example.invalid", project_config)
+        self.assertNotIn("PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH", project_config)
+
+        vscode_output = mcp_config_block(context, "vscode")
+
+        if vscode_output is None:
+            raise AssertionError("expected VS Code MCP config block")
+        self.assertIn("VS Code Copilot project-scoped MCP config", vscode_output)
+        self.assertIn("Write this snippet to: /work/demo-workspace/.vscode/mcp.json", vscode_output)
+        self.assertIn('"servers": {', vscode_output)
+        self.assertIn("export PROJECT_CODE_INTELLIGENCE_COLLECTION=demo-workspace", vscode_output)
+        self.assertIn("export PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH=/work/demo-workspace", vscode_output)
+
+        cline_output = mcp_config_block(context, "cline")
+
+        if cline_output is None:
+            raise AssertionError("expected Cline MCP config block")
+        self.assertIn("Cline VS Code MCP config", cline_output)
+        self.assertIn("Add or merge this snippet under mcpServers", cline_output)
+        self.assertIn("Cline's VS Code MCP settings are user-scoped", cline_output)
+        self.assertIn("This JSON contains read-only database credentials", cline_output)
+        self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "ro fixture"', cline_output)
+        self.assertNotIn("Required environment variables for pci-mcp (RO)", cline_output)
+
+    def test_zed_mcp_config_block_embeds_project_settings_environment(self) -> None:
+        ro_value = " ".join(("ro", "fixture"))
+        plan = build_ingest_plan(cli_args(collection="demo-workspace", root=Path.cwd(), repos="."))
+        bootstrap = db.DatabaseBootstrapResult(
+            dbname="pci_demo",
+            ro_role=db.DatabaseRole(
+                name="pci_demo_ro",
+                password=ro_value,
+                created=True,
+                database_url="postgresql://pci_demo_ro:ro%20fixture@db.example.invalid:5432/pci_demo?sslmode=prefer",
+            ),
+        )
+
+        with patch.dict(
+            os.environ,
+            {"PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/work/demo-workspace"},
+            clear=False,
+        ):
+            context = mcp_config_context(plan, bootstrap, command="/usr/bin/pci-mcp")
+
+        if context is None:
+            raise AssertionError("expected MCP config context")
+
+        self.assertEqual(mcp_project_config_path(context, "zed"), "/work/demo-workspace/.zed/settings.json")
+        zed_output = mcp_config_block(context, "zed")
+
+        if zed_output is None:
+            raise AssertionError("expected Zed MCP config block")
+        self.assertIn("Zed project-scoped MCP config", zed_output)
+        self.assertIn("Write or merge this snippet into: /work/demo-workspace/.zed/settings.json", zed_output)
+        self.assertIn('{\n  "context_servers": {\n    "project-code-intelligence": {', zed_output)
+        self.assertIn('"command": "/usr/bin/pci-mcp"', zed_output)
+        self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL"', zed_output)
+        self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "pci_demo_ro"', zed_output)
+        self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "ro fixture"', zed_output)
+        self.assertIn(
+            '"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer"',
+            zed_output,
+        )
+        self.assertIn('"PROJECT_CODE_INTELLIGENCE_COLLECTION": "demo-workspace"', zed_output)
+        self.assertIn('"PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/work/demo-workspace"', zed_output)
+        self.assertIn("contains read-only database credentials", zed_output)
+        self.assertIn("Trust the worktree in Zed", zed_output)
+        self.assertIn("do not commit it", zed_output)
+        self.assertNotIn("Add MCP Server", zed_output)
+        self.assertNotIn("Required environment variables for pci-mcp (RO)", zed_output)
+        self.assertNotIn("export PROJECT_CODE_INTELLIGENCE_COLLECTION=", zed_output)
 
     def test_codex_mcp_config_block_quotes_non_bare_toml_server_names(self) -> None:
         ro_value = "-".join(("ro", "fixture"))
@@ -793,6 +923,48 @@ class TypescriptParserRegressionTests(unittest.TestCase):
         self.assertEqual(run_edge.metadata["call_kind"], "member_call")
         self.assertEqual(run_edge.metadata["target_resolvable"], False)
         self.assertEqual(run_edge.metadata["full_symbol"], "inner._zod.run")
+
+    def test_typescript_tiny_coverage_chunks_skip_embedding(self) -> None:
+        text = "\n".join([
+            "export function build() { return value(); }",
+            "// Never",
+            "export function parse() { return build(); }",
+            "const trailing = build();",
+        ])
+
+        records, _edges = javascript_records(fixture_file("src/app.ts", "typescript"), text, 1200, 0)
+        coverage_chunks = [
+            record
+            for record in records
+            if record.record_type == "code_chunk" and record.metadata.get("fallback_reason") == "coverage line window"
+        ]
+        tiny = next(record for record in coverage_chunks if "// Never" in record.display_content)
+        trailing = next(record for record in coverage_chunks if "trailing" in record.display_content)
+
+        self.assertTrue(tiny.metadata.get("embedding_skipped"))
+        self.assertEqual(
+            tiny.metadata.get("embedding_skip_reason"),
+            "tiny coverage chunk omitted from semantic embedding",
+        )
+        self.assertNotIn("embedding_skipped", trailing.metadata)
+
+    def test_typescript_annotated_export_function_is_symbol_definition(self) -> None:
+        text = "\n".join([
+            "export interface $constructor<T> {",
+            "  new (def: unknown): T;",
+            "}",
+            "export /*@__NO_SIDE_EFFECTS__*/ function $constructor<T>(name: string) {",
+            "  return name as T;",
+            "}",
+        ])
+
+        records, _edges = javascript_records(fixture_file("core/core.ts", "typescript"), text, 2400, 0)
+        kinds_by_symbol = {
+            (record.symbol, record.symbol_kind) for record in records if record.record_type == "symbol_definition"
+        }
+
+        self.assertIn(("$constructor", "interface"), kinds_by_symbol)
+        self.assertIn(("$constructor", "function"), kinds_by_symbol)
 
 
 class ParserAndRuntimeTests(unittest.TestCase):

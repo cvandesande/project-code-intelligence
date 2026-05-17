@@ -327,6 +327,7 @@ _COMPACT_RECORD_STRIP = frozenset({
     "confidence",
     "match_score",
     "distance",
+    "quality_penalty",
     "tool",
     "rule_id",
     "severity",
@@ -530,7 +531,7 @@ def _verbose_record(
     snippet_terms: tuple[str, ...] = (),
 ) -> dict[str, object]:
     snippet = _extract_snippet(_row_text(row, "snippet_raw"), snippet_length, snippet_terms)
-    out = {k: v for k, v in row.items() if k not in {"snippet_raw", "match_score"}}
+    out = {k: v for k, v in row.items() if k not in {"snippet_raw", "match_score", "quality_penalty"}}
     if snippet:
         out["snippet"] = snippet
     return out
@@ -675,6 +676,14 @@ def repo_scope_exists(conn: db.DbConnection, args: Json) -> bool | None:
     )
 
 
+def _empty_repo_scope_warning(repo: str) -> Json:
+    return {
+        "kind": "empty_repo_scope",
+        "repo": repo,
+        "message": "no results matched this repo filter; run code_intel_status without repo to see valid repo keys",
+    }
+
+
 def _scope_filter_warnings(args: Json, rows: Sequence[object], *, repo_exists: bool | None = None) -> list[Json]:
     warnings: list[Json] = []
     source_path = optional_text(args, "source_path")
@@ -689,11 +698,7 @@ def _scope_filter_warnings(args: Json, rows: Sequence[object], *, repo_exists: b
     if rows:
         return warnings
     if repo and repo_exists is False:
-        warnings.append({
-            "kind": "empty_repo_scope",
-            "repo": repo,
-            "message": "no results matched this repo filter; run code_intel_status without repo to see valid repo keys",
-        })
+        warnings.append(_empty_repo_scope_warning(repo))
     if source_path or source_path_prefix:
         warning: Json = {
             "kind": "empty_path_scope",
@@ -841,7 +846,11 @@ def run_text_search_query(
             CODE_INTEL_RECORD_SELECT_LIST,
             clauses,
             """
-            ORDER BY r.updated_at DESC
+            ORDER BY r.source_path ASC,
+                     r.line_start ASC NULLS LAST,
+                     r.line_end ASC NULLS LAST,
+                     r.record_type ASC,
+                     r.record_id ASC
             LIMIT %s
             """,
         )
@@ -1016,6 +1025,8 @@ def _copy_snapshot_warning_fields(warning: Json, snapshot: Json, keys: tuple[str
     for key in keys:
         value = snapshot.get(key)
         if value is not None:
+            if key == "head_commit" and value == snapshot.get("commit_sha"):
+                continue
             warning[key] = cast("JsonValue", value)
 
 
@@ -1068,6 +1079,19 @@ def _status_snapshot_warnings(snapshots: list[Json]) -> list[Json]:
             )
             warnings.append(dirty_warning)
     return warnings
+
+
+def _status_repo_not_found(args: Json, rows: StatusRows) -> bool:
+    return bool(
+        optional_text(args, "repo") and not rows.snapshots and not rows.records and not rows.files and not rows.edges
+    )
+
+
+def _status_scope_warnings(args: Json, rows: StatusRows) -> list[Json]:
+    repo = optional_text(args, "repo")
+    if repo and _status_repo_not_found(args, rows):
+        return [_empty_repo_scope_warning(repo)]
+    return []
 
 
 def _status_file_breakdowns(
@@ -1381,6 +1405,7 @@ def tool_code_intel_status(args: Json) -> Json:
         rows.edge_types,
         include_details=includes.queryability,
     )
+    full_snapshots = includes.snapshots and includes.verbose
     response: dict[str, object] = {
         "schema_present": True,
         "schema_versions": rows.schema_versions,
@@ -1391,7 +1416,7 @@ def tool_code_intel_status(args: Json) -> Json:
                 omit_collection=omit_scoped_collection,
                 omit_repo=omit_scoped_repo,
             )
-            if includes.snapshots
+            if full_snapshots
             else _compact_status_snapshots(
                 rows.snapshots,
                 omit_collection=omit_scoped_collection,
@@ -1428,7 +1453,12 @@ def tool_code_intel_status(args: Json) -> Json:
         static_runs, static_findings = rows.static_rows
         response["static_runs"] = static_runs
         response["static_findings"] = static_findings
-    warnings = _status_snapshot_warnings(rows.snapshots)
+    if _status_repo_not_found(args, rows):
+        response["found"] = False
+    warnings = [
+        *_status_snapshot_warnings(rows.snapshots),
+        *_status_scope_warnings(args, rows),
+    ]
     if warnings:
         response["warnings"] = warnings
     return ok(response)
@@ -1491,7 +1521,7 @@ def related_direction(args: Json) -> RelatedDirection:
     raise McpProtocolError("direction must be one of: any, incoming, outgoing")
 
 
-def related_record_ids(conn: db.DbConnection, args: Json, record_id: str) -> tuple[list[str], set[str]]:
+def related_record_ids(conn: db.DbConnection, args: Json, record_id: str) -> tuple[list[str], set[str], bool]:
     lookup_args = {key: args[key] for key in ("collection", "repo", "snapshot_id", "include_historical") if key in args}
     clauses, params = code_intel_clauses(lookup_args, "r")
     clauses.append("r.record_id = %s")
@@ -1513,10 +1543,12 @@ def related_record_ids(conn: db.DbConnection, args: Json, record_id: str) -> tup
         ),
         params,
     ).fetchone()
-    parent_id = row.get("parent_record_id") if row is not None else None
+    if row is None:
+        return [record_id], set(), False
+    parent_id = row.get("parent_record_id")
     if isinstance(parent_id, str) and parent_id and parent_id != record_id:
-        return [record_id, parent_id], {parent_id}
-    return [record_id], set()
+        return [record_id, parent_id], {parent_id}, True
+    return [record_id], set(), True
 
 
 def related_record_clause(direction: RelatedDirection) -> str:
@@ -1777,19 +1809,81 @@ def query_embedding(query: str) -> tuple[str, int]:
     return db.vector_literal(embedding_values), len(embedding_values)
 
 
+def semantic_filter_queryability_warning(conn: db.DbConnection, args: Json) -> Json | None:
+    record_type = optional_text(args, "record_type")
+    if not record_type:
+        return None
+    clauses, params = code_intel_clauses(args, "r")
+    row = conn.execute(
+        db.query_sql(
+            query_with_where(
+                """
+            SELECT count(*) AS record_count,
+                   count(r.embedding) AS embedded_records
+            FROM project_code_intel_records r
+            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
+            """,
+                clauses,
+                "",
+            )
+        ),
+        params,
+    ).fetchone()
+    if row is None:
+        return None
+    record_count = row_int(row, "record_count")
+    embedded_records = row_int(row, "embedded_records")
+    if record_count <= 0 or embedded_records > 0:
+        return None
+    return {
+        "kind": "semantic_filter_has_no_embeddings",
+        "record_type": record_type,
+        "message": (
+            "semantic search only searches embedded records; this filter matches records in the text index "
+            "but none have embeddings. Use search_code_intel_text or remove the non-embedded filter."
+        ),
+    }
+
+
+def semantic_filter_queryability_response(args: Json, query: str) -> Json | None:
+    if not optional_text(args, "record_type"):
+        return None
+    with mcp_db.connect() as conn:
+        if not code_intel_tables_exist(conn):
+            return {"error": "code intelligence schema is not initialized"}
+        validate_explicit_snapshot_id(conn, args)
+        warning = semantic_filter_queryability_warning(conn, args)
+    if not warning:
+        return None
+    return {
+        "query": query,
+        **snapshot_scope_response(args),
+        "results": [],
+        "warnings": [warning],
+    }
+
+
 def tool_search_code_intel_semantic(args: Json) -> Json:
     query = optional_text(args, "query")
     if not query:
         raise McpProtocolError("query is required")
-    limit = require_int(args, "limit", 10, 1, 50)
     snippet_length = require_int(args, "snippet_length", DEFAULT_SNIPPET_LENGTH, 1, 800)
+    queryability_response = semantic_filter_queryability_response(args, query)
+    if queryability_response is not None:
+        return ok(queryability_response)
     clauses, params = code_intel_clauses(args, "r")
     clauses.append("r.embedding IS NOT NULL")
     append_default_mixed_search_exclusions(args, clauses, "r")
     embedding, embedding_dimensions = query_embedding(query)
     lexical_terms = semantic_boost_terms(query)
     source_role_boost = semantic_source_role_distance_boost(args, query)
-    query_params = [embedding, *match_score_params(lexical_terms), *params, source_role_boost, limit]
+    query_params = [
+        embedding,
+        *match_score_params(lexical_terms),
+        *params,
+        source_role_boost,
+        require_int(args, "limit", 10, 1, 50),
+    ]
     repo_exists: bool | None = None
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
@@ -1823,6 +1917,11 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
                          + CASE WHEN coalesce(r.record_id, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 6 ELSE 0 END
                          + CASE WHEN coalesce(r.summary, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 4 ELSE 0 END
                          + CASE
+                             WHEN split_part(coalesce(r.embedding_text, ''), E'content:\\n', 2)
+                                  ILIKE search_terms.pattern ESCAPE '\\' THEN 8
+                             ELSE 0
+                           END
+                         + CASE
                              WHEN coalesce(r.display_content, '') ILIKE search_terms.pattern ESCAPE '\\' THEN 1
                              ELSE 0
                            END
@@ -1830,6 +1929,16 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
                        FROM unnest(%s::text[], %s::text[], %s::text[])
                             AS search_terms(term, prefix_pattern, pattern)
                    ) AS match_score,
+                   CASE
+                     WHEN r.record_type = 'code_chunk'
+                      AND r.metadata->>'fallback_reason' = 'coverage line window'
+                      AND r.line_start IS NOT NULL
+                      AND r.line_end IS NOT NULL
+                      AND r.line_end - r.line_start <= 2
+                      AND length(btrim(split_part(coalesce(r.embedding_text, ''), E'content:\\n', 2))) < 120
+                     THEN 0.35::real
+                     ELSE 0::real
+                   END AS quality_penalty,
                    left(r.display_content, 800) AS snippet_raw
             FROM project_code_intel_records r
             LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
@@ -1839,6 +1948,7 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
             ) ranked
             ORDER BY (
                          ranked.distance
+                         + ranked.quality_penalty
                          - LEAST(ranked.match_score, 80) * 0.01
                          - CASE WHEN ranked.file_role = 'source' THEN %s::real ELSE 0 END
                      ) ASC,
@@ -1972,8 +2082,12 @@ def tool_get_code_intel_record(args: Json) -> Json:
                 return ok({"found": False})
             return ok({"result": dict(row) if verbose else _compact_record(row, include_metadata=include_metadata)})
         rows = cursor.fetchall()
-    formatted = [dict(row) if verbose else _compact_record(row, include_metadata=include_metadata) for row in rows]
-    missing = [rid for rid in ids if rid not in {str(row["record_id"]) for row in rows}]
+    rows_by_record_id = {str(row["record_id"]): row for row in rows}
+    ordered_rows = [rows_by_record_id[rid] for rid in ids if rid in rows_by_record_id]
+    formatted = [
+        dict(row) if verbose else _compact_record(row, include_metadata=include_metadata) for row in ordered_rows
+    ]
+    missing = [rid for rid in ids if rid not in rows_by_record_id]
     response: Json = {"results": cast("JsonValue", formatted)}
     if missing:
         response["missing"] = missing
@@ -1985,7 +2099,6 @@ def tool_related_code_intel(args: Json) -> Json:
     symbol = optional_text(args, "symbol")
     if not record_id and not symbol:
         raise McpProtocolError("record_id or symbol is required")
-    limit = require_int(args, "limit", 20, 1, 100)
     direction = related_direction(args)
     clauses, params = related_base_edge_filters(args, direction)
 
@@ -1996,7 +2109,20 @@ def tool_related_code_intel(args: Json) -> Json:
         parent_record_ids: set[str] = set()
         scoped_record_ids: list[str] = []
         if record_id:
-            scoped_record_ids, parent_record_ids = related_record_ids(conn, args, record_id)
+            scoped_record_ids, parent_record_ids, record_found = related_record_ids(conn, args, record_id)
+            if not record_found:
+                return ok({
+                    **snapshot_scope_response(args),
+                    "found": False,
+                    "edges": [],
+                    "warnings": [
+                        {
+                            "kind": "record_not_found",
+                            "record_id": record_id,
+                            "message": "record_id was not found in the selected code intelligence scope",
+                        }
+                    ],
+                })
             clauses.append(related_record_clause(direction))
             params.extend(related_clause_params(direction, scoped_record_ids))
         order_clause, order_params = related_order_clause(
@@ -2005,7 +2131,7 @@ def tool_related_code_intel(args: Json) -> Json:
             direction=direction,
         )
         params.extend(order_params)
-        params.append(limit)
+        params.append(require_int(args, "limit", 20, 1, 100))
         edges = conn.execute(
             db.query_sql(
                 query_with_where(
