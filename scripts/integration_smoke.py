@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import sys
@@ -17,6 +18,29 @@ if SRC_DIR.is_dir():
     sys.path.insert(0, str(SRC_DIR))
 
 from project_code_intelligence import process  # noqa: E402
+
+SMOKE_DATABASE_ENV_NAMES = (
+    "PGVECTOR_DB",
+    "PGVECTOR_DSN",
+    "PGVECTOR_HOST",
+    "PGVECTOR_PASS",
+    "PGVECTOR_PORT",
+    "PGVECTOR_SSLMODE",
+    "PGVECTOR_USER",
+    "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD",
+    "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER",
+    "PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD",
+    "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH",
+    "PROJECT_CODE_INTELLIGENCE_DATABASE_URL",
+    "PROJECT_CODE_INTELLIGENCE_DATABASE_USER",
+    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD",
+    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL",
+    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER",
+    "PROJECT_CODE_INTELLIGENCE_MCP_PGVECTOR_PASS",
+    "PROJECT_CODE_INTELLIGENCE_MCP_PGVECTOR_USER",
+    "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD",
+    "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER",
+)
 
 
 class SmokeNamespace(argparse.Namespace):
@@ -95,7 +119,27 @@ def write_fixture_repo(path: Path) -> None:
 
 def smoke_env(collection: str) -> dict[str, str]:
     env = os.environ.copy()
+    bind_host = env.get("PROJECT_CODE_INTELLIGENCE_BIND_HOST") or "127.0.0.1"
+    try:
+        bind_address = ipaddress.ip_address(bind_host)
+    except ValueError:
+        db_host = bind_host
+    else:
+        db_host = "127.0.0.1" if bind_address.is_unspecified else bind_host
+    if ":" in db_host and not db_host.startswith("["):
+        db_host = f"[{db_host}]"
+    db_port = env.get("PGVECTOR_PORT") or "5433"
+    db_name = env.get("PGVECTOR_DB") or "codeintel"
+    db_user = env.get("PGVECTOR_USER") or "codeintel"
+    db_password = env.get("PGVECTOR_PASS") or "codeintel"
+    for name in SMOKE_DATABASE_ENV_NAMES:
+        _ = env.pop(name, None)
     env["PYTHONPATH"] = str(SRC_DIR) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env["PROJECT_CODE_INTELLIGENCE_DATABASE_URL"] = f"postgresql://{db_host}:{db_port}/{db_name}?sslmode=prefer"
+    env["PROJECT_CODE_INTELLIGENCE_DATABASE_USER"] = db_user
+    env["PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD"] = db_password
+    env["PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER"] = db_user
+    env["PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD"] = db_password
     env["PROJECT_CODE_INTELLIGENCE_COLLECTION"] = collection
     env["PROJECT_CODE_INTELLIGENCE_MODE"] = "full"
     env["PROJECT_CODE_INTELLIGENCE_PROFILE"] = "generic"
@@ -209,21 +253,34 @@ def remove_tree(path: Path) -> None:
     path.rmdir()
 
 
+def pci_index_command(env: dict[str, str], *extra_args: str) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "project_code_intelligence.cli",
+        "--collection",
+        env["PROJECT_CODE_INTELLIGENCE_COLLECTION"],
+        ".",
+        "--no-embed",
+        *extra_args,
+    ]
+
+
 def run_ingest_checks(fixture_dir: Path, env: dict[str, str]) -> None:
     dry_run = run(
-        [sys.executable, "-m", "project_code_intelligence.cli", ".", "--no-embed", "--dry-run"],
+        pci_index_command(env, "--dry-run"),
         cwd=fixture_dir,
         env=env,
     )
     if '"files"' not in dry_run.stdout:
         fail("dry-run output did not look like an ingest report")
-    ingest = run([sys.executable, "-m", "project_code_intelligence.cli", ".", "--no-embed"], cwd=fixture_dir, env=env)
+    ingest = run(pci_index_command(env), cwd=fixture_dir, env=env)
     if '"snapshot_ids"' not in ingest.stdout:
         fail("ingest output did not include snapshot IDs")
     incremental_env = dict(env)
     incremental_env["PROJECT_CODE_INTELLIGENCE_MODE"] = "incremental"
     incremental = run(
-        [sys.executable, "-m", "project_code_intelligence.cli", ".", "--no-embed"],
+        pci_index_command(incremental_env),
         cwd=fixture_dir,
         env=incremental_env,
     )
