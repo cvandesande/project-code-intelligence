@@ -16,6 +16,7 @@ from project_code_intelligence.embeddings import (
     preflight_embedding_endpoint,
     resolve_embedding_endpoint_model,
 )
+from project_code_intelligence.exceptions import ConfigError
 
 DEFAULT_EMBED_RECORD_TYPES = (
     "code_chunk,package_definition,config_symbol,patch_hunk,dts_node,"
@@ -53,13 +54,14 @@ def index_parser() -> argparse.ArgumentParser:
         "--mcp-config",
         choices=ingest_code_intel.MCP_CONFIG_FORMATS,
         help=(
-            "Emit read-only pci-mcp configuration after a successful run. "
+            "Emit project-scoped read-only pci-mcp configuration and required environment exports "
+            "after a successful run. "
             "Use with --init-db to initialize the DB and print config without indexing."
         ),
     )
     _ = parser.add_argument(
         "--mcp-server-name",
-        help="Server key/name for generated MCP client config snippets. Defaults to pci-<collection>.",
+        help="Server key/name for generated MCP client config snippets. Defaults to project-code-intelligence.",
     )
     _ = parser.add_argument(
         "--i-know-this-deletes-code-intel-db",
@@ -217,7 +219,7 @@ def set_index_database_scope_default(parsed: IndexNamespace) -> None:
         scope_path = inferred_database_scope_path_for_repo_paths(parsed.repo_paths)
     else:
         scope_path = database_scope_path_for_root_repos(Path.cwd(), parse_repos("."))
-    _ = os.environ.setdefault(config.DATABASE_SCOPE_PATH_ENV, str(scope_path))
+    os.environ[config.DATABASE_SCOPE_PATH_ENV] = str(scope_path)
 
 
 def apply_index_embed_override(parsed: IndexNamespace) -> None:
@@ -242,7 +244,7 @@ def forwarded_index_args(parsed: IndexNamespace, passthrough: list[str]) -> list
         forwarded = [*repo_paths_to_ingest_args(parsed.repo_paths), *forwarded]
         if parsed.collection:
             forwarded = ["--collection", parsed.collection, *forwarded]
-        elif not config.env_text("PROJECT_CODE_INTELLIGENCE_COLLECTION"):
+        elif not config.collection_override_allowed():
             forwarded = ["--collection", inferred_collection_for_repo_paths(parsed.repo_paths), *forwarded]
     if parsed.reset_code_intel:
         forwarded = ["--reset-code-intel", "--reset-only", *forwarded]
@@ -318,8 +320,21 @@ def print_index_startup(
     return True
 
 
+def load_index_user_config(parsed: IndexNamespace) -> bool:
+    try:
+        user_config = config.load_pci_index_user_config()
+    except ConfigError as exc:
+        _ = sys.stderr.write(f"pci-index: {exc}\n")
+        return False
+    if user_config is not None and user_config.loaded and not parsed.json and not parsed.mcp_config:
+        _ = sys.stderr.write(f"pci-index: loaded config from {user_config.path}\n")
+    return True
+
+
 def index_main(argv: list[str] | None = None) -> int:
     parsed, passthrough = parse_index_args(argv)
+    if not load_index_user_config(parsed):
+        return 1
     set_index_environment_defaults()
     set_index_database_scope_default(parsed)
     apply_index_embed_override(parsed)

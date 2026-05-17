@@ -211,7 +211,35 @@ class CliWrapperTests(unittest.TestCase):
         self.assertIn("--collection", forwarded)
         self.assertEqual(forwarded[forwarded.index("--collection") + 1], "custom-workspace")
 
-    def test_pci_index_collection_env_remains_an_override(self) -> None:
+    def test_pci_index_repo_paths_override_stale_project_environment(self) -> None:
+        forwarded: list[str] = []
+        captured_scope_path: str | None = None
+
+        def fake_ingest_main(args: list[str]) -> int:
+            nonlocal captured_scope_path
+            captured_scope_path = os.environ.get(config.DATABASE_SCOPE_PATH_ENV)
+            forwarded.extend(args)
+            return 0
+
+        stale_env = {
+            "PROJECT_CODE_INTELLIGENCE_COLLECTION": "tokio",
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/home/cvandesande/github/tokio",
+            "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://example.invalid/pci_tokio?sslmode=prefer",
+            "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "pci_tokio_ro",
+            "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "-".join(("tokio", "ro", "credential")),
+        }
+        with (
+            patch.dict(os.environ, stale_env, clear=True),
+            patch("project_code_intelligence.cli.ingest_code_intel.cli_main", side_effect=fake_ingest_main),
+        ):
+            status = cli.index_main([".", "--no-embed", "--dry-run"])
+
+        self.assertEqual(status, 0)
+        self.assertEqual(captured_scope_path, str(Path.cwd().resolve()))
+        self.assertIn("--collection", forwarded)
+        self.assertEqual(forwarded[forwarded.index("--collection") + 1], Path.cwd().name)
+
+    def test_pci_index_collection_env_override_requires_opt_in(self) -> None:
         forwarded: list[str] = []
 
         def fake_ingest_main(args: list[str]) -> int:
@@ -219,7 +247,14 @@ class CliWrapperTests(unittest.TestCase):
             return 0
 
         with (
-            patch.dict(os.environ, {"PROJECT_CODE_INTELLIGENCE_COLLECTION": "env-workspace"}, clear=True),
+            patch.dict(
+                os.environ,
+                {
+                    "PROJECT_CODE_INTELLIGENCE_COLLECTION": "env-workspace",
+                    "PROJECT_CODE_INTELLIGENCE_ALLOW_COLLECTION_OVERRIDE": "1",
+                },
+                clear=True,
+            ),
             patch("project_code_intelligence.cli.ingest_code_intel.cli_main", side_effect=fake_ingest_main),
         ):
             status = cli.index_main([".", "--dry-run"])
@@ -421,6 +456,69 @@ class CliWrapperTests(unittest.TestCase):
         result = cast("dict[str, object]", payload["result"])
         content = cast("list[dict[str, object]]", result["content"])
         self.assertIn("code intelligence schema is not initialized", str(content[0]["text"]))
+
+
+class IndexUserConfigTests(unittest.TestCase):
+    def test_pci_index_loads_pci_doctor_user_config(self) -> None:
+        captured_env: dict[str, str | None] = {}
+        credential = " ".join(("secret", "value"))
+
+        def fake_ingest_main(_args: list[str]) -> int:
+            for name in config.PCI_INDEX_USER_CONFIG_ENV_NAMES:
+                captured_env[name] = os.environ.get(name)
+            return 0
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = config.write_pci_index_user_config(
+                database_url="postgresql://db.example.invalid:5432?sslmode=prefer",
+                database_admin_user="pci_index_admin",
+                database_admin_password=credential,
+                env={"XDG_CONFIG_HOME": directory},
+            )
+            stderr = io.StringIO()
+            with (
+                patch.dict(os.environ, {"XDG_CONFIG_HOME": directory}, clear=True),
+                patch("project_code_intelligence.cli.ingest_code_intel.cli_main", side_effect=fake_ingest_main),
+                patch("sys.stderr", stderr),
+            ):
+                status = cli.index_main([".", "--dry-run"])
+
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            captured_env["PROJECT_CODE_INTELLIGENCE_DATABASE_URL"],
+            "postgresql://db.example.invalid:5432?sslmode=prefer",
+        )
+        self.assertEqual(captured_env["PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER"], "pci_index_admin")
+        self.assertEqual(captured_env["PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD"], credential)
+        self.assertIn(f"pci-index: loaded config from {path}", stderr.getvalue())
+
+    def test_pci_index_mcp_config_loads_user_config_without_notice(self) -> None:
+        captured_env: dict[str, str | None] = {}
+        credential = " ".join(("secret", "value"))
+
+        def fake_ingest_main(_args: list[str]) -> int:
+            for name in config.PCI_INDEX_USER_CONFIG_ENV_NAMES:
+                captured_env[name] = os.environ.get(name)
+            return 0
+
+        with tempfile.TemporaryDirectory() as directory:
+            _ = config.write_pci_index_user_config(
+                database_url="postgresql://db.example.invalid:5432?sslmode=prefer",
+                database_admin_user="pci_index_admin",
+                database_admin_password=credential,
+                env={"XDG_CONFIG_HOME": directory},
+            )
+            stderr = io.StringIO()
+            with (
+                patch.dict(os.environ, {"XDG_CONFIG_HOME": directory}, clear=True),
+                patch("project_code_intelligence.cli.ingest_code_intel.cli_main", side_effect=fake_ingest_main),
+                patch("sys.stderr", stderr),
+            ):
+                status = cli.index_main(["--init-db", "--mcp-config", "codex", "."])
+
+        self.assertEqual(status, 0)
+        self.assertEqual(captured_env["PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER"], "pci_index_admin")
+        self.assertNotIn("loaded config from", stderr.getvalue())
 
 
 class IndexStartupTests(unittest.TestCase):
