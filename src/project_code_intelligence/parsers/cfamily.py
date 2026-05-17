@@ -549,6 +549,13 @@ RUST_ITEM_RE = re.compile(
 )
 RUST_QUALIFIED_CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*(?:<[^>\n(){};]+>)?(?:::[A-Za-z_][A-Za-z0-9_]*)+)\s*\(")
 RUST_SELF_METHOD_CALL_RE = re.compile(r"\bself\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+RUST_FN_PARAM_START_RE = re.compile(r"\bfn\s+[A-Za-z_][A-Za-z0-9_]*(?:\s*<[^>{};()]+>)?\s*\(")
+RUST_CLOSURE_PARAMS_RE = re.compile(r"(?:^|[\s=({[,])(?:move\s+)?\|(?P<params>[^|\n{};]{0,240})\|", re.MULTILINE)
+RUST_LOCAL_CLOSURE_BINDING_RE = re.compile(
+    r"\blet\s+(?:mut\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?::[^=;]+)?=\s*(?:move\s+)?\|"
+)
+RUST_BINDING_IDENTIFIER_RE = re.compile(r"\b(?:r#)?([A-Za-z_][A-Za-z0-9_]*)\b")
+RUST_DELIMITER_CLOSE_FOR = {"(": ")", "[": "]", "{": "}", "<": ">"}
 RUST_DOC_FENCE_COLLAPSED = "[rustdoc example collapsed]"
 RUST_DOC_FENCE_MARKERS = ("```", "~~~")
 
@@ -774,6 +781,127 @@ def rust_qualified_method_symbol(name: str, *, impl_trait: str | None, impl_owne
     return f"{qualifier}::{name}" if qualifier else name
 
 
+def rust_advance_quote_state(char: str, quote: str, *, escape: bool) -> tuple[str | None, bool]:
+    if escape:
+        return quote, False
+    if char == "\\" and quote != "`":
+        return quote, True
+    if char == quote:
+        return None, False
+    return quote, False
+
+
+def rust_delimited_text(text: str, open_idx: int, open_char: str, close_char: str) -> str | None:
+    if open_idx >= len(text) or text[open_idx] != open_char:
+        return None
+    depth = 0
+    quote: str | None = None
+    escape = False
+    for idx in range(open_idx, len(text)):
+        char = text[idx]
+        if quote:
+            quote, escape = rust_advance_quote_state(char, quote, escape=escape)
+            continue
+        if char in {'"', "'", "`"}:
+            quote = char
+        elif char == open_char:
+            depth += 1
+        elif char == close_char:
+            depth -= 1
+            if depth == 0:
+                return text[open_idx + 1 : idx]
+    return None
+
+
+def rust_update_delimiter_stack(char: str, stack: list[str]) -> None:
+    closer = RUST_DELIMITER_CLOSE_FOR.get(char)
+    if closer:
+        stack.append(closer)
+    elif stack and char == stack[-1]:
+        _ = stack.pop()
+
+
+def rust_split_top_level_commas(text: str) -> list[str]:
+    items: list[str] = []
+    start = 0
+    delimiter_stack: list[str] = []
+    quote: str | None = None
+    escape = False
+    for idx, char in enumerate(text):
+        if quote:
+            quote, escape = rust_advance_quote_state(char, quote, escape=escape)
+            continue
+        if char in {'"', "'", "`"}:
+            quote = char
+        elif char == "," and not delimiter_stack:
+            items.append(text[start:idx])
+            start = idx + 1
+        else:
+            rust_update_delimiter_stack(char, delimiter_stack)
+    items.append(text[start:])
+    return items
+
+
+def rust_pattern_binding_names(pattern: str) -> set[str]:
+    names: set[str] = set()
+    for match in RUST_BINDING_IDENTIFIER_RE.finditer(pattern):
+        name = match.group(1)
+        if name in RUST_NON_RESOLVABLE_NAMES or name[:1].isupper():
+            continue
+        names.add(name)
+    return names
+
+
+def rust_parameter_binding_names(params: str, *, include_untyped: bool) -> set[str]:
+    names: set[str] = set()
+    for param in rust_split_top_level_commas(params):
+        value = param.strip()
+        if not value:
+            continue
+        if ":" in value:
+            pattern = value.split(":", 1)[0]
+        elif include_untyped:
+            pattern = value
+        else:
+            continue
+        names.update(rust_pattern_binding_names(pattern))
+    return names
+
+
+def rust_function_parameter_names(body: str) -> set[str]:
+    names: set[str] = set()
+    for match in RUST_FN_PARAM_START_RE.finditer(body):
+        params = rust_delimited_text(body, match.end() - 1, "(", ")")
+        if params is not None:
+            names.update(rust_parameter_binding_names(params, include_untyped=False))
+    return names
+
+
+def rust_closure_parameter_names(body: str) -> set[str]:
+    names: set[str] = set()
+    for match in RUST_CLOSURE_PARAMS_RE.finditer(body):
+        params = match.group("params")
+        if params.strip():
+            names.update(rust_parameter_binding_names(params, include_untyped=True))
+    return names
+
+
+def rust_local_closure_binding_names(body: str) -> set[str]:
+    return {
+        match.group("name")
+        for match in RUST_LOCAL_CLOSURE_BINDING_RE.finditer(body)
+        if not match.group("name")[:1].isupper()
+    }
+
+
+def rust_local_callable_names(body: str) -> frozenset[str]:
+    return frozenset(
+        rust_function_parameter_names(body)
+        | rust_closure_parameter_names(body)
+        | rust_local_closure_binding_names(body)
+    )
+
+
 def rust_referenced_symbols(
     body: str,
     *,
@@ -785,6 +913,7 @@ def rust_referenced_symbols(
     body = strip_c_like_comments(body)
     method_names = local_methods or frozenset()
     defined_bare = defined_symbol.rsplit("::", 1)[-1] if defined_symbol else None
+    local_callable_names = rust_local_callable_names(body)
     qualified: set[str] = set()
     for match in RUST_QUALIFIED_CALL_RE.finditer(body):
         symbol = str(match.group(1))
@@ -799,7 +928,7 @@ def rust_referenced_symbols(
     qualified_bare = {symbol.rsplit("::", 1)[-1] for symbol in qualified}
     bare: set[str] = set()
     for symbol in extract_referenced_symbols(body):
-        if symbol in qualified_bare or symbol == defined_bare:
+        if symbol in qualified_bare or symbol == defined_bare or symbol in local_callable_names:
             continue
         if impl_qualifier and symbol in method_names:
             qualified.add(f"{impl_qualifier}::{symbol}")

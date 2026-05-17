@@ -1120,6 +1120,47 @@ class RustParserRegressionTests(unittest.TestCase):
         self.assertNotIn("initial", targets)
         self.assertNotIn("has_remaining", targets)
 
+    def test_rust_records_skip_callable_function_parameter_edges(self) -> None:
+        text = "\n".join([
+            "impl<T> AsyncFdReadyGuard<'_, T> {",
+            "    pub(crate) fn try_io<R>(",
+            "        &self,",
+            "        f: impl FnOnce(&AsyncFd<T>) -> io::Result<R>,",
+            "    ) -> io::Result<R> {",
+            "        let result = f(self.async_fd);",
+            "        self.finish();",
+            "        result",
+            "    }",
+            "    fn finish(&self) {}",
+            "}",
+        ])
+
+        _records, edges = rust_records(fixture_file("src/io/async_fd.rs", "rust"), text, 2400, 0)
+        targets = {edge.target_symbol for edge in edges}
+
+        self.assertIn("AsyncFdReadyGuard::finish", targets)
+        self.assertNotIn("f", targets)
+
+    def test_rust_records_skip_local_closure_callable_edges(self) -> None:
+        text = "\n".join([
+            "pub fn drive() {",
+            "    let wrapper = |f| {",
+            "        f();",
+            "        helper();",
+            "    };",
+            "    wrapper();",
+            "    helper();",
+            "}",
+            "pub fn helper() {}",
+        ])
+
+        _records, edges = rust_records(fixture_file("src/lib.rs", "rust"), text, 2400, 0)
+        targets = {edge.target_symbol for edge in edges}
+
+        self.assertIn("helper", targets)
+        self.assertNotIn("f", targets)
+        self.assertNotIn("wrapper", targets)
+
 
 class ParserAndRuntimeTests(unittest.TestCase):
     def test_full_repo_ingest_replaces_rows_even_when_plan_started_incremental(self) -> None:
