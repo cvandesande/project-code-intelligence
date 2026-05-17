@@ -115,12 +115,11 @@ MAX_AUTO_SCAN_WORKERS = 8
 MIN_PARALLEL_PARSE_FILES = 64
 PARSE_CHUNKS_PER_WORKER = 8
 _DB_WRITE_BATCH_SIZE = 500
-MCP_CONFIG_FORMATS = ("env", "codex", "claude", "opencode")
+MCP_CONFIG_FORMATS = ("env", "codex", "claude", "opencode", "vscode", "copilot", "cline", "zed")
 MCP_PROJECT_ENV_NAMES = (
     "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL",
     "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER",
     "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD",
-    "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH",
 )
 MCP_STANDALONE_ENV_NAMES = (
     "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL",
@@ -1008,6 +1007,41 @@ def _opencode_env_references() -> dict[str, str]:
     return {name: "{env:" + name + "}" for name in MCP_PROJECT_ENV_NAMES}
 
 
+def _vscode_env_references() -> dict[str, str]:
+    return {name: "${env:" + name + "}" for name in MCP_STANDALONE_ENV_NAMES}
+
+
+def vscode_mcp_config_block(context: McpConfigContext) -> str:
+    payload: JsonObject = {
+        "servers": {
+            context.server_name: {
+                "type": "stdio",
+                "command": context.command,
+                "args": list[str](),
+                "env": _vscode_env_references(),
+            }
+        }
+    }
+    return json.dumps(payload, indent=2, sort_keys=False)
+
+
+def zed_mcp_server_config(context: McpConfigContext) -> JsonObject:
+    return {
+        "command": context.command,
+        "args": list[str](),
+        "env": mcp_config_env(context),
+    }
+
+
+def zed_mcp_config_block(context: McpConfigContext) -> str:
+    payload: JsonObject = {
+        "context_servers": {
+            context.server_name: zed_mcp_server_config(context),
+        }
+    }
+    return json.dumps(payload, indent=2, sort_keys=False)
+
+
 def opencode_mcp_config_block(context: McpConfigContext) -> str:
     payload: JsonObject = {
         "$schema": "https://opencode.ai/config.json",
@@ -1024,6 +1058,21 @@ def opencode_mcp_config_block(context: McpConfigContext) -> str:
     return json.dumps(payload, indent=2, sort_keys=False)
 
 
+def cline_mcp_config_block(context: McpConfigContext) -> str:
+    payload: JsonObject = {
+        "mcpServers": {
+            context.server_name: {
+                "command": context.command,
+                "args": list[str](),
+                "env": mcp_config_env(context),
+                "autoApprove": list[str](),
+                "disabled": False,
+            }
+        }
+    }
+    return json.dumps(payload, indent=2, sort_keys=False)
+
+
 def mcp_project_config_path(context: McpConfigContext, config_format: str) -> str:
     if config_format == "codex":
         return str(Path(context.cwd) / ".codex" / "config.toml")
@@ -1031,11 +1080,58 @@ def mcp_project_config_path(context: McpConfigContext, config_format: str) -> st
         return str(Path(context.cwd) / ".mcp.json")
     if config_format == "opencode":
         return str(Path(context.cwd) / "opencode.json")
+    if config_format in {"vscode", "copilot"}:
+        return str(Path(context.cwd) / ".vscode" / "mcp.json")
+    if config_format == "cline":
+        return "Cline MCP settings JSON"
+    if config_format == "zed":
+        return str(Path(context.cwd) / ".zed" / "settings.json")
     raise ValueError(f"unsupported MCP project config format: {config_format}")
 
 
-def mcp_project_config_guidance(context: McpConfigContext, config_format: str, body: str) -> str:
-    client = {"codex": "Codex", "claude": "Claude Code", "opencode": "OpenCode"}[config_format]
+def cline_mcp_config_guidance(context: McpConfigContext, body: str) -> str:
+    return "\n".join((
+        "",
+        "Cline VS Code MCP config",
+        f"Add or merge this snippet under mcpServers in {mcp_project_config_path(context, 'cline')}.",
+        "Open it from Cline's MCP Servers icon, Configure tab, then Configure MCP Servers.",
+        "Cline's VS Code MCP settings are user-scoped; use --mcp-server-name for per-project server keys.",
+        "This JSON contains read-only database credentials because Cline does not document VS Code-style "
+        "environment substitution here. Keep it local and do not commit it.",
+        "",
+        body,
+    ))
+
+
+def zed_mcp_config_guidance(context: McpConfigContext, body: str) -> str:
+    return "\n".join((
+        "",
+        "Zed project-scoped MCP config",
+        f"Write or merge this snippet into: {mcp_project_config_path(context, 'zed')}",
+        "This Zed project settings snippet contains read-only database credentials because Zed does "
+        "not document environment-variable interpolation for MCP env values.",
+        "Keep .zed/settings.json local and do not commit it. Trust the worktree in Zed so project "
+        "settings can start MCP servers.",
+        "",
+        body,
+    ))
+
+
+def mcp_project_config_guidance(
+    context: McpConfigContext,
+    config_format: str,
+    body: str,
+    *,
+    env_names: tuple[str, ...] = MCP_PROJECT_ENV_NAMES,
+) -> str:
+    client = {
+        "codex": "Codex",
+        "claude": "Claude Code",
+        "opencode": "OpenCode",
+        "vscode": "VS Code Copilot",
+        "copilot": "VS Code Copilot",
+        "zed": "Zed",
+    }[config_format]
     target = mcp_project_config_path(context, config_format)
     return "\n".join((
         "",
@@ -1050,7 +1146,7 @@ def mcp_project_config_guidance(context: McpConfigContext, config_format: str, b
         _mcp_env_export_block(
             context,
             title="Required environment variables for pci-mcp (RO)",
-            env_names=MCP_PROJECT_ENV_NAMES,
+            env_names=env_names,
         ),
     ))
 
@@ -1061,12 +1157,24 @@ def mcp_config_block(context: McpConfigContext | None, config_format: str) -> st
     if config_format == "env":
         return mcp_ro_export_block(context)
     if config_format == "codex":
-        return mcp_project_config_guidance(context, config_format, codex_mcp_config_block(context))
-    if config_format == "claude":
-        return mcp_project_config_guidance(context, config_format, claude_mcp_config_block(context))
-    if config_format == "opencode":
-        return mcp_project_config_guidance(context, config_format, opencode_mcp_config_block(context))
-    raise ValueError(f"unsupported MCP config format: {config_format}")
+        body = codex_mcp_config_block(context)
+        env_names = MCP_PROJECT_ENV_NAMES
+    elif config_format == "claude":
+        body = claude_mcp_config_block(context)
+        env_names = MCP_PROJECT_ENV_NAMES
+    elif config_format == "opencode":
+        body = opencode_mcp_config_block(context)
+        env_names = MCP_PROJECT_ENV_NAMES
+    elif config_format in {"vscode", "copilot"}:
+        body = vscode_mcp_config_block(context)
+        env_names = MCP_STANDALONE_ENV_NAMES
+    elif config_format == "cline":
+        return cline_mcp_config_guidance(context, cline_mcp_config_block(context))
+    elif config_format == "zed":
+        return zed_mcp_config_guidance(context, zed_mcp_config_block(context))
+    else:
+        raise ValueError(f"unsupported MCP config format: {config_format}")
+    return mcp_project_config_guidance(context, config_format, body, env_names=env_names)
 
 
 def emit_mcp_config(plan: IngestPlan, bootstrap: db.DatabaseBootstrapResult | None) -> None:

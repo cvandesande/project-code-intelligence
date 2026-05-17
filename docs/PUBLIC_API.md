@@ -13,7 +13,7 @@ Installed console scripts are public:
 
 | Command | Purpose |
 | --- | --- |
-| `pci-index` | Main indexing command. Requires one or more repository paths, such as `pci-index .`. Can emit project-scoped MCP client snippets and required environment exports with `--mcp-config {env,codex,claude,opencode}`. |
+| `pci-index` | Main indexing command. Requires one or more repository paths, such as `pci-index .`. Can emit MCP client snippets and required environment exports with `--mcp-config {env,codex,claude,opencode,vscode,copilot,cline,zed}`. |
 | `pci-ingest-code` | Lower-level ingest command used by `pci-index`; useful for advanced scripting. |
 | `pci-doctor` | Detects database, embedding endpoint, CPU, GPU, and NPU readiness. |
 | `pci-mcp` | stdio MCP server entry point. |
@@ -67,9 +67,14 @@ database is missing, `pci-index` may use
 database and project-scoped RW/RO roles, then uses the scoped RW role for
 schema and ingest work. When `pci-index` can derive the scoped RO password, it
 prints an `Export for pci-mcp (RO)` block after `pci-index --init-db` and
-ordinary index runs; `--mcp-config codex`, `--mcp-config claude`, and
-`--mcp-config opencode` print credential-free project config snippets followed
-by the read-only environment values those snippets reference. `pci-mcp` prefers
+ordinary index runs; `--mcp-config codex`, `--mcp-config claude`,
+`--mcp-config opencode`, and `--mcp-config vscode`/`copilot` print
+credential-free project config snippets followed by the read-only environment
+values those snippets need. `--mcp-config zed` prints a project-scoped
+`.zed/settings.json` snippet with read-only database values embedded, because
+Zed does not document environment-variable interpolation for MCP `env` values.
+`--mcp-config cline` prints a user-scoped GUI snippet with read-only database
+values embedded, matching Cline's local MCP settings shape. `pci-mcp` prefers
 `PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL`,
 `PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER`, and
 `PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD` when set, and otherwise falls
@@ -111,14 +116,14 @@ Public tool names:
 
 | Tool | Purpose |
 | --- | --- |
-| `code_intel_status` | First call for non-trivial code discovery; inspect schema, current snapshot freshness, repo/file/record/edge counts, and compact `queryability` counts. Compact scoped output puts `collection`/`repo` at top level instead of repeating them in every row and omits duplicate `head_commit` values; stale, dirty, or unverifiable snapshots include `warnings`. |
+| `code_intel_status` | First call for non-trivial code discovery; inspect schema, current snapshot freshness, repo/file/record/edge counts, and compact `queryability` counts. Compact scoped output puts `collection`/`repo` at top level instead of repeating them in every row and omits duplicate `head_commit` values; stale, dirty, unverifiable, or missing repo scopes include `warnings`, and missing repo scopes include `found:false`. |
 | `list_code_intel_files` | List indexed source files filtered by language, role, content class, or skip status. Useful for discovering the shape of the codebase. |
 | `list_code_intel_parser_failures` | List files that failed to parse during ingestion, so agents can report which parts of the codebase are missing from the index. |
-| `search_code_intel_text` | Exact indexed search for identifiers, symbols, filenames, config keys, known strings, or filtered record listing. Default `query_mode=auto` uses exact term matching for identifier-like single tokens, otherwise PostgreSQL full-text search first, then exact multi-term fallbacks when needed. `mode=enumerate` lists records by filters and cannot be combined with a non-empty `query`; empty optional strings are treated as omitted. Fallback and empty-scope responses include `warnings`; broad text search excludes `security_pattern` records unless `record_type` is set or the query clearly asks for security findings. |
-| `search_code_intel_semantic` | Concept search using the configured embedding endpoint when exact identifiers are unknown. Use text search for symbols. Ranking is vector distance with a generic lexical boost for query terms that also occur in symbols, titles, paths, IDs, summaries, or content, plus a modest source-role boost unless the caller sets `file_role` or asks for tests/docs. Empty-scope responses include `warnings`; broad semantic search excludes `security_pattern` records unless `record_type` is set or the query clearly asks for security findings. |
+| `search_code_intel_text` | Exact indexed search for identifiers, symbols, filenames, config keys, known strings, or filtered record listing. Default `query_mode=auto` uses exact term matching for identifier-like single tokens, otherwise PostgreSQL full-text search first, then exact multi-term fallbacks when needed. `mode=enumerate` lists records by filters in deterministic path/line/record order and cannot be combined with a non-empty `query`; empty optional strings are treated as omitted. Fallback and empty-scope responses include `warnings`; broad text search excludes `security_pattern` records unless `record_type` is set or the query clearly asks for security findings. |
+| `search_code_intel_semantic` | Concept search using the configured embedding endpoint when exact identifiers are unknown. Use text search for symbols. Ranking is vector distance with a generic lexical boost for query terms that also occur in symbols, titles, paths, IDs, summaries, or content, plus a modest source-role boost unless the caller sets `file_role` or asks for tests/docs. Empty-scope and non-embedded filter responses include `warnings`; broad semantic search excludes `security_pattern` records unless `record_type` is set or the query clearly asks for security findings. |
 | `get_code_intel_record` | Fetch one record by stable `record_id`. Scoped to the active snapshot by default. Content and metadata are omitted unless `include_content` or `include_metadata` is true; pass `verbose=true` to retain full diagnostic fields. |
-| `get_code_intel_records` | Fetch many records by stable `record_ids`. Scoped to the active snapshot by default. Content and metadata are omitted unless `include_content` or `include_metadata` is true; pass `verbose=true` to retain full diagnostic fields. |
-| `related_code_intel` | Follow heuristic caller/callee and related-symbol candidates by record ID or symbol. Unresolved heuristic targets are hidden by default; pass `include_unresolved=true` to inspect them. Compact results include symbols, record IDs, paths, line ranges, `direction`, `target_resolved`, `target_kind`, and `confidence_kind`; heuristic candidates include `warnings`. Verify important relationships in source. |
+| `get_code_intel_records` | Fetch many records by stable `record_ids`; found records preserve input order and missing IDs are reported separately. Scoped to the active snapshot by default. Content and metadata are omitted unless `include_content` or `include_metadata` is true; pass `verbose=true` to retain full diagnostic fields. |
+| `related_code_intel` | Follow heuristic caller/callee and related-symbol candidates by record ID or symbol. Unresolved heuristic targets are hidden by default; pass `include_unresolved=true` to inspect them. Compact results include symbols, record IDs, paths, line ranges, `direction`, `target_resolved`, `target_kind`, and `confidence_kind`; heuristic candidates include `warnings`, and missing `record_id` lookups include `found:false`. Verify important relationships in source. |
 | `search_static_findings` | Search SARIF/static-analysis findings. `source_path` and `source_path_prefix` accept repo-relative paths using the same normalization as code/file tools. |
 | `get_static_finding` | Fetch one SARIF/static-analysis finding with compact rule and location details. Pass `include_code_flows`, `include_raw`, or `include_run_metadata` for larger diagnostic payloads. |
 | `get_static_code_flow` | Fetch ordered code-flow steps for one finding. |

@@ -345,7 +345,11 @@ class CliWrapperTests(unittest.TestCase):
             status = cli.index_main(["--init-db", "--mcp-config", "codex", "--mcp-server-name", "pci-demo", "."])
 
         self.assertEqual(status, 0)
-        self.assertIn("--mcp-config", cli.index_parser().format_help())
+        help_text = cli.index_parser().format_help()
+        self.assertIn("--mcp-config", help_text)
+        self.assertIn("vscode", help_text)
+        self.assertIn("cline", help_text)
+        self.assertIn("zed", help_text)
         self.assertIn("--mcp-server-name", cli.index_parser().format_help())
         self.assertIn("--mcp-config", forwarded)
         self.assertEqual(forwarded[forwarded.index("--mcp-config") + 1], "codex")
