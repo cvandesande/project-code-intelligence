@@ -27,6 +27,79 @@ from project_code_intelligence.records import (
 C_SIGNATURE_LOOKAHEAD_LINES = 5
 
 
+def _comment_padding(char: str) -> str:
+    return "\n" if char == "\n" else " "
+
+
+def _append_block_comment_padding(text: str, idx: int, out: list[str]) -> tuple[int, bool]:
+    char = text[idx]
+    nxt = text[idx + 1] if idx + 1 < len(text) else ""
+    if char == "*" and nxt == "/":
+        out.extend((" ", " "))
+        return idx + 2, False
+    out.append(_comment_padding(char))
+    return idx + 1, True
+
+
+def _append_line_comment_padding(text: str, idx: int, out: list[str]) -> int:
+    out.extend((" ", " "))
+    idx += 2
+    while idx < len(text) and text[idx] != "\n":
+        out.append(" ")
+        idx += 1
+    return idx
+
+
+def _append_quoted_char(
+    text: str,
+    idx: int,
+    out: list[str],
+    quote: str,
+    *,
+    escape: bool,
+) -> tuple[int, str | None, bool]:
+    char = text[idx]
+    out.append(char)
+    if escape:
+        return idx + 1, quote, False
+    if char == "\\" and quote != "`":
+        return idx + 1, quote, True
+    if char == quote:
+        return idx + 1, None, False
+    return idx + 1, quote, False
+
+
+def strip_c_like_comments(text: str) -> str:
+    """Remove // and /* */ comments while preserving strings and line positions."""
+    out: list[str] = []
+    idx = 0
+    in_block_comment = False
+    quote: str | None = None
+    escape = False
+    while idx < len(text):
+        char = text[idx]
+        nxt = text[idx + 1] if idx + 1 < len(text) else ""
+        if in_block_comment:
+            idx, in_block_comment = _append_block_comment_padding(text, idx, out)
+            continue
+        if quote:
+            idx, quote, escape = _append_quoted_char(text, idx, out, quote, escape=escape)
+            continue
+        if char == "/" and nxt == "*":
+            out.extend((" ", " "))
+            idx += 2
+            in_block_comment = True
+            continue
+        if char == "/" and nxt == "/":
+            idx = _append_line_comment_padding(text, idx, out)
+            continue
+        if char in {'"', "'", "`"}:
+            quote = char
+        out.append(char)
+        idx += 1
+    return "".join(out)
+
+
 def iter_c_function_candidates(lines: list[str]) -> list[tuple[str, int, int, str, bool]]:
     candidates: list[tuple[str, int, int, str, bool]] = []
     skip_prefixes = ("if", "for", "while", "switch", "return", "sizeof")
@@ -106,7 +179,7 @@ def c_records(
         )
 
     for name, line_start, line_end, body, truncated in iter_c_function_candidates(lines):
-        refs = extract_referenced_symbols(body)
+        refs = extract_referenced_symbols(strip_c_like_comments(body))
         metadata = {
             **common_extracts(body),
             "symbols_defined": [name],
@@ -215,6 +288,77 @@ def go_import_paths(text: str) -> list[str]:
     return sorted(set(imports))
 
 
+GO_PACKAGE_RE = re.compile(r"(?m)^\s*package\s+([A-Za-z_][A-Za-z0-9_]*)")
+GO_FUNC_RE = re.compile(
+    r"^\s*func\s+(?:\((?P<receiver>[^)]*)\)\s*)?"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]+\])?\s*\("
+)
+GO_RECEIVER_RE = re.compile(
+    r"^\s*(?:(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s+)?"
+    r"(?P<pointer>\*)?\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*)\.)?"
+    r"(?P<type>[A-Za-z_][A-Za-z0-9_]*)"
+)
+
+
+def go_package_name(intel_file: IntelFile, text: str) -> str | None:
+    value = intel_file.metadata.get("go_package")
+    if isinstance(value, str) and value:
+        return value
+    match = GO_PACKAGE_RE.search(text)
+    return match.group(1) if match else None
+
+
+def go_receiver_metadata(receiver: str, name: str) -> JsonObject:
+    match = GO_RECEIVER_RE.match(receiver)
+    if not match:
+        return {"go_receiver": receiver, "go_symbol_name": name, "qualified_symbol": name}
+    receiver_type = match.group("type")
+    qualified_symbol = f"{receiver_type}.{name}"
+    metadata: JsonObject = {
+        "go_receiver_type": receiver_type,
+        "go_receiver_pointer": bool(match.group("pointer")),
+        "go_symbol_name": name,
+        "qualified_symbol": qualified_symbol,
+    }
+    receiver_name = match.group("name")
+    if receiver_name:
+        metadata["go_receiver_name"] = receiver_name
+    return metadata
+
+
+def go_function_symbol_spec(
+    lines: list[str],
+    idx: int,
+    *,
+    package: str | None,
+) -> SymbolChunkSpec | None:
+    match = GO_FUNC_RE.match(lines[idx])
+    if not match:
+        return None
+    name = match.group("name")
+    receiver = match.group("receiver")
+    line_end, body, truncated = bounded_brace_body(lines, idx)
+    metadata: JsonObject = {"body_truncated": truncated, "qualified_symbol": name, "go_symbol_name": name}
+    kind = "function"
+    if package:
+        metadata["go_package"] = package
+    if receiver:
+        kind = "method"
+        metadata.update(go_receiver_metadata(receiver, name))
+    return SymbolChunkSpec(
+        language_label="Go",
+        name=name,
+        kind=kind,
+        line_start=idx + 1,
+        line_end=line_end,
+        body=body,
+        metadata=metadata,
+        confidence_kind="approximate_fact",
+        non_resolvable_targets=GO_BUILTIN_NAMES,
+        referenced_symbols=extract_referenced_symbols(strip_c_like_comments(body)),
+    )
+
+
 # Go builtins (https://pkg.go.dev/builtin). Edges to these names are never
 # resolvable to a definition in this codebase — and a user-defined symbol with
 # the same name (e.g. a routeRuleErrors.append method) would otherwise capture
@@ -248,30 +392,14 @@ def go_records(
     edges: list[IntelEdge] = []
     lines = text.splitlines()
     offsets = line_offsets(text)
-    # Package name and import list live on the file row via the language profile
-    # (go_package / go_imports). Per-record metadata stays minimal.
-    for idx, line in enumerate(lines):
-        match = re.match(
-            r"^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]+\])?\s*\(",
-            line,
-        )
-        if not match:
+    package = go_package_name(intel_file, text)
+    for idx, _line in enumerate(lines):
+        spec = go_function_symbol_spec(lines, idx, package=package)
+        if spec is None:
             continue
-        name = match.group(1)
-        line_end, body, truncated = bounded_brace_body(lines, idx)
         symbol, chunk, symbol_edges = make_symbol_chunk(
             intel_file,
-            SymbolChunkSpec(
-                language_label="Go",
-                name=name,
-                kind="function",
-                line_start=idx + 1,
-                line_end=line_end,
-                body=body,
-                metadata={"body_truncated": truncated},
-                confidence_kind="approximate_fact",
-                non_resolvable_targets=GO_BUILTIN_NAMES,
-            ),
+            spec,
         )
         records.extend([symbol, chunk])
         edges.extend(symbol_edges)
@@ -421,6 +549,8 @@ RUST_ITEM_RE = re.compile(
 )
 RUST_QUALIFIED_CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*(?:<[^>\n(){};]+>)?(?:::[A-Za-z_][A-Za-z0-9_]*)+)\s*\(")
 RUST_SELF_METHOD_CALL_RE = re.compile(r"\bself\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+RUST_DOC_FENCE_COLLAPSED = "[rustdoc example collapsed]"
+RUST_DOC_FENCE_MARKERS = ("```", "~~~")
 
 
 @dataclass(frozen=True)
@@ -429,6 +559,8 @@ class RustSubchunkContext:
     parent_record_id: str
     symbol: str
     symbol_kind: str
+    impl_qualifier: str | None
+    local_methods: frozenset[str]
     max_chars: int
     overlap_lines: int
     file_role: str | None
@@ -442,6 +574,63 @@ class RustParseContext:
     overlap_lines: int
     test_ranges: list[tuple[int, int]]
     impl_ranges: list[tuple[int, int, str | None, str | None]]
+    impl_methods: dict[tuple[int, int], frozenset[str]]
+
+
+@dataclass(frozen=True)
+class RustImplReferenceContext:
+    trait: str | None
+    owner: str | None
+    qualifier: str | None
+    local_methods: frozenset[str]
+
+
+def rust_doc_comment_parts(line: str, *, in_block_doc: bool) -> tuple[str, str] | None:
+    stripped = line.lstrip()
+    indent = line[: len(line) - len(stripped)]
+    if stripped.startswith(("///", "//!")):
+        return f"{indent}{stripped[:3]}", stripped[3:].lstrip()
+    if stripped.startswith(("/**", "/*!")):
+        return f"{indent}{stripped[:3]}", stripped[3:].lstrip()
+    if in_block_doc:
+        if stripped.startswith("*"):
+            return f"{indent}*", stripped[1:].lstrip()
+        return indent.rstrip(), stripped
+    return None
+
+
+def rust_doc_fence_boundary(content: str) -> bool:
+    stripped = content.strip()
+    return any(stripped.startswith(marker) for marker in RUST_DOC_FENCE_MARKERS)
+
+
+def rust_doc_marker_line(prefix: str) -> str:
+    return f"{prefix} {RUST_DOC_FENCE_COLLAPSED}" if prefix else RUST_DOC_FENCE_COLLAPSED
+
+
+def rust_collapse_doc_examples(body: str) -> str:
+    lines: list[str] = []
+    in_block_doc = False
+    in_doc_fence = False
+    for line in body.splitlines():
+        stripped = line.lstrip()
+        doc_parts = rust_doc_comment_parts(line, in_block_doc=in_block_doc)
+        if doc_parts is not None and rust_doc_fence_boundary(doc_parts[1]):
+            lines.append(line)
+            if not in_doc_fence:
+                lines.append(rust_doc_marker_line(doc_parts[0]))
+            in_doc_fence = not in_doc_fence
+        elif in_doc_fence and doc_parts is not None:
+            pass
+        else:
+            lines.append(line)
+
+        starts_block_doc = stripped.startswith(("/**", "/*!"))
+        if starts_block_doc and "*/" not in stripped:
+            in_block_doc = True
+        if in_block_doc and "*/" in stripped:
+            in_block_doc = False
+    return "\n".join(lines)
 
 
 def rust_strip_generic_args(value: str) -> str:
@@ -526,14 +715,58 @@ def rust_impl_ranges(lines: list[str]) -> list[tuple[int, int, str | None, str |
     return ranges
 
 
-def rust_enclosing_impl(
+def rust_impl_range_at_start(
     line: int, ranges: list[tuple[int, int, str | None, str | None]]
-) -> tuple[str | None, str | None]:
+) -> tuple[int, int, str | None, str | None] | None:
+    for item in ranges:
+        if item[0] == line:
+            return item
+    return None
+
+
+def rust_enclosing_impl_range(
+    line: int, ranges: list[tuple[int, int, str | None, str | None]]
+) -> tuple[int, int, str | None, str | None] | None:
     matches = [item for item in ranges if item[0] < line <= item[1]]
     if not matches:
-        return None, None
-    _start, _end, trait, owner = max(matches, key=itemgetter(0))
-    return trait, owner
+        return None
+    return max(matches, key=itemgetter(0))
+
+
+def rust_impl_method_names(
+    lines: list[str],
+    impl_ranges: list[tuple[int, int, str | None, str | None]],
+) -> dict[tuple[int, int], frozenset[str]]:
+    methods_by_range: dict[tuple[int, int], set[str]] = {
+        (start, end): set() for start, end, _trait, _owner in impl_ranges
+    }
+    for idx, line in enumerate(lines):
+        match = RUST_ITEM_RE.match(line)
+        if not match or match.group("kind") != "fn" or not rust_has_brace_body(lines, idx):
+            continue
+        impl_range = rust_enclosing_impl_range(idx + 1, impl_ranges)
+        if impl_range is None:
+            continue
+        start, end, _trait, _owner = impl_range
+        methods_by_range[start, end].add(rust_item_name("fn", match.group("rest"), line, idx + 1))
+    return {key: frozenset(value) for key, value in methods_by_range.items()}
+
+
+def rust_impl_reference_context(context: RustParseContext, idx: int, kind: str) -> RustImplReferenceContext:
+    impl_range = (
+        rust_impl_range_at_start(idx + 1, context.impl_ranges)
+        if kind == "impl"
+        else rust_enclosing_impl_range(idx + 1, context.impl_ranges)
+    )
+    if impl_range is None:
+        return RustImplReferenceContext(trait=None, owner=None, qualifier=None, local_methods=frozenset())
+    start, end, trait, owner = impl_range
+    return RustImplReferenceContext(
+        trait=trait,
+        owner=owner,
+        qualifier=trait or owner,
+        local_methods=context.impl_methods.get((start, end), frozenset()),
+    )
 
 
 def rust_qualified_method_symbol(name: str, *, impl_trait: str | None, impl_owner: str | None) -> str:
@@ -541,7 +774,17 @@ def rust_qualified_method_symbol(name: str, *, impl_trait: str | None, impl_owne
     return f"{qualifier}::{name}" if qualifier else name
 
 
-def rust_referenced_symbols(body: str, *, self_type: str | None) -> list[str]:
+def rust_referenced_symbols(
+    body: str,
+    *,
+    self_type: str | None,
+    impl_qualifier: str | None = None,
+    local_methods: frozenset[str] | None = None,
+    defined_symbol: str | None = None,
+) -> list[str]:
+    body = strip_c_like_comments(body)
+    method_names = local_methods or frozenset()
+    defined_bare = defined_symbol.rsplit("::", 1)[-1] if defined_symbol else None
     qualified: set[str] = set()
     for match in RUST_QUALIFIED_CALL_RE.finditer(body):
         symbol = str(match.group(1))
@@ -554,11 +797,15 @@ def rust_referenced_symbols(body: str, *, self_type: str | None) -> list[str]:
             if method not in RUST_NON_RESOLVABLE_NAMES:
                 qualified.add(f"{self_type}::{method}")
     qualified_bare = {symbol.rsplit("::", 1)[-1] for symbol in qualified}
-    bare = {
-        symbol
-        for symbol in extract_referenced_symbols(body)
-        if symbol not in qualified_bare and symbol not in RUST_NON_RESOLVABLE_NAMES
-    }
+    bare: set[str] = set()
+    for symbol in extract_referenced_symbols(body):
+        if symbol in qualified_bare or symbol == defined_bare:
+            continue
+        if impl_qualifier and symbol in method_names:
+            qualified.add(f"{impl_qualifier}::{symbol}")
+            continue
+        if symbol not in RUST_NON_RESOLVABLE_NAMES:
+            bare.add(symbol)
     return sorted((qualified | bare) - RUST_NON_RESOLVABLE_NAMES)[:160]
 
 
@@ -604,10 +851,17 @@ def rust_symbol_subchunk_record(
     line_start = lines[0][0]
     line_end = lines[-1][0]
     body = "\n".join(line for _line_no, line in lines)
+    display_body = rust_collapse_doc_examples(body)
     self_type = rust_strip_generic_args(context.symbol.rsplit("::", 1)[0]) if "::" in context.symbol else None
-    refs = rust_referenced_symbols(body, self_type=self_type)
+    refs = rust_referenced_symbols(
+        body,
+        self_type=self_type,
+        impl_qualifier=context.impl_qualifier,
+        local_methods=context.local_methods,
+        defined_symbol=context.symbol,
+    )
     metadata = {
-        **common_extracts(body),
+        **common_extracts(display_body),
         "symbols_defined": [context.symbol],
         "symbols_referenced": refs,
         "rust_symbol_subchunk": True,
@@ -622,7 +876,7 @@ def rust_symbol_subchunk_record(
             ),
             title=f"{context.symbol} chunk {ordinal} in {context.intel_file.source_path}:{line_start}-{line_end}",
             summary=f"Rust symbol chunk for {context.symbol}",
-            body=body,
+            body=display_body,
             line_start=line_start,
             line_end=line_end,
             symbol=context.symbol,
@@ -647,10 +901,10 @@ def rust_item_records(
         if rust_has_brace_body(context.lines, idx)
         else (idx + 1, line, False)
     )
-    impl_trait, impl_owner = rust_enclosing_impl(idx + 1, context.impl_ranges) if kind == "fn" else (None, None)
+    impl_context = rust_impl_reference_context(context, idx, kind)
     bare_name = name
-    if kind == "fn" and (impl_trait or impl_owner):
-        name = rust_qualified_method_symbol(name, impl_trait=impl_trait, impl_owner=impl_owner)
+    if kind == "fn" and (impl_context.trait or impl_context.owner):
+        name = rust_qualified_method_symbol(name, impl_trait=impl_context.trait, impl_owner=impl_context.owner)
         kind = "method"
     test_record = rust_test_attribute_before(context.lines, idx) or rust_line_in_ranges(idx + 1, context.test_ranges)
     metadata: JsonObject = {
@@ -658,13 +912,20 @@ def rust_item_records(
         "qualified_symbol": name,
         "rust_symbol_name": bare_name,
     }
-    if impl_owner:
-        metadata["impl_owner"] = impl_owner
-    if impl_trait:
-        metadata["impl_trait"] = impl_trait
+    if impl_context.owner:
+        metadata["impl_owner"] = impl_context.owner
+    if impl_context.trait:
+        metadata["impl_trait"] = impl_context.trait
     if test_record:
         metadata["rust_test"] = True
-    refs = rust_referenced_symbols(body, self_type=impl_owner)
+    refs = rust_referenced_symbols(
+        body,
+        self_type=impl_context.owner,
+        impl_qualifier=impl_context.qualifier,
+        local_methods=impl_context.local_methods,
+        defined_symbol=name,
+    )
+    display_body = rust_collapse_doc_examples(body)
     symbol, chunk, symbol_edges = make_symbol_chunk(
         context.intel_file,
         SymbolChunkSpec(
@@ -673,7 +934,7 @@ def rust_item_records(
             kind=kind,
             line_start=idx + 1,
             line_end=line_end,
-            body=body,
+            body=display_body,
             metadata=metadata,
             confidence_kind="approximate_fact",
             non_resolvable_targets=RUST_NON_RESOLVABLE_NAMES,
@@ -689,6 +950,8 @@ def rust_item_records(
                 parent_record_id=symbol.record_id,
                 symbol=name,
                 symbol_kind=kind,
+                impl_qualifier=impl_context.qualifier,
+                local_methods=impl_context.local_methods,
                 max_chars=context.max_chars,
                 overlap_lines=context.overlap_lines,
                 file_role="test" if test_record else None,
@@ -707,13 +970,15 @@ def rust_records(
     records: list[IntelRecord] = []
     edges: list[IntelEdge] = []
     lines = text.splitlines()
+    impl_ranges = rust_impl_ranges(lines)
     context = RustParseContext(
         intel_file=intel_file,
         lines=lines,
         max_chars=max_chars,
         overlap_lines=overlap_lines,
         test_ranges=rust_cfg_test_ranges(lines),
-        impl_ranges=rust_impl_ranges(lines),
+        impl_ranges=impl_ranges,
+        impl_methods=rust_impl_method_names(lines, impl_ranges),
     )
     for idx, line in enumerate(lines):
         match = RUST_ITEM_RE.match(line)

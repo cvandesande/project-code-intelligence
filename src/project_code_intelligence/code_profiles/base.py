@@ -138,11 +138,12 @@ class CodeIntelProfile:
         """Return False to suppress a pattern for a specific language.
 
         Go, Kotlin, JavaScript, and TypeScript-family languages use backticks as
-        raw-string / template-string delimiters, not shell substitution syntax,
-        so shell_backtick_execution produces nothing but noise there.
+        raw-string / template-string delimiters; Python only has backticks in
+        strings, comments, or invalid Python 3 syntax. None are shell
+        substitution syntax, so shell_backtick_execution is noise there.
         """
-        template_literal_languages = {"go", "javascript", "kotlin", "svelte", "typescript", "vue"}
-        return not (rule_id == "shell_backtick_execution" and language in template_literal_languages)
+        non_shell_backtick_languages = {"go", "javascript", "kotlin", "python", "svelte", "typescript", "vue"}
+        return not (rule_id == "shell_backtick_execution" and language in non_shell_backtick_languages)
 
     def should_scan_security(self, path: str, language: str, file_role: str) -> bool:
         del path, file_role
@@ -294,6 +295,7 @@ class GenericProfile(CodeIntelProfile):
             and parts[0] in {"src", "source", "lib", "cmd", "pkg", "internal"}
             and updated["is_source"]
             and not updated["is_test"]
+            and not updated.get("is_generated")
         ):
             updated["file_role"] = "source"
         elif parts and parts[0] in {"include", "headers"}:
