@@ -48,15 +48,11 @@ LIVE_REFRESH_PER_SECOND = 8
 SECONDS_AS_MS_THRESHOLD = 1
 MINUTES_BOUNDARY_SECONDS = 60
 HOURS_BOUNDARY_MINUTES = 60
+EMBEDDING_RATE_INTEGER_THRESHOLD = 10
 PHASE_LABELS: dict[str, str] = {
     "scan": "PARSING",
     "db_upload": "WRITING",
     "embedding": "EMBEDDING",
-}
-PHASE_PROGRESS_UNITS: dict[str, str] = {
-    "scan": "files",
-    "db_upload": "database items",
-    "embedding": "embedding records",
 }
 
 
@@ -124,7 +120,7 @@ class NullEmitter:
 
 
 SHORT_EVENT_LABELS: dict[str, str] = {
-    "code_intel_reset_started": "Deleting code-intelligence data for the given repo(s)…",
+    "code_intel_reset_started": "Dropping inferred code-intelligence database…",
     "code_intel_reset_completed": "Reset complete.",
     "code_intel_incremental_unavailable": "Database unreachable; falling back to full ingest.",
     "code_intel_preembedding_disabled": "Pre-embedding disabled.",
@@ -183,22 +179,31 @@ def compact_endpoint_target(endpoint: str | None) -> str | None:
     return f"{host}{port}"
 
 
-def embedding_endpoint_row_text(endpoint: str | None, framework: str | None) -> str | None:
-    endpoint_label = compact_endpoint_target(endpoint)
-    if endpoint_label and framework:
-        return f"{endpoint_label} · {framework}"
-    if endpoint_label:
-        return endpoint_label
-    return framework or None
+def embedding_rate_text(rate: object) -> str | None:
+    if not isinstance(rate, (int, float)) or rate <= 0:
+        return None
+    value = f"{rate:.0f}" if rate >= EMBEDDING_RATE_INTEGER_THRESHOLD else f"{rate:.1f}".rstrip("0").rstrip(".")
+    return f"{value} embeddings/s"
 
 
-def _add_embedding_endpoint_row(rows: Table, endpoint: str | None, framework: str | None) -> None:
+def embedding_endpoint_row_text(endpoint: str | None, framework: str | None, rate: object = None) -> str | None:
     endpoint_label = compact_endpoint_target(endpoint)
-    if not endpoint_label and not framework:
+    parts = [item for item in (endpoint_label, embedding_rate_text(rate), framework) if item]
+    return " · ".join(parts) if parts else None
+
+
+def _add_embedding_endpoint_row(rows: Table, endpoint: str | None, framework: str | None, rate: object = None) -> None:
+    endpoint_label = compact_endpoint_target(endpoint)
+    rate_label = embedding_rate_text(rate)
+    if not endpoint_label and not framework and not rate_label:
         return
-    label = "Endpoint" if endpoint_label else "Framework"
+    label = "Endpoint" if endpoint_label else "Framework" if framework else "Embeddings"
     detail = Text(endpoint_label or "")
-    if endpoint_label and framework:
+    if endpoint_label and rate_label:
+        _ = detail.append(" · ")
+    if rate_label:
+        _ = detail.append(rate_label)
+    if (endpoint_label or rate_label) and framework:
         _ = detail.append(" · ")
     if framework:
         _ = detail.append(framework, style="bold cyan")
@@ -384,9 +389,11 @@ class RichEmitter:
         _add_row(rows, "Database", self.database_row_text())
         if self.embedding_model:
             _add_row(rows, "Model", _shorten_model(self.embedding_model))
-        _add_embedding_endpoint_row(rows, self.embedding_endpoint, self.embedding_framework)
+        _add_embedding_endpoint_row(
+            rows, self.embedding_endpoint, self.embedding_framework, counts.get("embedded_records_per_second")
+        )
         _add_live_progress_row(rows, progress)
-        _add_live_embeddings_row(rows, counts)
+        _add_live_embeddings_row(rows, counts, progress)
         _add_live_write_op_row(rows, progress)
         _add_live_files_row(rows, counts)
         _add_live_records_row(rows, counts)
@@ -437,9 +444,8 @@ def live_progress_row_text(progress: JsonObject) -> str | None:
     phase_total = _coerce_int(progress.get("phase_total"))
     if phase_total:
         bar = _bar(phase_done, phase_total)
-        phase = progress.get("phase")
-        unit = PHASE_PROGRESS_UNITS.get(phase, "items") if isinstance(phase, str) else "items"
-        return f"{bar} {phase_done:,}/{phase_total:,} {unit}"
+        percent = min(100.0, max(0.0, phase_done / phase_total * 100))
+        return f"{bar} {percent:.0f}%"
     overall = progress.get("overall_percent_estimated")
     if isinstance(overall, (int, float)):
         return f"~{overall:.0f}%"
@@ -499,13 +505,21 @@ def _add_live_workers_row(rows: Table, counts: JsonObject, progress: JsonObject)
     _add_row(rows, "Workers", f"{workers} parser processes")
 
 
-def _add_live_embeddings_row(rows: Table, counts: JsonObject) -> None:
+def live_embeddings_row_text(counts: JsonObject, progress: JsonObject) -> str | None:
+    if progress.get("phase") == "embedding":
+        return None
     embedded = _coerce_int(counts.get("embedded_records")) + _coerce_int(counts.get("preembedded_records"))
     if not embedded:
-        return
+        return None
     rate = counts.get("embedded_records_per_second")
-    rate_text = f" · {rate:.0f}/s" if isinstance(rate, (int, float)) and rate else ""
-    _add_row(rows, "Embeddings", f"{_format_count(embedded)}{rate_text}")
+    rate_label = embedding_rate_text(rate)
+    rate_text = f" · {rate_label}" if rate_label else ""
+    return f"{_format_count(embedded)}{rate_text}"
+
+
+def _add_live_embeddings_row(rows: Table, counts: JsonObject, progress: JsonObject) -> None:
+    if detail := live_embeddings_row_text(counts, progress):
+        _add_row(rows, "Embeddings", detail)
 
 
 def _resolve_duration(report: JsonObject, timing: JsonObject) -> float | None:
@@ -595,7 +609,7 @@ def _shorten_model(model: str) -> str:
     return model
 
 
-def _add_summary_embedding_rows(rows: Table, report: JsonObject) -> None:
+def _add_summary_embedding_rows(rows: Table, report: JsonObject, counts: JsonObject) -> None:
     embedding_model = report.get("embedding_model")
     if isinstance(embedding_model, str):
         _add_row(rows, "Model", _shorten_model(embedding_model))
@@ -603,10 +617,19 @@ def _add_summary_embedding_rows(rows: Table, report: JsonObject) -> None:
     framework = embedding_framework if isinstance(embedding_framework, str) and embedding_framework else None
     embedding_endpoint = report.get("embedding_endpoint")
     endpoint = embedding_endpoint if isinstance(embedding_endpoint, str) and embedding_endpoint else None
-    _add_embedding_endpoint_row(rows, endpoint, framework)
+    _add_embedding_endpoint_row(rows, endpoint, framework, counts.get("embedded_records_per_second"))
 
 
-def _add_identity_rows(rows: Table, report: JsonObject) -> None:
+def _add_database_role_rows(rows: Table, report: JsonObject) -> None:
+    rw_role = report.get("rw_role")
+    if isinstance(rw_role, str) and rw_role:
+        _add_row(rows, "RW role", rw_role)
+    ro_role = report.get("ro_role")
+    if isinstance(ro_role, str) and ro_role:
+        _add_row(rows, "RO role", ro_role)
+
+
+def _add_identity_rows(rows: Table, report: JsonObject, counts: JsonObject) -> None:
     mode = report.get("mode")
     if isinstance(mode, str):
         _add_row(rows, "Mode", mode)
@@ -616,7 +639,8 @@ def _add_identity_rows(rows: Table, report: JsonObject) -> None:
     database = report.get("database")
     if isinstance(database, str):
         _add_row(rows, "Database", compact_database_target(database))
-    _add_summary_embedding_rows(rows, report)
+    _add_database_role_rows(rows, report)
+    _add_summary_embedding_rows(rows, report, counts)
     collection = report.get("collection")
     if isinstance(collection, str) and mode == "reset":
         _add_row(rows, "Collection", collection)
@@ -631,6 +655,9 @@ def _add_identity_rows(rows: Table, report: JsonObject) -> None:
             _add_row(rows, "Deleted", f"{_format_count(total)} snapshot(s)")
         else:
             _add_row(rows, "Deleted", "no snapshots matched")
+    dropped = report.get("database_dropped")
+    if isinstance(dropped, bool) and mode == "reset":
+        _add_row(rows, "Dropped DB", "yes" if dropped else "not found")
 
 
 def _files_row_text(counts: JsonObject) -> str | None:
@@ -755,7 +782,7 @@ def render_summary_panel(report: JsonObject, *, console: Console | None = None) 
     timing = _as_object(metrics.get("timing"))
 
     rows = _section_grid()
-    _add_identity_rows(rows, report)
+    _add_identity_rows(rows, report, counts)
     _add_count_rows(rows, report, counts=counts, timing=timing)
     _add_outcome_rows(rows, report, counts=counts, timing=timing)
 

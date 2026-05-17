@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import shlex
+import shutil
 import sys
 import threading
 import time
@@ -15,10 +18,17 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
+from psycopg.errors import InsufficientPrivilege
+
 from project_code_intelligence import config, db, profile_context, progress
 from project_code_intelligence import runtime as runtime_state
 from project_code_intelligence.code_profiles import load_profile
-from project_code_intelligence.common import default_collection, parse_repos, repo_for_source_path
+from project_code_intelligence.common import (
+    database_scope_path_for_root_repos,
+    default_collection,
+    parse_repos,
+    repo_for_source_path,
+)
 from project_code_intelligence.doctor.embeddings import check_embedding_options
 from project_code_intelligence.doctor.hardware import check_npu_support, discover_gpus
 from project_code_intelligence.embedding.framework import active_embedding_profile
@@ -72,8 +82,6 @@ from project_code_intelligence.storage import (
     copy_unchanged_parser_failures,
     copy_unchanged_records_and_edges,
     count_unresolved_edge_targets,
-    delete_all_code_intel_data,
-    delete_repo_data,
     ensure_schema,
     file_signature,
     insert_edges,
@@ -106,6 +114,7 @@ MAX_AUTO_SCAN_WORKERS = 8
 MIN_PARALLEL_PARSE_FILES = 64
 PARSE_CHUNKS_PER_WORKER = 8
 _DB_WRITE_BATCH_SIZE = 500
+MCP_CONFIG_FORMATS = ("env", "codex", "claude", "opencode")
 
 
 def _chunks(items: list[_T], size: int) -> list[list[_T]]:
@@ -118,6 +127,10 @@ def write_stdout(message: str) -> None:
 
 def write_stderr(message: str) -> None:
     _ = sys.stderr.write(message + "\n")
+
+
+def _shell_export(name: str, value: str) -> str:
+    return f"export {name}={shlex.quote(value)}"
 
 
 @dataclass(frozen=True)
@@ -134,9 +147,9 @@ class CliArgs:
     progress_every: int
     dry_run: bool
     reset_code_intel: bool
-    reset_all_code_intel: bool
     i_know_this_deletes_code_intel_db: bool
     reset_only: bool
+    init_db_only: bool
     sarif: list[str]
     no_profile_sarif: bool
     sarif_max_bytes: int
@@ -154,6 +167,8 @@ class CliArgs:
     no_preembed: bool
     prune_snapshots: bool
     prune_keep: int
+    mcp_config: str | None
+    mcp_server_name: str | None
 
 
 @dataclass(frozen=True)
@@ -168,6 +183,18 @@ class IngestPlan:
     embedding_requested: bool
     preembedding_requested: bool
     mode: str
+
+
+@dataclass(frozen=True)
+class McpConfigContext:
+    server_name: str
+    command: str
+    cwd: str
+    database_url: str
+    database_user: str
+    database_password: str
+    collection: str
+    database_scope_path: str
 
 
 @dataclass(frozen=True)
@@ -199,6 +226,7 @@ class DbUploadSummary:
     copied_parser_failures: int = 0
     preembedded_records: int = 0
     preembedding_skipped: int = 0
+    bootstrap: db.DatabaseBootstrapResult | None = None
     static_counts: dict[str, int] = field(
         default_factory=lambda: {
             "static_runs": 0,
@@ -237,9 +265,9 @@ class CliNamespace(argparse.Namespace):
     progress_every: int
     dry_run: bool
     reset_code_intel: bool
-    reset_all_code_intel: bool
     i_know_this_deletes_code_intel_db: bool
     reset_only: bool
+    init_db_only: bool
     sarif: list[str]
     no_profile_sarif: bool
     sarif_max_bytes: int
@@ -257,6 +285,8 @@ class CliNamespace(argparse.Namespace):
     no_preembed: bool
     prune_snapshots: bool
     prune_keep: int
+    mcp_config: str | None
+    mcp_server_name: str | None
 
 
 def json_int(obj: JsonObject, key: str) -> int:
@@ -549,12 +579,7 @@ def build_parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "--reset-code-intel",
         action="store_true",
-        help="Delete code-intelligence data for selected repos. Prompts unless confirmation flag is set.",
-    )
-    _ = parser.add_argument(
-        "--reset-all-code-intel",
-        action="store_true",
-        help="Delete all code-intelligence data in the configured database. Prompts unless confirmation flag is set.",
+        help="Drop the inferred project database for selected repos. Prompts unless confirmation flag is set.",
     )
     _ = parser.add_argument(
         "--i-know-this-deletes-code-intel-db",
@@ -565,6 +590,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--reset-only",
         action="store_true",
         help="Reset code-intelligence tables and exit without scanning or indexing.",
+    )
+    _ = parser.add_argument(
+        "--init-db-only",
+        action="store_true",
+        help="Create the inferred project database and schema, then exit without scanning or indexing.",
     )
     _ = parser.add_argument(
         "--sarif",
@@ -631,6 +661,18 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="Number of recent snapshots to keep when --prune-snapshots is set (default: 5).",
     )
+    _ = parser.add_argument(
+        "--mcp-config",
+        choices=MCP_CONFIG_FORMATS,
+        help=(
+            "Emit read-only pci-mcp configuration after a successful run. "
+            "Use --init-db-only with this option to initialize the DB and print config without indexing."
+        ),
+    )
+    _ = parser.add_argument(
+        "--mcp-server-name",
+        help="Server key/name for generated MCP client config snippets. Defaults to pci-<collection>.",
+    )
     return parser
 
 
@@ -655,9 +697,9 @@ def parse_cli_args(argv: list[str] | None = None) -> CliArgs:
         progress_every=parsed.progress_every,
         dry_run=parsed.dry_run,
         reset_code_intel=parsed.reset_code_intel,
-        reset_all_code_intel=parsed.reset_all_code_intel,
         i_know_this_deletes_code_intel_db=parsed.i_know_this_deletes_code_intel_db,
         reset_only=parsed.reset_only,
+        init_db_only=parsed.init_db_only,
         sarif=parsed.sarif,
         no_profile_sarif=parsed.no_profile_sarif,
         sarif_max_bytes=parsed.sarif_max_bytes,
@@ -675,6 +717,8 @@ def parse_cli_args(argv: list[str] | None = None) -> CliArgs:
         no_preembed=parsed.no_preembed,
         prune_snapshots=parsed.prune_snapshots,
         prune_keep=parsed.prune_keep,
+        mcp_config=parsed.mcp_config,
+        mcp_server_name=parsed.mcp_server_name,
     )
 
 
@@ -703,10 +747,16 @@ def validate_args(args: CliArgs, *, embedding_requested: bool) -> None:
         raise ValueError("--embedding-max-chars must be greater than 0; omit --embed to disable embeddings")
     if args.reset_only and not args.reset_code_intel:
         raise ValueError("--reset-only requires --reset-code-intel")
+    if args.init_db_only and args.reset_code_intel:
+        raise ValueError("--init-db-only cannot be combined with --reset-code-intel")
+    if args.init_db_only and args.embed_only:
+        raise ValueError("--init-db-only cannot be combined with --embed-only")
     if args.reset_code_intel and args.embed_only:
         raise ValueError("--reset-code-intel cannot be combined with --embed-only")
-    if args.reset_all_code_intel and not args.reset_code_intel:
-        raise ValueError("--reset-all-code-intel requires --reset-code-intel")
+    if args.reset_code_intel and args.mcp_config:
+        raise ValueError("--mcp-config cannot be combined with --reset-code-intel")
+    if args.dry_run and args.mcp_config:
+        raise ValueError("--mcp-config cannot be combined with --dry-run")
 
 
 def build_ingest_plan(args: CliArgs) -> IngestPlan:
@@ -715,6 +765,7 @@ def build_ingest_plan(args: CliArgs) -> IngestPlan:
     root = args.root.resolve()
     collection = args.collection or default_collection(root)
     repos = parse_repos(args.repos or ",".join(profile.default_repos))
+    set_ingest_database_scope_default(root, repos)
     embed_types = {item.strip() for item in args.embed_record_types.split(",") if item.strip()}
     embedding_requested = args.embed or args.embed_only
     preembedding_requested = args.embed and not args.no_preembed and code_preembedding_enabled()
@@ -787,19 +838,13 @@ def confirm_reset_code_intel(
 ) -> None:
     if not args.reset_code_intel:
         return
-    if args.reset_all_code_intel:
-        write_stderr("About to delete all project-code-intelligence data in the configured database.")
-        write_stderr("Collections/repos: all")
-        write_stderr("This permanently deletes all snapshots, records, edges, embeddings, and findings.")
-    else:
-        repo_list = ", ".join(repos)
-        write_stderr(f"About to delete project-code-intelligence data for repo(s): {repo_list}")
-        write_stderr(f"Collection: {collection}")
-        write_stderr("This permanently deletes snapshots, records, edges, embeddings, and findings for those repos.")
-    write_stderr(f"Database target: {settings.display_target()}")
-    write_stderr("The schema is untouched.")
-    if not args.reset_all_code_intel:
-        write_stderr("Other repos are untouched.")
+    repo_list = ", ".join(repos)
+    write_stderr(f"About to drop PostgreSQL database: {settings.dbname or '<unset>'}")
+    write_stderr(f"Repo(s): {repo_list}")
+    write_stderr(f"Collection: {collection}")
+    write_stderr("This permanently deletes all snapshots, records, edges, embeddings, findings, and schema in that DB.")
+    write_stderr(f"Postgres admin connection: {db.maintenance_database_settings(settings).display_target()}")
+    write_stderr("Other PCI-managed project databases are untouched.")
     if args.i_know_this_deletes_code_intel_db:
         write_stderr("Reset confirmed by --i-know-this-deletes-code-intel-db.")
         return
@@ -812,9 +857,192 @@ def confirm_reset_code_intel(
         raise ValueError("reset cancelled")
 
 
-def prepare_writable_database(args: CliArgs, *, embedding_requested: bool) -> None:
-    if args.dry_run:
+def apply_bootstrap_writer_credentials(
+    settings: config.DatabaseSettings, bootstrap: db.DatabaseBootstrapResult
+) -> config.DatabaseSettings:
+    writer_settings = db.writable_settings_for_bootstrap(settings, bootstrap)
+    rw_role = bootstrap.rw_role
+    if rw_role is not None and rw_role.password:
+        if settings.dsn:
+            os.environ["PROJECT_CODE_INTELLIGENCE_DATABASE_USER"] = rw_role.name
+            os.environ["PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD"] = rw_role.password
+        else:
+            os.environ["PGVECTOR_USER"] = rw_role.name
+            os.environ["PGVECTOR_PASS"] = rw_role.password
+    return writer_settings
+
+
+def database_bootstrap_report(bootstrap: db.DatabaseBootstrapResult | None) -> JsonObject:
+    if bootstrap is None:
+        return {}
+    report: JsonObject = {
+        "database_created": bootstrap.database_created,
+        "database_dropped": bootstrap.database_dropped,
+    }
+    if bootstrap.rw_role is not None:
+        report["rw_role"] = bootstrap.rw_role.name
+    if bootstrap.ro_role is not None:
+        report["ro_role"] = bootstrap.ro_role.name
+    return report
+
+
+def default_mcp_server_name(collection: str) -> str:
+    normalized = "".join(char.lower() if char.isalnum() else "-" for char in collection)
+    parts = [part for part in normalized.split("-") if part]
+    return "pci-" + ("-".join(parts) if parts else "project")
+
+
+def mcp_command_path() -> str:
+    return shutil.which("pci-mcp") or "pci-mcp"
+
+
+def mcp_config_env(context: McpConfigContext) -> dict[str, str]:
+    return {
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": context.database_url,
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": context.database_user,
+        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": context.database_password,
+        "PROJECT_CODE_INTELLIGENCE_COLLECTION": context.collection,
+        "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": context.database_scope_path,
+    }
+
+
+def mcp_config_context(
+    plan: IngestPlan, bootstrap: db.DatabaseBootstrapResult | None, *, command: str | None = None
+) -> McpConfigContext | None:
+    if bootstrap is None or bootstrap.ro_role is None:
+        return None
+    ro_role = bootstrap.ro_role
+    password = ro_role.password
+    if password is None:
+        return None
+    scope_path = str(config.configured_database_scope_path())
+    database_url = config.database_url_without_credentials(ro_role.database_url)
+    return McpConfigContext(
+        server_name=plan.args.mcp_server_name or default_mcp_server_name(plan.collection),
+        command=command or mcp_command_path(),
+        cwd=scope_path,
+        database_url=database_url,
+        database_user=ro_role.name,
+        database_password=password,
+        collection=plan.collection,
+        database_scope_path=scope_path,
+    )
+
+
+def mcp_ro_export_block(context: McpConfigContext | None) -> str | None:
+    if context is None:
+        return None
+    env = mcp_config_env(context)
+    return "\n".join((
+        "",
+        "Export for pci-mcp (RO)",
+        _shell_export("PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL", env["PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL"]),
+        _shell_export(
+            "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER", env["PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER"]
+        ),
+        _shell_export(
+            "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD",
+            env["PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD"],
+        ),
+        _shell_export("PROJECT_CODE_INTELLIGENCE_COLLECTION", env["PROJECT_CODE_INTELLIGENCE_COLLECTION"]),
+        _shell_export(
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH",
+            env["PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH"],
+        ),
+    ))
+
+
+def _toml_string(value: str) -> str:
+    return json.dumps(value)
+
+
+def _toml_key(value: str) -> str:
+    if value and all(char.isascii() and (char.isalnum() or char in {"_", "-"}) for char in value):
+        return value
+    return json.dumps(value)
+
+
+def codex_mcp_config_block(context: McpConfigContext) -> str:
+    key = _toml_key(context.server_name)
+    env = mcp_config_env(context)
+    lines = [
+        f"[mcp_servers.{key}]",
+        f"command = {_toml_string(context.command)}",
+        f"cwd = {_toml_string(context.cwd)}",
+        "startup_timeout_sec = 20",
+        "tool_timeout_sec = 120",
+        "",
+        f"[mcp_servers.{key}.env]",
+    ]
+    lines.extend(f"{name} = {_toml_string(value)}" for name, value in env.items())
+    return "\n".join(lines)
+
+
+def claude_mcp_config_block(context: McpConfigContext) -> str:
+    payload: JsonObject = {
+        "mcpServers": {
+            context.server_name: {
+                "type": "stdio",
+                "command": context.command,
+                "args": list[str](),
+                "cwd": context.cwd,
+                "env": mcp_config_env(context),
+            }
+        }
+    }
+    return json.dumps(payload, indent=2, sort_keys=False)
+
+
+def opencode_mcp_config_block(context: McpConfigContext) -> str:
+    payload: JsonObject = {
+        "$schema": "https://opencode.ai/config.json",
+        "mcp": {
+            context.server_name: {
+                "type": "local",
+                "command": [context.command],
+                "enabled": True,
+                "cwd": context.cwd,
+                "environment": mcp_config_env(context),
+            }
+        },
+    }
+    return json.dumps(payload, indent=2, sort_keys=False)
+
+
+def mcp_config_block(context: McpConfigContext | None, config_format: str) -> str | None:
+    if context is None:
+        return None
+    if config_format == "env":
+        return mcp_ro_export_block(context)
+    if config_format == "codex":
+        return "\n".join(("", "Codex MCP config", codex_mcp_config_block(context)))
+    if config_format == "claude":
+        return "\n".join(("", "Claude MCP config", claude_mcp_config_block(context)))
+    if config_format == "opencode":
+        return "\n".join(("", "OpenCode MCP config", opencode_mcp_config_block(context)))
+    raise ValueError(f"unsupported MCP config format: {config_format}")
+
+
+def emit_mcp_config(plan: IngestPlan, bootstrap: db.DatabaseBootstrapResult | None) -> None:
+    if progress.detect_summary_mode() == "json":
         return
+    config_format = plan.args.mcp_config or "env"
+    context = mcp_config_context(plan, bootstrap)
+    block = mcp_config_block(context, config_format)
+    if block is None:
+        if plan.args.mcp_config:
+            raise db.DatabaseConnectionError(
+                "Could not emit MCP configuration because the project RO password is not available. "
+                "Run pci-index --init-db with PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER/"
+                "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD set, then rerun the MCP config command."
+            )
+        return
+    write_stdout(block)
+
+
+def prepare_writable_database(args: CliArgs, *, embedding_requested: bool) -> db.DatabaseBootstrapResult | None:
+    if args.dry_run:
+        return None
     settings = config.DatabaseSettings.from_env()
     if not db.allow_writes(settings):
         raise PermissionError("set PROJECT_CODE_INTELLIGENCE_ALLOW_WRITES=1 to ingest")
@@ -822,9 +1050,26 @@ def prepare_writable_database(args: CliArgs, *, embedding_requested: bool) -> No
         raise ValueError("set --embedding-endpoint or --llama-embed when --embed is used")
     if embedding_requested and args.embedding_endpoint:
         preflight_embedding_endpoint(args.embedding_endpoint, args.embedding_endpoint_model)
+    bootstrap = None
+    if settings.database_inferred:
+        bootstrap = db.bootstrap_inferred_database(settings)
+        settings = apply_bootstrap_writer_credentials(settings, bootstrap)
     with db.connect(readonly=False, settings=settings) as conn:
         ensure_schema(conn)
+        if bootstrap is not None and bootstrap.rw_role is not None and bootstrap.ro_role is not None:
+            db.grant_project_database_object_privileges(
+                conn,
+                dbname=bootstrap.dbname,
+                rw_role=bootstrap.rw_role.name,
+                ro_role=bootstrap.ro_role.name,
+            )
         conn.commit()
+    return bootstrap
+
+
+def set_ingest_database_scope_default(root: Path, repos: list[str]) -> None:
+    scope_path = database_scope_path_for_root_repos(root, repos)
+    _ = os.environ.setdefault(config.DATABASE_SCOPE_PATH_ENV, str(scope_path))
 
 
 def resolve_reset_targets(args: CliArgs) -> tuple[str, list[str]]:
@@ -832,6 +1077,7 @@ def resolve_reset_targets(args: CliArgs) -> tuple[str, list[str]]:
     set_active_profile(profile)
     collection = args.collection or default_collection(args.root.resolve())
     repos = parse_repos(args.repos or ",".join(profile.default_repos))
+    set_ingest_database_scope_default(args.root, repos)
     return collection, repos
 
 
@@ -840,7 +1086,7 @@ def print_reset_only_report(
     settings: config.DatabaseSettings,
     collection: str,
     repos: list[str],
-    deleted: dict[str, int],
+    bootstrap: db.DatabaseBootstrapResult | None,
 ) -> None:
     progress.emit_summary({
         "mode": "reset",
@@ -849,27 +1095,27 @@ def print_reset_only_report(
         "database": settings.display_target(),
         "collection": collection,
         "repos": repos,
-        "deleted_snapshots": deleted,
+        **database_bootstrap_report(bootstrap),
     })
 
 
 def run_reset_only(args: CliArgs) -> int:
     validate_args(args, embedding_requested=False)
-    settings = config.DatabaseSettings.from_env()
     collection, repos = resolve_reset_targets(args)
+    settings = config.DatabaseSettings.from_env()
+    if not settings.database_inferred:
+        raise db.DatabaseConnectionError(
+            "Refusing to drop an explicit PostgreSQL database. "
+            "Remove the database path from PROJECT_CODE_INTELLIGENCE_DATABASE_URL, or leave PGVECTOR_DB unset, "
+            "so pci-index --reset can target a PCI-managed inferred database."
+        )
     confirm_reset_code_intel(args, settings, collection, repos)
-    prepare_writable_database(args, embedding_requested=False)
-    deleted: dict[str, int] = {"all": 0} if args.reset_all_code_intel else dict.fromkeys(repos, 0)
+    bootstrap: db.DatabaseBootstrapResult | None = None
     if not args.dry_run:
-        with db.connect(readonly=False, settings=settings) as conn:
-            progress_event("code_intel_reset_started", collection=collection, repos=repos)
-            if args.reset_all_code_intel:
-                deleted = {"all": delete_all_code_intel_data(conn)}
-            else:
-                deleted = delete_repo_data(conn, collection, repos)
-            conn.commit()
-            progress_event("code_intel_reset_completed", collection=collection, deleted=deleted)
-    print_reset_only_report(args, settings, collection, repos, deleted)
+        progress_event("code_intel_reset_started", collection=collection, repos=repos)
+        bootstrap = db.drop_inferred_database(settings)
+        progress_event("code_intel_reset_completed", collection=collection, database_dropped=bootstrap.database_dropped)
+    print_reset_only_report(args, settings, collection, repos, bootstrap)
     return 0
 
 
@@ -910,7 +1156,12 @@ def resolve_index_embedding_framework(endpoint: str | None, response_model: str 
     return profile.label
 
 
-def print_embed_only_report(plan: IngestPlan, snapshot_ids: list[int], embedded_records: int | None) -> None:
+def print_embed_only_report(
+    plan: IngestPlan,
+    snapshot_ids: list[int],
+    embedded_records: int | None,
+    bootstrap: db.DatabaseBootstrapResult | None,
+) -> None:
     args = plan.args
     report: JsonObject = {
         "repos": plan.repos,
@@ -927,6 +1178,7 @@ def print_embed_only_report(plan: IngestPlan, snapshot_ids: list[int], embedded_
         ),
         "embedding_max_chars": args.embedding_max_chars,
         "metrics": runtime_state.active_metrics.snapshot(),
+        **database_bootstrap_report(bootstrap),
     }
     if embedded_records is not None:
         report.update({
@@ -935,13 +1187,14 @@ def print_embed_only_report(plan: IngestPlan, snapshot_ids: list[int], embedded_
             "embedded_records_total": embedded_records,
         })
     progress.emit_summary(report)
+    emit_mcp_config(plan, bootstrap)
 
 
-def run_embed_only(plan: IngestPlan) -> int:
+def run_embed_only(plan: IngestPlan, bootstrap: db.DatabaseBootstrapResult | None) -> int:
     args = plan.args
     snapshot_ids = latest_snapshot_ids(plan.collection, plan.repos)
     if args.dry_run:
-        print_embed_only_report(plan, snapshot_ids, None)
+        print_embed_only_report(plan, snapshot_ids, None, bootstrap)
         return 0
     runtime_state.active_metrics.begin_phase("embedding")
     try:
@@ -956,7 +1209,24 @@ def run_embed_only(plan: IngestPlan) -> int:
     with db.connect(readonly=False) as conn:
         stamp_embed_types(conn, snapshot_ids, plan.embed_types)
         conn.commit()
-    print_embed_only_report(plan, snapshot_ids, embedded_records)
+    print_embed_only_report(plan, snapshot_ids, embedded_records, bootstrap)
+    return 0
+
+
+def print_init_db_report(plan: IngestPlan, bootstrap: db.DatabaseBootstrapResult | None) -> None:
+    progress.emit_summary({
+        "mode": "init-db",
+        "dry_run": plan.args.dry_run,
+        "database": config.DatabaseSettings.from_env().display_target(),
+        "collection": plan.collection,
+        "repos": plan.repos,
+        **database_bootstrap_report(bootstrap),
+    })
+    emit_mcp_config(plan, bootstrap)
+
+
+def run_init_db_only(plan: IngestPlan, bootstrap: db.DatabaseBootstrapResult | None) -> int:
+    print_init_db_report(plan, bootstrap)
     return 0
 
 
@@ -1485,7 +1755,9 @@ def print_ingest_result(
         "preembedding_skipped": summary.preembedding_skipped,
         "embedding_max_chars": plan.args.embedding_max_chars if plan.args.embed else None,
         "metrics": runtime_state.active_metrics.snapshot(),
+        **database_bootstrap_report(summary.bootstrap),
     })
+    emit_mcp_config(plan, summary.bootstrap)
 
 
 def resolve_plan_embedding_model(plan: IngestPlan) -> IngestPlan:
@@ -1512,14 +1784,17 @@ def run_ingest_plan(plan: IngestPlan) -> int:
         embedding_framework=embedding_framework,
     )
     configure_ingest_progress(plan)
-    prepare_writable_database(plan.args, embedding_requested=plan.embedding_requested)
+    bootstrap = prepare_writable_database(plan.args, embedding_requested=plan.embedding_requested)
+    if plan.args.init_db_only:
+        return run_init_db_only(plan, bootstrap)
     if plan.args.embed_only:
-        return run_embed_only(plan)
+        return run_embed_only(plan, bootstrap)
     ingests, sarif_ingest = scan_plan(plan)
     if plan.args.dry_run:
         print_dry_run_report(plan, ingests, sarif_ingest)
         return 0
     summary = upload_ingests(plan, ingests, sarif_ingest)
+    summary.bootstrap = bootstrap
     embedded_records = embed_after_upload(plan, summary.snapshot_ids)
     print_ingest_result(plan, ingests, summary, embedded_records, sarif_ingest)
     return 0
@@ -1576,7 +1851,7 @@ def cli_main(argv: list[str] | None = None) -> int:
         interrupted = True
         exit_code = 130
         return 130
-    except (EmbeddingEndpointUnavailableError, db.DatabaseConnectionError) as exc:
+    except (EmbeddingEndpointUnavailableError, db.DatabaseConnectionError, InsufficientPrivilege) as exc:
         exit_code = 1
         deferred_stderr = str(exc)
         return 1

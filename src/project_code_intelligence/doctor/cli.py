@@ -27,7 +27,7 @@ from project_code_intelligence.doctor.common import (
     version_at_least,
     version_tuple,
 )
-from project_code_intelligence.doctor.database import check_database, init_database_schema
+from project_code_intelligence.doctor.database import check_database
 from project_code_intelligence.doctor.embeddings import (
     check_embedding_endpoint,
     check_embedding_options,
@@ -45,6 +45,7 @@ from project_code_intelligence.doctor.hardware import (
 from project_code_intelligence.doctor.output import (
     color_text,
     exit_code,
+    format_postgres_bootstrap_result,
     format_result,
     format_summary,
     local_embedding_startup_commands,
@@ -95,7 +96,6 @@ class DoctorArgs(argparse.Namespace):
     timeout: float
     embedding: EmbeddingMode
     skip_db: bool
-    init_db: bool
     color: ColorMode
     stop: bool
     stop_embedding: bool
@@ -104,6 +104,7 @@ class DoctorArgs(argparse.Namespace):
     start: bool
     start_db: bool
     start_embedding: bool
+    init_postgres: bool
 
 
 def parser() -> argparse.ArgumentParser:
@@ -142,9 +143,6 @@ def parser() -> argparse.ArgumentParser:
     )
     _ = argument_parser.add_argument("--skip-db", action="store_true", help="Skip PostgreSQL/pgvector checks.")
     _ = argument_parser.add_argument(
-        "--init-db", action="store_true", help="Initialize the code-intelligence schema if not present."
-    )
-    _ = argument_parser.add_argument(
         "--stop", action="store_true", help="Stop all local services (database and embedding)."
     )
     _ = argument_parser.add_argument(
@@ -173,6 +171,14 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Start the best available local embedding service for this hardware.",
     )
+    _ = argument_parser.add_argument(
+        "--init-postgres",
+        action="store_true",
+        help=(
+            "Create/update the PostgreSQL role pci-index uses to initialize project databases. "
+            "Requires PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_* credentials."
+        ),
+    )
     return argument_parser
 
 
@@ -187,17 +193,7 @@ def check_results(args: DoctorArgs, env: config.Env | None = None) -> list[Check
     if args.skip_db:
         results.append(result("database", "skip", "database check skipped"))
     else:
-        db_results = check_database()
-        # Auto-initialize schema when database is reachable but schema is missing.
-        by_name = {r.name: r for r in db_results}
-        if (
-            by_name.get("database", result("database", "fail", "")).status == "ok"
-            and by_name.get("schema", result("schema", "ok", "")).status == "warn"
-        ):
-            init_result = init_database_schema()
-            if init_result.status == "ok":
-                db_results = check_database()
-        results.extend(db_results)
+        results.extend(check_database())
     results.extend(check_embedding_endpoint(env=env, mode=args.embedding, timeout=args.timeout))
     return results
 
@@ -304,7 +300,7 @@ def _confirm(prompt: str) -> bool:
 def _database_summary() -> str | None:
     """Return a short summary of database content, or None if unavailable."""
     try:
-        settings = config.DatabaseSettings.from_env()
+        settings = db.inferred_database_role_settings(config.DatabaseSettings.from_env(), "rw")
     except ValueError:
         return None
     try:
@@ -464,6 +460,17 @@ def _dispatch_start(parsed: DoctorArgs) -> int | None:
     return None
 
 
+def init_postgres_roles(parsed: DoctorArgs) -> int:
+    use_color = should_use_color(parsed.color)
+    try:
+        bootstrap = db.bootstrap_postgres_roles(config.DatabaseSettings.from_env(admin_scope="postgres"))
+    except db.DatabaseConnectionError as exc:
+        write_stdout(str(exc))
+        return 1
+    write_stdout(format_postgres_bootstrap_result(bootstrap, color=use_color))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parsed = parser().parse_args(argv, namespace=DoctorArgs())
     stop_result = _dispatch_stop(parsed)
@@ -472,15 +479,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     start_result = _dispatch_start(parsed)
     if start_result is not None:
         return start_result
-    if parsed.init_db:
-        init_result = init_database_schema()
-        if parsed.json:
-            write_stdout(json.dumps(asdict(init_result), indent=2, sort_keys=True))
-        else:
-            use_color = should_use_color(parsed.color)
-            write_stdout(format_result(init_result, color=use_color))
-        if init_result.status == "fail":
-            return 1
+    if parsed.init_postgres:
+        return init_postgres_roles(parsed)
     results = check_results(parsed)
     if parsed.json:
         payload: Mapping[str, object] = {

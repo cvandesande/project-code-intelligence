@@ -102,7 +102,7 @@ The full list of installed commands lives in [docs/PUBLIC_API.md](docs/PUBLIC_AP
 
 ## MCP Setup
 
-Point Codex, Claude Code, OpenCode, or another MCP client at the installed `pci-mcp` command. Use `command -v pci-mcp` to find the absolute path if your client does not inherit your shell `PATH`. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md) for setup examples, database configuration, and collection/repo filter guidance.
+Point Codex, Claude Code, OpenCode, or another MCP client at the installed `pci-mcp` command. `pci-index --init-db --mcp-config codex .` prints a read-only Codex snippet for the current repo; `claude` and `opencode` are also supported. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md) for setup examples, database configuration, and collection/repo filter guidance.
 
 ## Indexing
 
@@ -123,7 +123,7 @@ To reset one repo's indexed data and rebuild it:
 pci-index --reset .
 ```
 
-For advanced flags (text-only mode, reset-all, custom SARIF locations, ingest tuning), see `pci-index --help`.
+For advanced flags (text-only mode, custom SARIF locations, ingest tuning), see `pci-index --help`.
 
 ## Embeddings
 

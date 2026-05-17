@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -24,6 +25,22 @@ def parse_repos(value: str) -> list[str]:
 def default_collection(root: Path) -> str:
     name = root.name.strip()
     return name or "default"
+
+
+def default_database_name(scope_path: Path) -> str:
+    resolved = scope_path.expanduser().resolve(strict=False)
+    digest = sha256_text(str(resolved))[:8]
+    slug = re.sub(r"[^a-z0-9]+", "_", resolved.name.lower()).strip("_") or "default"
+    max_slug_chars = 63 - len("pci_") - len("_") - len(digest)
+    slug = slug[:max_slug_chars].rstrip("_") or "default"
+    return f"pci_{slug}_{digest}"
+
+
+def database_scope_path_for_root_repos(root: Path, repos: list[str]) -> Path:
+    resolved_root = root.expanduser().resolve(strict=False)
+    if len(repos) == 1 and repos[0] != ".":
+        return (resolved_root / repos[0]).resolve(strict=False)
+    return resolved_root
 
 
 def source_path_for(repo: str, rel_path: str) -> str:
