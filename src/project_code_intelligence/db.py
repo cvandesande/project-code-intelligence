@@ -301,7 +301,11 @@ def _ensure_login_role(conn: DbConnection, settings: DatabaseSettings, role_name
         raise DatabaseConnectionError("cannot derive scoped PostgreSQL role password without a database name")
     password = project_database_role_password(dbname, role_name, settings.admin_password)
     if _role_exists(conn, role_name):
-        if settings.admin_password is not None:
+        # The generated pci_index_admin role intentionally is not a superuser.
+        # PostgreSQL can refuse ALTER ROLE for pre-existing project roles unless
+        # the current role has ADMIN OPTION on each target role. The scoped
+        # passwords are deterministic, so existing roles can be reused here.
+        if settings.admin_password is not None and settings.admin_user != DEFAULT_POSTGRES_INDEX_ADMIN_ROLE:
             _ = conn.execute(alter_role_password_sql(role_name, password))
         return DatabaseRole(
             name=role_name,
@@ -556,6 +560,20 @@ def writable_settings_for_bootstrap(settings: DatabaseSettings, bootstrap: Datab
     )
 
 
+def connection_configuration_guidance(settings: DatabaseSettings) -> str:
+    if settings.dsn_source == "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL":
+        return (
+            "Set PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL, "
+            "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER, "
+            "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD, and "
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH for pci-mcp, or configure generic database credentials."
+        )
+    return (
+        "Set PROJECT_CODE_INTELLIGENCE_DATABASE_URL, or set "
+        "PGVECTOR_HOST/PGVECTOR_PORT/PGVECTOR_DB/PGVECTOR_USER/PGVECTOR_PASS for your database."
+    )
+
+
 def _validate_project_database_privilege_inputs(*, dbname: str, rw_role: str, ro_role: str) -> None:
     for identifier, kind in ((dbname, "database name"), (rw_role, "role name"), (ro_role, "role name")):
         _validate_identifier(identifier, kind)
@@ -597,8 +615,10 @@ def connect(*, readonly: bool | None = None, settings: DatabaseSettings | None =
         raise DatabaseConnectionError(
             "Could not connect to PostgreSQL/pgvector using "
             + connection_hint(settings)
-            + ". Set PROJECT_CODE_INTELLIGENCE_DATABASE_URL, or set PGVECTOR_HOST/PGVECTOR_PORT/"
-            "PGVECTOR_DB/PGVECTOR_USER/PGVECTOR_PASS for your database.\n" + str(exc)
+            + ". "
+            + connection_configuration_guidance(settings)
+            + "\n"
+            + str(exc)
         ) from exc
     if readonly:
         conn.read_only = True

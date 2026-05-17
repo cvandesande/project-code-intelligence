@@ -335,6 +335,21 @@ class DatabaseContractTests(unittest.TestCase):
             _ = json_metadata(["not", "an", "object"])
 
 
+class DatabaseGuidanceTests(unittest.TestCase):
+    def test_mcp_connection_guidance_names_mcp_environment(self) -> None:
+        settings = DatabaseSettings(
+            dsn="postgresql://db.example.invalid/pci_demo?sslmode=prefer",
+            dsn_source="PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL",
+        )
+
+        message = db.connection_configuration_guidance(settings)
+
+        self.assertIn("PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL", message)
+        self.assertIn("PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER", message)
+        self.assertIn("PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD", message)
+        self.assertIn("PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH", message)
+
+
 class DatabaseBootstrapTests(unittest.TestCase):
     TEST_CREDENTIAL = "test-db-credential"
 
@@ -453,6 +468,33 @@ class DatabaseBootstrapTests(unittest.TestCase):
         target_statements = "\n".join(target_connection.statements)
         self.assertIn("FROM pg_extension", target_statements)
         self.assertNotIn("CREATE EXTENSION", target_statements)
+
+    def test_index_admin_reuses_existing_project_roles_without_altering_passwords(self) -> None:
+        settings = DatabaseSettings(
+            dsn="postgresql://db.example.invalid/pci_demo?sslmode=prefer",
+            dbname="pci_demo",
+            admin_user=DEFAULT_POSTGRES_INDEX_ADMIN_ROLE,
+            admin_password=self.TEST_CREDENTIAL,
+            database_inferred=True,
+        )
+        maintenance_connection = _FakeRoleBootstrapConnection(role_exists=True)
+        target_connection = _FakeRoleBootstrapConnection(extension_exists=True)
+
+        with (
+            patch("project_code_intelligence.db.Connection.connect", return_value=maintenance_connection),
+            patch("project_code_intelligence.db.connect", return_value=target_connection),
+        ):
+            bootstrap = db.bootstrap_inferred_database(settings)
+
+        self.assertIsNotNone(bootstrap.rw_role)
+        self.assertIsNotNone(bootstrap.ro_role)
+        self.assertEqual(
+            bootstrap.rw_role.password if bootstrap.rw_role else None,
+            project_database_role_password("pci_demo", "pci_demo_rw", self.TEST_CREDENTIAL),
+        )
+        maintenance_statements = "\n".join(maintenance_connection.statements)
+        self.assertNotIn("ALTER ROLE", maintenance_statements)
+        self.assertNotIn("CREATE ROLE", maintenance_statements)
 
 
 if __name__ == "__main__":

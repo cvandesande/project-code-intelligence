@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import os
+import stat
+import tempfile
 import unittest
+from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 from project_code_intelligence import config
@@ -300,7 +304,8 @@ class DoctorTests(unittest.TestCase):
         )
 
         self.assertIn("AMD 1002:1586 · amdgpu · VRAM 512 MiB · shared 62.5 GiB", output)
-        self.assertIn("AMD NPU 1022:17F0 · amdxdna · accel0", output)
+        self.assertIn("AMD 1022:17F0 · amdxdna · accel0", output)
+        self.assertNotIn("AMD NPU 1022:17F0", output)
         self.assertIn("Postgres", output)
         self.assertIn("db.example.invalid:30432", output)
         self.assertNotIn("code-intel @ db.example.invalid:30432", output)
@@ -403,6 +408,41 @@ class DoctorDatabaseTests(unittest.TestCase):
         self.assertNotIn("pci-doctor --init-db", output)
         self.assertNotIn("docker compose up -d pgvector", output)
 
+    def test_check_database_uses_postgres_admin_for_host_only_database_url(self) -> None:
+        postgres_credential = "-".join(("postgres", "fixture"))
+        captured_settings: list[config.DatabaseSettings] = []
+
+        def fake_connect(*, settings: config.DatabaseSettings) -> _FakeMaintenanceConnection:
+            captured_settings.append(settings)
+            return _FakeMaintenanceConnection()
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://db.example.invalid:5432?sslmode=prefer",
+                    "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER": "postgres",
+                    "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD": postgres_credential,
+                },
+                clear=True,
+            ),
+            patch("project_code_intelligence.doctor.database.db.connect", side_effect=fake_connect),
+            patch("project_code_intelligence.process.container_engine_name", return_value="docker"),
+        ):
+            results = check_database()
+
+        by_name = {item.name: item for item in results}
+        self.assertEqual(by_name["database"].status, "ok")
+        self.assertEqual(captured_settings[0].dbname, "postgres")
+        self.assertEqual(captured_settings[0].dsn_user, "postgres")
+        self.assertEqual(captured_settings[0].dsn_password, postgres_credential)
+        self.assertIn("/postgres", captured_settings[0].dsn or "")
+
+        output = format_summary(results, color=False)
+
+        self.assertIn("✓ Postgres", output)
+        self.assertIn("db.example.invalid:5432", output)
+
     def test_format_postgres_bootstrap_result_prints_index_admin_exports(self) -> None:
         credential = " ".join(("secret", "value"))
         output = format_postgres_bootstrap_result(
@@ -474,26 +514,37 @@ class DoctorDatabaseTests(unittest.TestCase):
                 vector_template_created=False,
             )
 
-        with (
-            patch.dict(
-                os.environ,
-                {
-                    "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://db.example.invalid:5432?sslmode=prefer",
-                    "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER": "postgres",
-                    "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD": postgres_credential,
-                    "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER": "pci_index_admin",
-                    "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD": index_credential,
-                },
-                clear=True,
-            ),
-            patch("project_code_intelligence.doctor.cli.db.bootstrap_postgres_roles", side_effect=fake_bootstrap),
-            patch("project_code_intelligence.doctor.cli.write_stdout"),
-        ):
-            status = doctor_cli.init_postgres_roles(doctor_cli.DoctorArgs(color="never"))
+        with tempfile.TemporaryDirectory() as directory:
+            expected_config = Path(directory) / "project-code-intelligence" / "pci-index.env"
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "XDG_CONFIG_HOME": directory,
+                        "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://db.example.invalid:5432?sslmode=prefer",
+                        "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER": "postgres",
+                        "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD": postgres_credential,
+                        "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER": "pci_index_admin",
+                        "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD": index_credential,
+                    },
+                    clear=True,
+                ),
+                patch("project_code_intelligence.doctor.cli.db.bootstrap_postgres_roles", side_effect=fake_bootstrap),
+                patch("project_code_intelligence.doctor.cli.write_stdout") as write_stdout,
+            ):
+                status = doctor_cli.init_postgres_roles(doctor_cli.DoctorArgs(color="never"))
 
-        self.assertEqual(status, 0)
-        self.assertEqual(captured_settings[0].admin_user, "postgres")
-        self.assertEqual(captured_settings[0].admin_password, postgres_credential)
+            self.assertEqual(status, 0)
+            self.assertEqual(captured_settings[0].admin_user, "postgres")
+            self.assertEqual(captured_settings[0].admin_password, postgres_credential)
+            self.assertTrue(expected_config.exists())
+            self.assertEqual(stat.S_IMODE(expected_config.stat().st_mode), 0o600)
+            self.assertIn(
+                "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD=index-fixture",
+                expected_config.read_text(encoding="utf-8"),
+            )
+            output = cast("str", write_stdout.call_args.args[0])
+            self.assertIn("Saved pci-index config to", output)
 
 
 class DoctorEndpointTests(unittest.TestCase):

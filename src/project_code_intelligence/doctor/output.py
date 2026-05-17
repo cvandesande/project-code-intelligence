@@ -233,7 +233,9 @@ def _shorten_npu(item: CheckResult) -> str:
         return f"Apple Neural Engine · {cores.group(1)} cores"
     if msg.startswith("AMD NPU device detected:"):
         path = msg.split(":", 1)[1].strip()
-        msg = f"AMD NPU · {Path(path).name}"
+        msg = f"AMD · {Path(path).name}"
+    elif msg.startswith("AMD NPU "):
+        msg = "AMD " + msg.removeprefix("AMD NPU ")
     parts = [msg]
     if driver := _detail_value(item.detail, "driver"):
         parts.append(driver)

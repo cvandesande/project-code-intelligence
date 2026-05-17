@@ -60,6 +60,7 @@ from project_code_intelligence.doctor.types import (
     GpuInfo,
 )
 from project_code_intelligence.embedding.apple_embed_server import APPLE_EMBED_SERVER_PID_FILE
+from project_code_intelligence.exceptions import ConfigError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -105,6 +106,7 @@ class DoctorArgs(argparse.Namespace):
     start_db: bool
     start_embedding: bool
     init_postgres: bool
+    write_config: bool
 
 
 def parser() -> argparse.ArgumentParser:
@@ -178,6 +180,13 @@ def parser() -> argparse.ArgumentParser:
             "Create/update the PostgreSQL role pci-index uses to initialize project databases. "
             "Requires PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_* credentials."
         ),
+    )
+    _ = argument_parser.add_argument(
+        "--no-write-config",
+        action="store_false",
+        dest="write_config",
+        default=True,
+        help="Do not write pci-index credentials to the user config directory after --init-postgres.",
     )
     return argument_parser
 
@@ -467,8 +476,27 @@ def init_postgres_roles(parsed: DoctorArgs) -> int:
     except db.DatabaseConnectionError as exc:
         write_stdout(str(exc))
         return 1
-    write_stdout(format_postgres_bootstrap_result(bootstrap, color=use_color))
-    return 0
+    output = format_postgres_bootstrap_result(bootstrap, color=use_color)
+    status = 0
+    if getattr(parsed, "write_config", True):
+        password = bootstrap.index_role.password
+        if password is None:
+            output += "\n\nCould not write pci-index config because the generated password is unavailable."
+            status = 1
+        else:
+            try:
+                config_path = config.write_pci_index_user_config(
+                    database_url=bootstrap.postgres_url,
+                    database_admin_user=bootstrap.index_role.name,
+                    database_admin_password=password,
+                )
+            except (ConfigError, OSError) as exc:
+                output += f"\n\nCould not write pci-index config: {exc}"
+                status = 1
+            else:
+                output += f"\n\nSaved pci-index config to {config_path}\nPermissions: 0600"
+    write_stdout(output)
+    return status
 
 
 def main(argv: Sequence[str] | None = None) -> int:
