@@ -18,6 +18,8 @@ venv/
 # Local agent/editor state.
 .agents/
 .codex/
+.vscode/
+.zed/
 
 # Local environment and MCP configs may contain credentials.
 .env
