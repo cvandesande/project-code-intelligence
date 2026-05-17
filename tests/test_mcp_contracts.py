@@ -2008,6 +2008,93 @@ class McpParserFailureToolTests(unittest.TestCase):
         self.assertNotIn("warnings", payload)
 
 
+class McpListFilesRecordBackedTests(unittest.TestCase):
+    def test_list_files_includes_record_backed_paths_when_file_row_is_missing(self) -> None:
+        generated_path = "kubernetes-ingress/pkg/client/applyconfiguration/configuration/v1/accesscontrol.go"
+        conn = QueuedConnection([
+            FakeCursor(one={"exists": 1}),
+            FakeCursor(
+                many=[
+                    {
+                        "id": None,
+                        "snapshot_id": 1,
+                        "collection": "ingress",
+                        "repo": "kubernetes-ingress",
+                        "repo_role": "project",
+                        "branch": "main",
+                        "commit_sha": "abc123",
+                        "tree_sha": "def456",
+                        "source_path": generated_path,
+                        "git_blob_sha": None,
+                        "file_sha256": None,
+                        "size_bytes": None,
+                        "language": "go",
+                        "file_role": "generated",
+                        "content_class": "generated",
+                        "is_generated": True,
+                        "is_vendor": False,
+                        "is_test": False,
+                        "is_source": True,
+                        "is_build": False,
+                        "is_config": False,
+                        "is_doc": False,
+                        "skipped_reason": None,
+                        "is_untracked": False,
+                        "indexed_dirty": False,
+                        "metadata": {"inventory_source": "records"},
+                        "created_at": "2026-05-17T22:09:39+00:00",
+                    }
+                ]
+            ),
+        ])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_list_code_intel_files({
+                "repo": "kubernetes-ingress",
+                "snapshot_id": 1,
+                "source_path": generated_path,
+                "verbose": True,
+            })
+
+        payload = mcp_text_payload(response)
+        files = cast("list[dict[str, object]]", payload["files"])
+        self.assertEqual(files[0]["source_path"], generated_path)
+        self.assertEqual(files[0]["file_role"], "generated")
+        self.assertNotIn("warnings", payload)
+        query, params = conn.calls[1]
+        self.assertIn("record_backed_files AS", query)
+        self.assertIn("FROM project_code_intel_records r", query)
+        self.assertIn("existing.id IS NULL", query)
+        self.assertIn("FROM file_inventory f", query)
+        self.assertIn(generated_path, params)
+
+    def test_list_files_generated_filter_applies_to_record_backed_inventory(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[]), FakeCursor(one={"exists": 1})])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            _ = mcp_tools.tool_list_code_intel_files({
+                "repo": "kubernetes-ingress",
+                "language": "go",
+                "file_role": "generated",
+                "is_generated": True,
+            })
+
+        query, params = conn.calls[0]
+        self.assertIn("bool_or(r.file_role = 'generated' OR r.content_class = 'generated') AS is_generated", query)
+        self.assertIn("f.file_role = %s", query)
+        self.assertIn("f.is_generated = %s", query)
+        self.assertIn("generated", params)
+        self.assertTrue(any(param is True for param in params))
+
+
 class McpToolShapeTests(unittest.TestCase):
     def test_list_files_default_selects_slim_columns(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[])])
@@ -2020,7 +2107,7 @@ class McpToolShapeTests(unittest.TestCase):
             _ = mcp_tools.tool_list_code_intel_files({})
 
         query, _ = conn.calls[0]
-        select_clause = query.split("FROM project_code_intel_files")[0]
+        select_clause = query.rsplit("FROM file_inventory f", 1)[0].rsplit("SELECT", 1)[1]
         self.assertNotIn("f.snapshot_id", select_clause)
         self.assertNotIn("f.commit_sha", select_clause)
         self.assertNotIn("f.metadata", select_clause)
@@ -2039,7 +2126,7 @@ class McpToolShapeTests(unittest.TestCase):
             _ = mcp_tools.tool_list_code_intel_files({"verbose": True})
 
         query, _ = conn.calls[0]
-        select_clause = query.split("FROM project_code_intel_files")[0]
+        select_clause = query.rsplit("FROM file_inventory f", 1)[0].rsplit("SELECT", 1)[1]
         self.assertIn("f.snapshot_id", select_clause)
         self.assertIn("f.commit_sha", select_clause)
         self.assertIn("f.metadata", select_clause)
