@@ -301,12 +301,13 @@ def code_intel_clauses(args: Json, alias: str = "") -> tuple[list[str], QueryPar
     path_clauses, path_params = source_path_clauses(args, alias)
     clauses.extend(path_clauses)
     params.extend(path_params)
-    if "is_untracked" in args:
-        # is_untracked lives on the joined files table (alias `f`) in record
-        # SELECTs; null coalesces to false so the filter behaves on rows where
-        # the join didn't match.
-        clauses.append("coalesce(f.is_untracked, false) = %s")
-        params.append(optional_bool(args, "is_untracked"))
+    for name in ("is_untracked", "is_generated"):
+        if name in args:
+            # File-level flags live on the joined files table (alias `f`) in
+            # record SELECTs; null coalesces to false so the filter behaves on
+            # rows where the join didn't match.
+            clauses.append(f"coalesce(f.{name}, false) = %s")
+            params.append(optional_bool(args, name))
     meta_clauses, meta_params = _metadata_clauses(args, alias)
     clauses.extend(meta_clauses)
     params.extend(meta_params)

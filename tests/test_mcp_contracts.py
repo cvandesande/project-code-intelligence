@@ -188,10 +188,11 @@ class McpSearchRankingTests(unittest.TestCase):
 
 class McpStaticFindingFilterTests(unittest.TestCase):
     def test_static_finding_source_path_accepts_repo_relative_paths(self) -> None:
-        clauses, params = static_finding_clauses({
-            "repo": "openwrt",
-            "source_path": "build_dir/target-aarch64/ask-cmm-17.03.1/src/pppoe.c",
-        })
+        with patch.dict(os.environ, {}, clear=True):
+            clauses, params = static_finding_clauses({
+                "repo": "openwrt",
+                "source_path": "build_dir/target-aarch64/ask-cmm-17.03.1/src/pppoe.c",
+            })
 
         self.assertIn("f.primary_source_path = ANY(%s)", clauses)
         self.assertEqual(
@@ -203,10 +204,11 @@ class McpStaticFindingFilterTests(unittest.TestCase):
         )
 
     def test_static_finding_source_path_prefix_matches_repo_relative_subtree(self) -> None:
-        clauses, params = static_finding_clauses({
-            "repo": "openwrt",
-            "source_path_prefix": "build_dir/target-aarch64/ask-cmm-17.03.1",
-        })
+        with patch.dict(os.environ, {}, clear=True):
+            clauses, params = static_finding_clauses({
+                "repo": "openwrt",
+                "source_path_prefix": "build_dir/target-aarch64/ask-cmm-17.03.1",
+            })
 
         self.assertIn("f.primary_source_path LIKE %s ESCAPE '\\'", clauses[2])
         self.assertEqual(
@@ -216,6 +218,69 @@ class McpStaticFindingFilterTests(unittest.TestCase):
                 "openwrt/build\\_dir/target-aarch64/ask-cmm-17.03.1/%",
             ],
         )
+
+    def test_static_finding_search_reports_when_no_static_run_exists(self) -> None:
+        conn = QueuedConnection([
+            FakeCursor(many=[]),
+            FakeCursor(one={"repo": "kubernetes-ingress"}),
+            FakeCursor(one=None),
+        ])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "table_regclass_exists", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_search_static_findings({"repo": "kubernetes-ingress"})
+
+        payload = mcp_text_payload(response)
+        self.assertEqual(payload["results"], [])
+        self.assertFalse(payload["static_runs_found"])
+        warnings = cast("list[dict[str, object]]", payload["warnings"])
+        self.assertEqual(warnings[0]["kind"], "static_analysis_not_run")
+        run_query, run_params = conn.calls[2]
+        self.assertIn("FROM project_code_intel_static_runs r", run_query)
+        self.assertEqual(run_params, ["kubernetes-ingress"])
+
+
+class McpTextSearchRankingTests(unittest.TestCase):
+    def test_text_search_exact_symbol_ranking_prefers_same_case_symbols(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_search_code_intel_text({
+                "query": "NewConfigurator",
+                "record_type": "symbol_definition",
+            })
+
+        payload = mcp_text_payload(response)
+        self.assertEqual(payload["query_strategy"], "all_terms")
+        query, _params = conn.calls[0]
+        score_sql = query[query.index("SELECT coalesce(sum(") : query.index(") AS match_score")]
+        self.assertIn("coalesce(r.symbol, '') = search_terms.term THEN 120", score_sql)
+        self.assertIn("lower(coalesce(r.symbol, '')) = lower(search_terms.term) THEN 80", score_sql)
+        self.assertIn("ORDER BY match_score DESC", query)
+
+    def test_text_search_warns_when_query_looks_like_regex(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_search_code_intel_text({
+                "query": r"func \(.*\) AddOrUpdateVirtualServer",
+                "query_mode": "all_terms",
+            })
+
+        payload = mcp_text_payload(response)
+        warnings = cast("list[dict[str, object]]", payload["warnings"])
+        self.assertEqual(warnings[0]["kind"], "tokenized_text_search")
 
 
 class McpTextSearchExecutionTests(unittest.TestCase):
@@ -482,9 +547,10 @@ class McpTextSearchExecutionTests(unittest.TestCase):
             patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
-            _ = mcp_tools.tool_search_code_intel_text({"is_untracked": False})
+            _ = mcp_tools.tool_search_code_intel_text({"is_untracked": False, "is_generated": False})
         query, params = conn.calls[0]
         self.assertIn("coalesce(f.is_untracked, false) = %s", query)
+        self.assertIn("coalesce(f.is_generated, false) = %s", query)
         self.assertTrue(any(p is False for p in params))
 
     def test_semantic_search_is_untracked_filter_has_files_join(self) -> None:
@@ -504,11 +570,13 @@ class McpTextSearchExecutionTests(unittest.TestCase):
                 "repo": "project-code-intelligence",
                 "snapshot_id": 1,
                 "is_untracked": False,
+                "is_generated": False,
             })
 
         query, params = conn.calls[1]
         self.assertIn("LEFT JOIN project_code_intel_files f", query)
         self.assertIn("coalesce(f.is_untracked, false) = %s", query)
+        self.assertIn("coalesce(f.is_generated, false) = %s", query)
         self.assertTrue(any(p is False for p in params))
 
     def test_list_files_is_untracked_filter(self) -> None:
@@ -733,9 +801,19 @@ class McpSemanticSearchTests(unittest.TestCase):
         self.assertIn("r.updated_at", query)
         self.assertIn("LEAST(ranked.match_score, 80)", query)
         self.assertIn("+ ranked.quality_penalty", query)
+        self.assertIn("ranked.symbol_kind IN ('function', 'method', 'shell_function')", query)
+        self.assertIn("ranked.symbol_kind IN ('struct', 'interface', 'type')", query)
+        self.assertIn("coalesce(ranked.symbol, '') ILIKE '%%validat%%'", query)
         self.assertIn("ranked.file_role = 'source'", query)
+        self.assertIn("ranked.content_class <> 'source'", query)
+        self.assertIn("ranked.is_generated", query)
         self.assertIn("oneshot", cast("list[str]", params[1]))
-        self.assertEqual(params[-2], mcp_tools.SEMANTIC_SOURCE_ROLE_DISTANCE_BOOST)
+        self.assertEqual(params[-7], 0.0)
+        self.assertEqual(params[-6], 0.0)
+        self.assertEqual(params[-5], 0.0)
+        self.assertEqual(params[-4], mcp_tools.SEMANTIC_SOURCE_ROLE_DISTANCE_BOOST)
+        self.assertEqual(params[-3], mcp_tools.SEMANTIC_NON_SOURCE_DISTANCE_PENALTY)
+        self.assertEqual(params[-2], mcp_tools.SEMANTIC_GENERATED_DISTANCE_PENALTY)
 
         payload = mcp_text_payload(response)
         result = cast("list[dict[str, object]]", payload["results"])[0]
@@ -755,7 +833,122 @@ class McpSemanticSearchTests(unittest.TestCase):
             _ = mcp_tools.tool_search_code_intel_semantic({"query": "tests for oneshot receiver drop"})
 
         _query, params = conn.calls[0]
+        self.assertEqual(params[-7], 0.0)
+        self.assertEqual(params[-6], 0.0)
+        self.assertEqual(params[-5], 0.0)
+        self.assertEqual(params[-4], 0.0)
+        self.assertEqual(params[-3], 0.0)
         self.assertEqual(params[-2], 0.0)
+
+    def test_semantic_search_boosts_executable_symbols_for_implementation_queries(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            _ = mcp_tools.tool_search_code_intel_semantic({
+                "query": "where does VirtualServer policy generation call generatePolicies",
+            })
+
+        _query, params = conn.calls[0]
+        self.assertEqual(params[-7], mcp_tools.SEMANTIC_EXECUTABLE_SYMBOL_DISTANCE_BOOST)
+        self.assertEqual(params[-6], mcp_tools.SEMANTIC_STRUCTURAL_SYMBOL_DISTANCE_PENALTY)
+        self.assertEqual(params[-5], mcp_tools.SEMANTIC_VALIDATION_DISTANCE_PENALTY)
+
+    def test_semantic_search_expands_translation_queries_toward_implementation_terms(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            _ = mcp_tools.tool_search_code_intel_semantic({
+                "query": "how are VirtualServer policies translated into nginx configuration",
+            })
+
+        _query, params = conn.calls[0]
+        rank_terms = cast("list[str]", params[1])
+        self.assertIn("VirtualServer", rank_terms)
+        self.assertIn("policies", rank_terms)
+        self.assertIn("translated", rank_terms)
+        self.assertIn("nginx", rank_terms)
+        self.assertIn("configuration", rank_terms)
+        self.assertNotIn("how", rank_terms)
+        self.assertNotIn("are", rank_terms)
+        for supplemental_term in ("generate", "render", "build", "add", "config", "template"):
+            self.assertIn(supplemental_term, rank_terms)
+        self.assertEqual(params[-7], mcp_tools.SEMANTIC_EXECUTABLE_SYMBOL_DISTANCE_BOOST)
+        self.assertEqual(params[-6], mcp_tools.SEMANTIC_STRUCTURAL_SYMBOL_DISTANCE_PENALTY)
+        self.assertEqual(params[-5], mcp_tools.SEMANTIC_VALIDATION_DISTANCE_PENALTY)
+
+    def test_semantic_search_treats_emitted_generated_config_queries_as_implementation_intent(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            _ = mcp_tools.tool_search_code_intel_semantic({
+                "query": "how are VirtualServer policies emitted in generated nginx configuration",
+            })
+
+        _query, params = conn.calls[0]
+        rank_terms = cast("list[str]", params[1])
+        self.assertIn("emitted", rank_terms)
+        self.assertIn("generated", rank_terms)
+        self.assertIn("configuration", rank_terms)
+        self.assertIn("generate", rank_terms)
+        self.assertIn("template", rank_terms)
+        self.assertEqual(params[-7], mcp_tools.SEMANTIC_EXECUTABLE_SYMBOL_DISTANCE_BOOST)
+        self.assertEqual(params[-6], mcp_tools.SEMANTIC_STRUCTURAL_SYMBOL_DISTANCE_PENALTY)
+        self.assertEqual(params[-5], mcp_tools.SEMANTIC_VALIDATION_DISTANCE_PENALTY)
+
+    def test_semantic_search_disables_executable_boost_for_structural_queries(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            _ = mcp_tools.tool_search_code_intel_semantic({"query": "generate policy struct fields"})
+
+        _query, params = conn.calls[0]
+        self.assertEqual(params[-7], 0.0)
+        self.assertEqual(params[-6], 0.0)
+        self.assertEqual(params[-5], 0.0)
+
+    def test_semantic_search_disables_implementation_bias_for_validation_schema_queries(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            _ = mcp_tools.tool_search_code_intel_semantic({
+                "query": "VirtualServer policy validation schema fields",
+            })
+
+        _query, params = conn.calls[0]
+        rank_terms = cast("list[str]", params[1])
+        self.assertIn("validation", rank_terms)
+        self.assertIn("schema", rank_terms)
+        self.assertIn("fields", rank_terms)
+        self.assertNotIn("generate", rank_terms)
+        self.assertNotIn("template", rank_terms)
+        self.assertEqual(params[-7], 0.0)
+        self.assertEqual(params[-6], 0.0)
+        self.assertEqual(params[-5], 0.0)
 
     def test_semantic_search_record_type_filter_can_request_security_patterns(self) -> None:
         conn = QueuedConnection([
