@@ -15,6 +15,7 @@ from typing_extensions import override
 
 from project_code_intelligence import db, profile_context
 from project_code_intelligence.code_profiles import load_profile
+from project_code_intelligence.common import default_database_name
 from project_code_intelligence.config import (
     DEFAULT_EMBEDDING_ENDPOINT_MODEL,
     DEFAULT_LEMONADE_EMBEDDING_ENDPOINT,
@@ -31,10 +32,16 @@ from project_code_intelligence.ingest_code_intel import (
     CliArgs,
     IngestPlan,
     build_ingest_plan,
+    codex_mcp_config_block,
     confirm_reset_code_intel,
+    database_bootstrap_report,
     discover_plan_sarif_files,
+    mcp_config_context,
+    mcp_ro_export_block,
     replace_repos_for_full_ingests,
     resolve_scan_workers,
+    run_ingest_plan,
+    run_reset_only,
     validate_args,
     warning_for_sarif_mtime,
 )
@@ -127,9 +134,9 @@ def cli_args(**overrides: object) -> CliArgs:
         "progress_every": 0,
         "dry_run": False,
         "reset_code_intel": False,
-        "reset_all_code_intel": False,
         "i_know_this_deletes_code_intel_db": False,
         "reset_only": False,
+        "init_db_only": False,
         "sarif": [],
         "no_profile_sarif": False,
         "sarif_max_bytes": 1024 * 1024,
@@ -147,6 +154,8 @@ def cli_args(**overrides: object) -> CliArgs:
         "no_preembed": False,
         "prune_snapshots": False,
         "prune_keep": 5,
+        "mcp_config": None,
+        "mcp_server_name": None,
     }
     values.update(overrides)
     return CliArgs(**values)  # type: ignore[arg-type]
@@ -166,17 +175,56 @@ def snapshot_for_repo(repo: str) -> Snapshot:
 
 
 class DatabaseSettingsTests(unittest.TestCase):
-    def test_default_to_local_compose_pgvector(self) -> None:
-        settings = DatabaseSettings.from_env({})
+    def test_default_to_inferred_local_project_database(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = DatabaseSettings.from_env({"PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": directory})
+            expected_dbname = default_database_name(Path(directory))
 
         self.assertEqual(settings.missing_connection_names(), [])
         self.assertEqual(settings.host, "127.0.0.1")
         self.assertEqual(settings.port, "5433")
-        self.assertEqual(settings.dbname, "codeintel")
+        self.assertEqual(settings.dbname, expected_dbname)
         self.assertEqual(settings.user, "codeintel")
         self.assertEqual(settings.password, "codeintel")
-        self.assertIn("PGVECTOR_DB=codeintel", settings.connection_hint())
+        self.assertTrue(settings.database_inferred)
+        self.assertIn(f"PGVECTOR_DB={expected_dbname} (inferred)", settings.connection_hint())
         self.assertIn("PGVECTOR_PASS=<set>", settings.connection_hint())
+
+    def test_database_url_without_database_uses_inferred_dbname(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = DatabaseSettings.from_env({
+                "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://example.invalid:5432?sslmode=prefer",
+                "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": directory,
+            })
+            expected_dbname = default_database_name(Path(directory))
+
+        self.assertEqual(settings.dbname, expected_dbname)
+        self.assertTrue(settings.database_inferred)
+        self.assertEqual(settings.connection_hint(), "PROJECT_CODE_INTELLIGENCE_DATABASE_URL=<hidden>")
+        self.assertEqual(
+            settings.display_target(), f"postgresql://example.invalid:5432/{expected_dbname}?sslmode=prefer"
+        )
+
+    def test_database_url_with_database_disables_inference(self) -> None:
+        settings = DatabaseSettings.from_env({
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://example.invalid/db",
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "ignored-scope",
+        })
+
+        self.assertEqual(settings.dbname, "db")
+        self.assertFalse(settings.database_inferred)
+        self.assertEqual(settings.display_target(), "postgresql://example.invalid/db")
+
+    def test_explicit_pgvector_db_disables_inference_when_url_has_no_database(self) -> None:
+        settings = DatabaseSettings.from_env({
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://example.invalid",
+            "PGVECTOR_DB": "explicit_db",
+            "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "ignored-scope",
+        })
+
+        self.assertEqual(settings.dbname, "explicit_db")
+        self.assertFalse(settings.database_inferred)
+        self.assertEqual(settings.display_target(), "postgresql://example.invalid/explicit_db")
 
     def test_report_missing_connection_parts(self) -> None:
         settings = DatabaseSettings(dbname="codeintel", user="reader", password=None)
@@ -251,28 +299,54 @@ class ResetConfirmationTests(unittest.TestCase):
             )
 
         output = stderr.getvalue()
-        self.assertIn("Database target: postgresql://app@db:5432/codeintel sslmode=prefer", output)
+        self.assertIn("Postgres admin connection: postgresql://app@db:5432/postgres sslmode=prefer", output)
+        self.assertIn("About to drop PostgreSQL database: codeintel", output)
         self.assertIn("acme-repo", output)
-        self.assertIn("The schema is untouched", output)
-        self.assertIn("Other repos are untouched", output)
+        self.assertIn("schema in that DB", output)
+        self.assertIn("Other PCI-managed project databases are untouched", output)
         self.assertNotIn("secret", output)
 
-    def test_reset_all_confirmation_prints_destructive_scope(self) -> None:
+    def test_reset_confirmation_shows_admin_connection_not_runtime_role(self) -> None:
+        stderr = io.StringIO()
+        runtime_credential = "-".join(("runtime", "credential"))
+        admin_credential = "-".join(("admin", "credential"))
+        settings = DatabaseSettings(
+            dsn="postgresql://db.example.invalid:5432/pci_zod_cfa53486?sslmode=prefer",
+            dsn_user="pci_project_code_intelligence_38fc61c9_rw",
+            dsn_password=runtime_credential,
+            dbname="pci_zod_cfa53486",
+            admin_user="pci_index_admin",
+            admin_password=admin_credential,
+            database_inferred=True,
+        )
+
+        with patch("sys.stdin", TtyStringIO("yes\n")), patch("sys.stderr", stderr):
+            confirm_reset_code_intel(cli_args(reset_code_intel=True), settings, "zod", ["zod"])
+
+        output = stderr.getvalue()
+        self.assertIn("About to drop PostgreSQL database: pci_zod_cfa53486", output)
+        self.assertIn(
+            "Postgres admin connection: postgresql://pci_index_admin@db.example.invalid:5432/postgres?sslmode=prefer",
+            output,
+        )
+        self.assertNotIn("pci_project_code_intelligence_38fc61c9_rw", output)
+        self.assertNotIn(runtime_credential, output)
+        self.assertNotIn(admin_credential, output)
+
+    def test_reset_confirmation_does_not_offer_global_scope(self) -> None:
         stderr = io.StringIO()
 
         with patch("sys.stdin", TtyStringIO("yes\n")), patch("sys.stderr", stderr):
             confirm_reset_code_intel(
-                cli_args(reset_code_intel=True, reset_all_code_intel=True),
+                cli_args(reset_code_intel=True),
                 DatabaseSettings(),
                 "default",
                 ["acme-repo"],
             )
 
         output = stderr.getvalue()
-        self.assertIn("delete all project-code-intelligence data", output)
-        self.assertIn("Collections/repos: all", output)
-        self.assertIn("The schema is untouched", output)
-        self.assertNotIn("Other repos are untouched", output)
+        self.assertNotIn("Collections/repos: all", output)
+        self.assertIn("Other PCI-managed project databases are untouched", output)
 
     def test_reset_confirmation_requires_flag_in_noninteractive_mode(self) -> None:
         with (
@@ -281,6 +355,174 @@ class ResetConfirmationTests(unittest.TestCase):
             self.assertRaises(ValueError),
         ):
             confirm_reset_code_intel(cli_args(reset_code_intel=True), DatabaseSettings(), "default", ["acme-repo"])
+
+    def test_reset_refuses_explicit_database_before_prompt(self) -> None:
+        with (
+            patch(
+                "project_code_intelligence.ingest_code_intel.config.DatabaseSettings.from_env",
+                return_value=DatabaseSettings(dbname="shared", database_inferred=False),
+            ),
+            patch("project_code_intelligence.ingest_code_intel.confirm_reset_code_intel") as confirm,
+            self.assertRaises(db.DatabaseConnectionError),
+        ):
+            _ = run_reset_only(cli_args(reset_code_intel=True, i_know_this_deletes_code_intel_db=True))
+
+        confirm.assert_not_called()
+
+
+class DatabaseBootstrapReportTests(unittest.TestCase):
+    def test_database_bootstrap_report_exposes_roles_without_credentials(self) -> None:
+        rw_value = "rw-fixture"
+        ro_value = "ro-fixture"
+        bootstrap = db.DatabaseBootstrapResult(
+            dbname="pci_demo",
+            database_created=True,
+            rw_role=db.DatabaseRole(
+                name="pci_demo_rw",
+                password=rw_value,
+                created=True,
+                database_url=f"postgresql://pci_demo_rw:{rw_value}@db.example.invalid/pci_demo",
+            ),
+            ro_role=db.DatabaseRole(
+                name="pci_demo_ro",
+                password=ro_value,
+                created=True,
+                database_url=f"postgresql://pci_demo_ro:{ro_value}@db.example.invalid/pci_demo",
+            ),
+        )
+
+        report = database_bootstrap_report(bootstrap)
+
+        self.assertEqual(report["rw_role"], "pci_demo_rw")
+        self.assertEqual(report["ro_role"], "pci_demo_ro")
+        self.assertNotIn("rw_database_url", report)
+        self.assertNotIn("ro_database_url", report)
+
+    def test_mcp_ro_export_block_prints_split_read_only_credentials(self) -> None:
+        ro_value = " ".join(("ro", "fixture"))
+        plan = build_ingest_plan(
+            cli_args(collection="demo-workspace", root=Path.cwd(), repos=".", mcp_server_name="pci-demo")
+        )
+        bootstrap = db.DatabaseBootstrapResult(
+            dbname="pci_demo",
+            ro_role=db.DatabaseRole(
+                name="pci_demo_ro",
+                password=ro_value,
+                created=True,
+                database_url="postgresql://pci_demo_ro:ro%20fixture@db.example.invalid:5432/pci_demo?sslmode=prefer",
+            ),
+        )
+
+        with patch.dict(
+            os.environ,
+            {"PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/work/demo-workspace"},
+            clear=False,
+        ):
+            output = mcp_ro_export_block(mcp_config_context(plan, bootstrap, command="/usr/bin/pci-mcp"))
+
+        if output is None:
+            raise AssertionError("expected MCP export block")
+        self.assertIn("Export for pci-mcp (RO)", output)
+        self.assertIn(
+            "export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL='postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer'",
+            output,
+        )
+        self.assertIn("export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER=pci_demo_ro", output)
+        self.assertIn("export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD='ro fixture'", output)
+        self.assertIn("export PROJECT_CODE_INTELLIGENCE_COLLECTION=demo-workspace", output)
+        self.assertIn("export PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH=/work/demo-workspace", output)
+        self.assertNotIn("pci_demo_ro:ro%20fixture@", output)
+
+    def test_codex_mcp_config_block_renders_copyable_toml(self) -> None:
+        ro_value = " ".join(("ro", "fixture"))
+        plan = build_ingest_plan(
+            cli_args(collection="demo-workspace", root=Path.cwd(), repos=".", mcp_server_name="pci-demo")
+        )
+        bootstrap = db.DatabaseBootstrapResult(
+            dbname="pci_demo",
+            ro_role=db.DatabaseRole(
+                name="pci_demo_ro",
+                password=ro_value,
+                created=True,
+                database_url="postgresql://pci_demo_ro:ro%20fixture@db.example.invalid:5432/pci_demo?sslmode=prefer",
+            ),
+        )
+
+        with patch.dict(
+            os.environ,
+            {"PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/work/demo-workspace"},
+            clear=False,
+        ):
+            context = mcp_config_context(plan, bootstrap, command="/usr/bin/pci-mcp")
+
+        if context is None:
+            raise AssertionError("expected MCP config context")
+        output = codex_mcp_config_block(context)
+
+        self.assertIn("[mcp_servers.pci-demo]", output)
+        self.assertIn('command = "/usr/bin/pci-mcp"', output)
+        self.assertIn('cwd = "/work/demo-workspace"', output)
+        self.assertIn(
+            'PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL = "postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer"',
+            output,
+        )
+        self.assertIn('PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER = "pci_demo_ro"', output)
+        self.assertIn('PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD = "ro fixture"', output)
+        self.assertIn('PROJECT_CODE_INTELLIGENCE_COLLECTION = "demo-workspace"', output)
+        self.assertIn('PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH = "/work/demo-workspace"', output)
+        self.assertNotIn("pci_demo_ro:ro%20fixture@", output)
+
+    def test_codex_mcp_config_block_quotes_non_bare_toml_server_names(self) -> None:
+        ro_value = "-".join(("ro", "fixture"))
+        plan = build_ingest_plan(
+            cli_args(collection="demo-workspace", root=Path.cwd(), repos=".", mcp_server_name="PCI Demo")
+        )
+        bootstrap = db.DatabaseBootstrapResult(
+            dbname="pci_demo",
+            ro_role=db.DatabaseRole(
+                name="pci_demo_ro",
+                password=ro_value,
+                created=True,
+                database_url="postgresql://pci_demo_ro:ro-fixture@db.example.invalid:5432/pci_demo?sslmode=prefer",
+            ),
+        )
+
+        context = mcp_config_context(plan, bootstrap, command="/usr/bin/pci-mcp")
+
+        if context is None:
+            raise AssertionError("expected MCP config context")
+        self.assertIn('[mcp_servers."PCI Demo"]', codex_mcp_config_block(context))
+
+    def test_mcp_ro_export_block_skips_when_password_is_unavailable(self) -> None:
+        plan = build_ingest_plan(cli_args(collection="demo-workspace", root=Path.cwd(), repos="."))
+        bootstrap = db.DatabaseBootstrapResult(
+            dbname="pci_demo",
+            ro_role=db.DatabaseRole(
+                name="pci_demo_ro",
+                password=None,
+                created=False,
+                database_url="postgresql://pci_demo_ro@db.example.invalid:5432/pci_demo?sslmode=prefer",
+            ),
+        )
+
+        self.assertIsNone(mcp_config_context(plan, bootstrap, command="/usr/bin/pci-mcp"))
+
+    def test_init_db_only_bootstraps_without_scanning(self) -> None:
+        bootstrap = db.DatabaseBootstrapResult(dbname="pci_demo", database_created=True)
+        summaries: list[dict[str, object]] = []
+        plan = build_ingest_plan(cli_args(init_db_only=True, root=Path.cwd(), repos="."))
+
+        with (
+            patch("project_code_intelligence.ingest_code_intel.prepare_writable_database", return_value=bootstrap),
+            patch("project_code_intelligence.ingest_code_intel.scan_plan") as scan_plan,
+            patch("project_code_intelligence.ingest_code_intel.progress.emit_summary", side_effect=summaries.append),
+        ):
+            status = run_ingest_plan(plan)
+
+        self.assertEqual(status, 0)
+        scan_plan.assert_not_called()
+        self.assertEqual(summaries[0]["mode"], "init-db")
+        self.assertEqual(summaries[0]["database_created"], True)
 
 
 class CodeIntelParserTests(unittest.TestCase):
@@ -420,6 +662,32 @@ class CodeIntelParserTests(unittest.TestCase):
         self.assertEqual(settings.mode, "full")
         self.assertFalse(settings.preembed)
         self.assertEqual(settings.runtime_heartbeat_seconds, 60)
+
+
+class TypescriptParserRegressionTests(unittest.TestCase):
+    def test_typescript_function_body_ignores_default_parameter_object_literal(self) -> None:
+        text = "\n".join([
+            "export function process(",
+            "  schema: Schema,",
+            "  _params = { path: [], schemaPath: [] }",
+            "): void {",
+            "  const inner = normalize(schema);",
+            "  return inner._zod.run({ value: schema, issues: [] }, ctx);",
+            "}",
+        ])
+
+        records, edges = javascript_records(fixture_file("core/to-json-schema.ts", "typescript"), text, 2400, 0)
+        process_chunk = next(
+            record for record in records if record.record_type == "code_chunk" and record.symbol == "process"
+        )
+        run_edge = next(edge for edge in edges if edge.target_symbol == "run")
+
+        self.assertEqual(process_chunk.line_start, 1)
+        self.assertEqual(process_chunk.line_end, 7)
+        self.assertIn("inner._zod.run", process_chunk.display_content)
+        self.assertEqual(run_edge.metadata["call_kind"], "member_call")
+        self.assertEqual(run_edge.metadata["target_resolvable"], False)
+        self.assertEqual(run_edge.metadata["full_symbol"], "inner._zod.run")
 
 
 class ParserAndRuntimeTests(unittest.TestCase):
@@ -669,14 +937,19 @@ class ParserAndRuntimeTests(unittest.TestCase):
             "  object.set('x', 1);",
             "  util.defineLazy(object);",
             "  core.$ZodLazy.init(object);",
+            "  inner._zod.run(object);",
             "}",
         ])
 
         _records, edges = javascript_records(fixture_file("core/schemas.ts", "typescript"), text, 2400, 0)
         targets = {edge.target_symbol for edge in edges}
+        run_edge = next(edge for edge in edges if edge.target_symbol == "run")
+        define_lazy_edge = next(edge for edge in edges if edge.target_symbol == "defineLazy")
 
         self.assertIn("defineLazy", targets)
         self.assertIn("$ZodLazy", targets)
+        self.assertEqual(run_edge.metadata["target_resolvable"], False)
+        self.assertNotIn("target_resolvable", define_lazy_edge.metadata)
         for noise in ("if", "get", "set", "init"):
             self.assertNotIn(noise, targets)
 

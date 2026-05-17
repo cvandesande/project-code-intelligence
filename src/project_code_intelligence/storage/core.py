@@ -93,6 +93,7 @@ class RecordInsertContext:
 class _SymbolDefinitionTarget:
     record_id: str
     source_path: str
+    symbol_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -116,14 +117,32 @@ def _source_dir(source_path: str) -> str:
     return source_path.rsplit("/", maxsplit=1)[0] if "/" in source_path else source_path
 
 
+def _symbol_kind_resolve_rank(symbol_kind: str | None) -> int:
+    if symbol_kind in {"function", "method", "constant", "class", "enum", "shell_function"}:
+        return 0
+    if symbol_kind in {"interface", "type"}:
+        return 2
+    return 1
+
+
 def _symbol_definition_choices(definitions: list[_SymbolDefinitionTarget]) -> _SymbolDefinitionChoices:
-    ordered = sorted(definitions, key=lambda item: (item.source_path, item.record_id))
+    ordered = sorted(
+        definitions,
+        key=lambda item: (_symbol_kind_resolve_rank(item.symbol_kind), item.source_path, item.record_id),
+    )
     by_source_path: dict[str, _SymbolDefinitionTarget] = {}
     by_source_dir: dict[str, _SymbolDefinitionTarget] = {}
-    for definition in ordered:
+    for definition in sorted(
+        definitions,
+        key=lambda item: (item.source_path, _symbol_kind_resolve_rank(item.symbol_kind), item.record_id),
+    ):
         _ = by_source_path.setdefault(definition.source_path, definition)
         _ = by_source_dir.setdefault(_source_dir(definition.source_path), definition)
     return _SymbolDefinitionChoices(by_source_path=by_source_path, by_source_dir=by_source_dir, fallback=ordered[0])
+
+
+def edge_target_resolvable(edge: IntelEdge) -> bool:
+    return edge.metadata.get("target_resolvable") is not False
 
 
 def replace_repos(conn: db.DbConnection, collection: str, repos: list[str]) -> None:
@@ -132,41 +151,6 @@ def replace_repos(conn: db.DbConnection, collection: str, repos: list[str]) -> N
             "DELETE FROM project_code_intel_snapshots WHERE collection = %s AND repo = %s",
             [collection, repo],
         )
-
-
-def delete_repo_data(conn: db.DbConnection, collection: str, repos: list[str]) -> dict[str, int]:
-    """Delete all snapshots and cascading data for the given repos. Returns deleted counts per repo."""
-    deleted: dict[str, int] = {}
-    for repo in repos:
-        rows = conn.execute(
-            "DELETE FROM project_code_intel_snapshots WHERE collection = %s AND repo = %s RETURNING id",
-            [collection, repo],
-        ).fetchall()
-        deleted[repo] = len(rows)
-    return deleted
-
-
-def delete_all_code_intel_data(conn: db.DbConnection) -> int:
-    """Delete all code-intelligence snapshots and cascading data. Returns deleted snapshot count."""
-    row = conn.execute("SELECT count(*) AS count FROM project_code_intel_snapshots").fetchone()
-    snapshot_count = row_int(db.require_row(row, "snapshot count"), "count")
-    _ = conn.execute(
-        """
-        TRUNCATE
-            project_code_intel_snapshots,
-            project_code_intel_files,
-            project_code_intel_records,
-            project_code_intel_edges,
-            project_code_intel_parser_failures,
-            project_code_intel_static_runs,
-            project_code_intel_static_rules,
-            project_code_intel_static_findings,
-            project_code_intel_static_locations,
-            project_code_intel_static_code_flows
-        RESTART IDENTITY CASCADE
-        """
-    )
-    return snapshot_count
 
 
 def insert_snapshot(conn: db.DbConnection, snapshot: Snapshot) -> int:
@@ -537,7 +521,7 @@ def _load_symbol_definition_index(
         return {}
     rows = conn.execute(
         """
-        SELECT symbol, record_id, source_path
+        SELECT symbol, record_id, source_path, symbol_kind
         FROM project_code_intel_records
         WHERE snapshot_id = %s
           AND record_type = 'symbol_definition'
@@ -551,7 +535,11 @@ def _load_symbol_definition_index(
     for row in rows:
         symbol = str(row["symbol"])
         definitions_by_symbol.setdefault(symbol, []).append(
-            _SymbolDefinitionTarget(record_id=str(row["record_id"]), source_path=str(row["source_path"]))
+            _SymbolDefinitionTarget(
+                record_id=str(row["record_id"]),
+                source_path=str(row["source_path"]),
+                symbol_kind=str(row["symbol_kind"]) if row.get("symbol_kind") is not None else None,
+            )
         )
     return {
         symbol: _symbol_definition_choices(definitions)
@@ -562,7 +550,9 @@ def _load_symbol_definition_index(
 
 def pre_resolve_edge_targets(conn: db.DbConnection, snapshot_id: int, edges: list[IntelEdge]) -> int:
     """Resolve newly generated edge targets in memory before inserting edge rows."""
-    unresolved_edges = [edge for edge in edges if edge.target_record_id is None and edge.target_symbol]
+    unresolved_edges = [
+        edge for edge in edges if edge.target_record_id is None and edge.target_symbol and edge_target_resolvable(edge)
+    ]
     if not unresolved_edges:
         return 0
     symbols = _load_symbol_definition_index(conn, snapshot_id, {str(edge.target_symbol) for edge in unresolved_edges})
@@ -586,6 +576,7 @@ def count_unresolved_edge_targets(conn: db.DbConnection, snapshot_id: int) -> in
         WHERE snapshot_id = %s
           AND target_record_id IS NULL
           AND target_symbol IS NOT NULL
+          AND COALESCE((metadata->>'target_resolvable')::boolean, true)
         """,
         [snapshot_id],
     ).fetchone()
@@ -626,6 +617,7 @@ def resolve_edge_targets(
                 WHERE snapshot_id = %s
                   AND target_record_id IS NULL
                   AND target_symbol IS NOT NULL
+                  AND COALESCE((metadata->>'target_resolvable')::boolean, true)
                   AND (
                       %s::text IS NULL
                       OR target_symbol > %s::text
@@ -660,6 +652,12 @@ def resolve_edge_targets(
                             WHEN regexp_replace(r.source_path, '/[^/]+$', '')
                                = regexp_replace(c.source_path, '/[^/]+$', '') THEN 1
                             ELSE 2
+                        END,
+                        CASE
+                            WHEN r.symbol_kind IN ('function', 'method', 'constant', 'class', 'enum', 'shell_function')
+                                THEN 0
+                            WHEN r.symbol_kind IN ('interface', 'type') THEN 2
+                            ELSE 1
                         END,
                         r.source_path,
                         r.record_id

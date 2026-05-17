@@ -66,7 +66,8 @@ def configure_session(conn: db.DbConnection) -> None:
 
 @contextmanager
 def connect() -> Generator[db.DbConnection]:
-    with db.connect(settings=config.DatabaseSettings.from_env(role="mcp"), readonly=True) as conn:
+    settings = db.inferred_database_role_settings(config.DatabaseSettings.from_env(role="mcp"), "ro")
+    with db.connect(settings=settings, readonly=True) as conn:
         configure_session(conn)
         yield conn
 

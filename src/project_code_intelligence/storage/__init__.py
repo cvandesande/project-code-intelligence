@@ -6,8 +6,6 @@ from project_code_intelligence.storage.copy import copy_unchanged_parser_failure
 from project_code_intelligence.storage.core import (
     RecordInsertContext,
     count_unresolved_edge_targets,
-    delete_all_code_intel_data,
-    delete_repo_data,
     insert_edges,
     insert_files,
     insert_parser_failures,
@@ -38,8 +36,6 @@ __all__ = [
     "copy_unchanged_parser_failures",
     "copy_unchanged_records_and_edges",
     "count_unresolved_edge_targets",
-    "delete_all_code_intel_data",
-    "delete_repo_data",
     "ensure_schema",
     "file_signature",
     "insert_edges",

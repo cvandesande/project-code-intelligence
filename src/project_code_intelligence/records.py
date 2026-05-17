@@ -40,10 +40,6 @@ class RecordSpec:
     parent_record_id: str | None = None
 
 
-def line_for_offset(text: str, offset: int) -> int:
-    return text.count("\n", 0, offset) + 1
-
-
 def line_offsets(text: str) -> list[int]:
     return [0, *[match.end() for match in re.finditer(r"\n", text)]]
 

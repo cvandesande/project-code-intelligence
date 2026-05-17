@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 
 from project_code_intelligence.models import IntelEdge, IntelFile, IntelRecord, JsonObject
-from project_code_intelligence.parsers.core import bounded_brace_body, brace_delta
+from project_code_intelligence.parsers.core import advance_block_comment, advance_quote, bounded_brace_body, brace_delta
 from project_code_intelligence.parsers.security import security_api_refs
 from project_code_intelligence.records import (
     RecordSpec,
@@ -18,6 +18,7 @@ from project_code_intelligence.records import (
 
 JS_IDENTIFIER = r"[$A-Za-z_][$A-Za-z0-9_$]*"
 MIN_MEMBER_CALL_PARTS = 2
+MIN_INSTANCE_MEMBER_CALL_PARTS = 3
 JS_FUNCTION_DEF_RE = re.compile(
     rf"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+({JS_IDENTIFIER})"
     r"(?:<[^>{}\n]+>)?\s*\("
@@ -38,6 +39,7 @@ TS_ENUM_RE = re.compile(rf"^\s*(?:export\s+)?enum\s+({JS_IDENTIFIER})\b")
 JS_CALL_RE = re.compile(rf"(?<![A-Za-z0-9_$.])({JS_IDENTIFIER})\s*(?:<[^>\n]+>)?\(")
 JS_MEMBER_CALL_RE = re.compile(rf"(?<![A-Za-z0-9_$])({JS_IDENTIFIER}(?:\.{JS_IDENTIFIER})+)\s*(?:<[^>\n]+>)?\(")
 JS_OWNER_TARGET_METHODS = frozenset({"init"})
+JS_UNRESOLVED_MEMBER_METHODS = frozenset({"run"})
 
 JS_NOISE_CALLS = frozenset({
     "Array",
@@ -108,6 +110,23 @@ class JsSymbolSpec:
     emit_edges: bool
 
 
+@dataclass(frozen=True)
+class JsReference:
+    symbol: str
+    metadata: JsonObject
+
+
+@dataclass
+class JsFunctionSignatureScan:
+    in_block_comment: bool = False
+    quote: str | None = None
+    escape: bool = False
+    paren_depth: int = 0
+    saw_open_paren: bool = False
+    params_closed: bool = False
+    last_significant: str | None = None
+
+
 def statement_body(lines: list[str], start_idx: int, *, max_lines: int = 80, max_chars: int = 4000) -> tuple[int, str]:
     collected: list[str] = []
     for idx in range(start_idx, min(len(lines), start_idx + max_lines)):
@@ -142,37 +161,155 @@ def has_open_brace_before_terminator(lines: list[str], start_idx: int, *, max_si
     return False
 
 
-def js_symbol_body(lines: list[str], start_idx: int, *, braced_preferred: bool) -> tuple[int, str]:
-    if braced_preferred or has_open_brace_before_terminator(lines, start_idx):
+def function_body_is_ready(last_significant: str | None) -> bool:
+    return last_significant not in {None, ":", "=", "("}
+
+
+def advance_js_non_code(line: str, char_idx: int, state: JsFunctionSignatureScan) -> tuple[int, bool] | None:
+    char = line[char_idx]
+    nxt = line[char_idx + 1] if char_idx + 1 < len(line) else ""
+    if state.in_block_comment:
+        next_idx, state.in_block_comment = advance_block_comment(line, char_idx)
+        return next_idx, False
+    if state.quote:
+        next_idx, state.quote, state.escape = advance_quote(char_idx, char, state.quote, escape=state.escape)
+        return next_idx, False
+    if char == "/" and nxt == "*":
+        state.in_block_comment = True
+        return char_idx + 2, False
+    if char == "/" and nxt == "/":
+        return len(line), True
+    if char in {'"', "'", "`"}:
+        state.quote = char
+        return char_idx + 1, False
+    return None
+
+
+def update_js_signature_state(char: str, state: JsFunctionSignatureScan) -> bool:
+    found_body_open = False
+    if char == "(" and not state.params_closed:
+        state.paren_depth += 1
+        state.saw_open_paren = True
+    elif char == ")" and state.saw_open_paren and not state.params_closed:
+        state.paren_depth = max(0, state.paren_depth - 1)
+        state.params_closed = state.paren_depth == 0
+    elif (
+        char == "{"
+        and (state.params_closed or not state.saw_open_paren)
+        and function_body_is_ready(state.last_significant)
+    ):
+        found_body_open = True
+    if char.strip():
+        state.last_significant = char
+    return found_body_open
+
+
+def find_js_function_body_open(lines: list[str], start_idx: int, *, max_lines: int = 260) -> tuple[int, int] | None:
+    state = JsFunctionSignatureScan()
+    for idx in range(start_idx, min(len(lines), start_idx + max_lines)):
+        line = lines[idx]
+        char_idx = 0
+        while char_idx < len(line):
+            advanced = advance_js_non_code(line, char_idx, state)
+            if advanced is not None:
+                char_idx, stop_line = advanced
+                if stop_line:
+                    break
+                continue
+            if update_js_signature_state(line[char_idx], state):
+                return idx, char_idx
+            char_idx += 1
+    return None
+
+
+def bounded_brace_body_from_open(
+    lines: list[str],
+    start_idx: int,
+    open_location: tuple[int, int],
+    *,
+    max_lines: int = 260,
+    max_chars: int = 7200,
+) -> tuple[int, str]:
+    depth = 0
+    end_idx = min(len(lines) - 1, start_idx + max_lines - 1)
+    in_block_comment = False
+    open_idx, open_col = open_location
+    for idx in range(open_idx, min(len(lines), start_idx + max_lines)):
+        line = lines[idx][open_col:] if idx == open_idx else lines[idx]
+        delta, in_block_comment, _saw_open = brace_delta(line, in_block_comment=in_block_comment)
+        depth += delta
+        end_idx = idx
+        if depth <= 0:
+            break
+    body = "\n".join(lines[start_idx : end_idx + 1])
+    if len(body) > max_chars:
+        body = body[: max_chars - 38].rstrip() + "\n/* symbol candidate truncated */"
+    return end_idx + 1, body
+
+
+def js_function_body(
+    lines: list[str], start_idx: int, *, max_lines: int = 260, max_chars: int = 7200
+) -> tuple[int, str]:
+    body_open = find_js_function_body_open(lines, start_idx, max_lines=max_lines)
+    if body_open is None:
+        return statement_body(lines, start_idx)
+    return bounded_brace_body_from_open(lines, start_idx, body_open, max_lines=max_lines, max_chars=max_chars)
+
+
+def js_symbol_body(lines: list[str], start_idx: int, *, kind: str) -> tuple[int, str]:
+    if kind == "function":
+        return js_function_body(lines, start_idx)
+    if kind in {"class", "enum"} or has_open_brace_before_terminator(lines, start_idx):
         line_end, body, _truncated = bounded_brace_body(lines, start_idx, max_lines=260, max_chars=7200)
         return line_end, body
     return statement_body(lines, start_idx)
 
 
-def js_member_call_candidates(body: str) -> set[str]:
-    candidates: set[str] = set()
+def member_call_resolvable(parts: list[str]) -> bool:
+    member = parts[-1]
+    if member in JS_UNRESOLVED_MEMBER_METHODS:
+        return False
+    return not (len(parts) >= MIN_INSTANCE_MEMBER_CALL_PARTS and member[:1].islower())
+
+
+def js_member_call_candidates(body: str) -> list[JsReference]:
+    candidates: dict[str, JsReference] = {}
     for match in JS_MEMBER_CALL_RE.finditer(body):
         parts = [part.strip() for part in match.group(1).split(".") if part.strip()]
         if len(parts) < MIN_MEMBER_CALL_PARTS:
             continue
+        qualifier = ".".join(parts[:-1])
+        full_symbol = match.group(1)
         owner = parts[-2]
         member = parts[-1]
         if member in JS_NOISE_CALLS or member in JS_OWNER_TARGET_METHODS:
             if owner.startswith("$") or owner[:1].isupper():
-                candidates.add(owner)
+                _ = candidates.setdefault(
+                    owner,
+                    JsReference(
+                        symbol=owner,
+                        metadata={"call_kind": "member_owner_call", "member": member, "qualifier": qualifier},
+                    ),
+                )
             continue
-        candidates.add(member)
-    return candidates
+        metadata: JsonObject = {"call_kind": "member_call", "member": member, "qualifier": qualifier}
+        if not member_call_resolvable(parts):
+            metadata["target_resolvable"] = False
+            metadata["full_symbol"] = full_symbol
+        _ = candidates.setdefault(member, JsReference(symbol=member, metadata=metadata))
+    return sorted(candidates.values(), key=lambda item: item.symbol)
 
 
-def js_referenced_symbols(body: str, defined_symbol: str) -> list[str]:
-    refs = {
-        match.group(1)
-        for match in JS_CALL_RE.finditer(body)
-        if match.group(1) != defined_symbol and match.group(1) not in JS_NOISE_CALLS
-    }
-    refs.update(ref for ref in js_member_call_candidates(body) if ref != defined_symbol and ref not in JS_NOISE_CALLS)
-    return sorted(refs)[:120]
+def js_referenced_symbols(body: str, defined_symbol: str) -> list[JsReference]:
+    refs: dict[str, JsReference] = {}
+    for match in JS_CALL_RE.finditer(body):
+        symbol = match.group(1)
+        if symbol != defined_symbol and symbol not in JS_NOISE_CALLS:
+            _ = refs.setdefault(symbol, JsReference(symbol=symbol, metadata={}))
+    for ref in js_member_call_candidates(body):
+        if ref.symbol != defined_symbol and ref.symbol not in JS_NOISE_CALLS:
+            _ = refs.setdefault(ref.symbol, ref)
+    return sorted(refs.values(), key=lambda item: item.symbol)[:120]
 
 
 def covered_code_ranges(records: list[IntelRecord]) -> list[tuple[int, int]]:
@@ -228,10 +365,11 @@ def js_symbol_records(
     spec: JsSymbolSpec,
 ) -> tuple[list[IntelRecord], list[IntelEdge]]:
     refs = js_referenced_symbols(spec.body, spec.name)
+    ref_symbols = [ref.symbol for ref in refs]
     metadata: JsonObject = {
         **common_extracts(spec.body),
         "symbols_defined": [spec.name],
-        "symbols_referenced": refs,
+        "symbols_referenced": ref_symbols,
         "security_sensitive_apis": security_api_refs(spec.body),
         "bounded_symbol_parser": True,
     }
@@ -276,9 +414,10 @@ def js_symbol_records(
             source_record_id=record_id,
             edge_type="call_candidate",
             source_symbol=spec.name,
-            target_symbol=ref,
+            target_symbol=ref.symbol,
             source_path=intel_file.source_path,
             confidence_kind="heuristic_candidate",
+            metadata=ref.metadata,
         )
         for ref in refs[:80]
     ]
@@ -312,7 +451,7 @@ def javascript_records(
             if key in seen:
                 break
             seen.add(key)
-            line_end, body = js_symbol_body(lines, idx, braced_preferred=kind in {"class", "enum", "function"})
+            line_end, body = js_symbol_body(lines, idx, kind=kind)
             symbol_records, symbol_edges = js_symbol_records(
                 intel_file,
                 JsSymbolSpec(
