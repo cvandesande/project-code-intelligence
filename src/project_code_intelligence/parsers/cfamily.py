@@ -791,6 +791,26 @@ def rust_advance_quote_state(char: str, quote: str, *, escape: bool) -> tuple[st
     return quote, False
 
 
+def rust_lifetime_at(text: str, idx: int) -> bool:
+    if idx + 1 >= len(text) or text[idx] != "'":
+        return False
+    if not (text[idx + 1].isalpha() or text[idx + 1] == "_"):
+        return False
+    cursor = idx + 2
+    while cursor < len(text) and (text[cursor].isalnum() or text[cursor] == "_"):
+        cursor += 1
+    return cursor >= len(text) or text[cursor] != "'"
+
+
+def rust_quote_at(text: str, idx: int) -> str | None:
+    char = text[idx]
+    if char in {'"', "`"}:
+        return char
+    if char == "'" and not rust_lifetime_at(text, idx):
+        return char
+    return None
+
+
 def rust_delimited_text(text: str, open_idx: int, open_char: str, close_char: str) -> str | None:
     if open_idx >= len(text) or text[open_idx] != open_char:
         return None
@@ -802,8 +822,8 @@ def rust_delimited_text(text: str, open_idx: int, open_char: str, close_char: st
         if quote:
             quote, escape = rust_advance_quote_state(char, quote, escape=escape)
             continue
-        if char in {'"', "'", "`"}:
-            quote = char
+        if next_quote := rust_quote_at(text, idx):
+            quote = next_quote
         elif char == open_char:
             depth += 1
         elif char == close_char:
@@ -831,8 +851,8 @@ def rust_split_top_level_commas(text: str) -> list[str]:
         if quote:
             quote, escape = rust_advance_quote_state(char, quote, escape=escape)
             continue
-        if char in {'"', "'", "`"}:
-            quote = char
+        if next_quote := rust_quote_at(text, idx):
+            quote = next_quote
         elif char == "," and not delimiter_stack:
             items.append(text[start:idx])
             start = idx + 1
