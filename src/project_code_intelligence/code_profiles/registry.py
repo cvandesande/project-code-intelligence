@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import importlib
-from collections.abc import Callable
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence.code_profiles.base import CodeIntelProfile, GenericProfile
 from project_code_intelligence.code_profiles.example import ExampleProfile
 from project_code_intelligence.exceptions import ProfileLoadError
 
-ProfileFactory = Callable[[], object]
-
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 PROFILE_TYPES = {
     "default": GenericProfile,
@@ -46,7 +45,7 @@ def load_profile(name: str | None) -> CodeIntelProfile:
         if issubclass(value, CodeIntelProfile):
             return value()
     elif callable(value):
-        loaded = cast("ProfileFactory", value)()
+        loaded = cast("Callable[[], object]", value)()
         if isinstance(loaded, CodeIntelProfile):
             return loaded
     raise ProfileLoadError(f"{profile_name!r} did not resolve to a CodeIntelProfile")

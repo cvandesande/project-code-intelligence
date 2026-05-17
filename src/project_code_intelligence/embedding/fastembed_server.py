@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from importlib import import_module
 from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
 if TYPE_CHECKING:
@@ -30,13 +29,24 @@ from project_code_intelligence.embedding.http_common import (
 from project_code_intelligence.embedding.http_common import parse_json_body as _parse_json_body
 from project_code_intelligence.runtime import estimate_embedding_tokens
 
+_fastembed_module: object | None
+_fastembed_import_error: ImportError | None
+if not TYPE_CHECKING:
+    try:
+        import fastembed as _imported_fastembed
+    except ImportError as exc:
+        _fastembed_module = None
+        _fastembed_import_error = exc
+    else:
+        _fastembed_module = _imported_fastembed
+        _fastembed_import_error = None
+else:
+    _fastembed_module = None
+    _fastembed_import_error = None
+
 
 class FastEmbedModel(Protocol):
     def embed(self, documents: list[str]) -> Iterable[object]: ...
-
-
-class FastEmbedFactory(Protocol):
-    def __call__(self, **kwargs: object) -> FastEmbedModel: ...
 
 
 class FastEmbedHTTPServer(ThreadingHTTPServer):
@@ -72,21 +82,19 @@ def fastembed_request_max_bytes() -> int:
 
 
 def load_fastembed_model(model_name: str) -> FastEmbedModel:
-    try:
-        module = import_module("fastembed")
-    except ImportError as exc:
+    if _fastembed_module is None:
         raise RuntimeError(
             "FastEmbed is not installed. Install the local embedding extra with "
             "python -m pip install -e '.[local-embeddings]', or use the Docker Compose cpu profile."
-        ) from exc
-    text_embedding_value = cast("object", getattr(module, "TextEmbedding", None))
+        ) from _fastembed_import_error
+    text_embedding_value = cast("object", getattr(_fastembed_module, "TextEmbedding", None))
     if not callable(text_embedding_value):
         raise TypeError("fastembed.TextEmbedding was not available")
     kwargs: dict[str, object] = {"model_name": model_name}
     cache_dir = fastembed_cache_dir()
     if cache_dir:
         kwargs["cache_dir"] = cache_dir
-    return cast("FastEmbedFactory", text_embedding_value)(**kwargs)
+    return cast("Callable[..., FastEmbedModel]", text_embedding_value)(**kwargs)
 
 
 def vector_values(value: object) -> list[float]:

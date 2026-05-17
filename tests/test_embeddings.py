@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
+import queue
 import unittest
 import urllib.error
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 from typing_extensions import override
 
-from project_code_intelligence import db
+import project_code_intelligence.embedding.preembedding as _preembedding
+import project_code_intelligence.embedding.utils as _embedding_utils
+from project_code_intelligence import db, process
 from project_code_intelligence.embedding.endpoint import clear_embedding_endpoint_framework_cache
 from project_code_intelligence.embeddings import (
     EmbeddingBackend,
@@ -31,14 +36,265 @@ from project_code_intelligence.embeddings import (
     vector_literal_dimensions,
     vector_literals_from_items,
 )
-from project_code_intelligence.models import IntelRecord
+from project_code_intelligence.models import IntelRecord, Snapshot
+from project_code_intelligence.runtime import PreEmbeddingResult, PreEmbeddingState
+from project_code_intelligence.storage import RecordInsertContext
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from project_code_intelligence.models import JsonObject
 
 
 def retry_values(item: str) -> JsonObject:
     return {"item": item}
+
+
+def make_record(
+    record_id: str,
+    *,
+    record_type: str = "code_chunk",
+    embedding: str | None = None,
+    metadata: JsonObject | None = None,
+) -> IntelRecord:
+    return IntelRecord(
+        collection="test",
+        source_path=f"src/{record_id}.py",
+        language="python",
+        file_role="source",
+        content_class="source",
+        record_type=record_type,
+        record_id=record_id,
+        title=record_id,
+        summary="python chunk",
+        embedding_text=f"type: {record_type}\ncontent:\n{record_id}",
+        display_content=record_id,
+        metadata={} if metadata is None else metadata,
+        embedding=embedding,
+    )
+
+
+def insert_context() -> RecordInsertContext:
+    snapshot = Snapshot(
+        collection="test",
+        repo="demo",
+        repo_role="project",
+        branch="main",
+        commit_sha="abc123",
+        tree_sha="tree123",
+        dirty=False,
+    )
+    return RecordInsertContext(
+        conn=cast("db.DbConnection", object()),
+        snapshot=snapshot,
+        snapshot_id=7,
+        file_ids={},
+        file_hashes={},
+    )
+
+
+class FakeThread:
+    def __init__(self, target: object, *, kwargs: dict[str, object], daemon: bool) -> None:
+        self.target = target
+        self.kwargs = kwargs
+        self.daemon = daemon
+        self.started = False
+
+    def start(self) -> None:
+        self.started = True
+
+    @staticmethod
+    def is_alive() -> bool:
+        return False
+
+
+class LlamaEmbeddingUtilsTests(unittest.TestCase):
+    def test_llama_build_command_requires_model_or_default_and_preserves_extra_args(self) -> None:
+        prompt = Path("prompt.txt")
+
+        with (
+            patch.dict(
+                os.environ,
+                {"PROJECT_CODE_INTELLIGENCE_LLAMA_EMBEDDING_BIN": "/opt/llama/bin/embed"},
+                clear=True,
+            ),
+            self.assertRaisesRegex(RuntimeError, "PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL"),
+        ):
+            _ = _embedding_utils.llama.build_command(prompt)
+
+        with patch.dict(
+            os.environ,
+            {
+                "PROJECT_CODE_INTELLIGENCE_LLAMA_EMBEDDING_BIN": "/opt/llama/bin/embed",
+                "PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL": "/models/embed.gguf",
+                "PROJECT_CODE_INTELLIGENCE_LLAMA_EXTRA_ARGS": "--threads 4 --ctx-size 8192",
+            },
+            clear=True,
+        ):
+            command = _embedding_utils.llama.build_command(prompt)
+
+        self.assertEqual(
+            command,
+            [
+                "/opt/llama/bin/embed",
+                "--embd-output-format",
+                "json",
+                "-f",
+                "prompt.txt",
+                "--model",
+                "/models/embed.gguf",
+                "--threads",
+                "4",
+                "--ctx-size",
+                "8192",
+            ],
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "PROJECT_CODE_INTELLIGENCE_LLAMA_CPP_DIR": "/opt/llama",
+                "PROJECT_CODE_INTELLIGENCE_LLAMA_EMBD_GEMMA_DEFAULT": "1",
+            },
+            clear=True,
+        ):
+            default_command = _embedding_utils.llama.build_command(prompt)
+
+        self.assertEqual(default_command[0], "/opt/llama/llama-embedding")
+        self.assertIn("--embd-gemma-default", default_command)
+
+    def test_llama_parse_stdout_extracts_final_json_payload(self) -> None:
+        self.assertEqual(
+            _embedding_utils.llama.parse_llama_stdout('llama log line\n{"embedding":[1,2]}'),
+            {"embedding": [1, 2]},
+        )
+        self.assertEqual(_embedding_utils.llama.parse_llama_stdout("warning\n[1, 2, 3]"), [1, 2, 3])
+
+        with self.assertRaisesRegex(ValueError, "empty stdout"):
+            _ = _embedding_utils.llama.parse_llama_stdout(" \n")
+        with self.assertRaisesRegex(ValueError, "could not find JSON payload"):
+            _ = _embedding_utils.llama.parse_llama_stdout("no json here")
+        with self.assertRaises(json.JSONDecodeError):
+            _ = _embedding_utils.llama.parse_llama_stdout('log\n{"embedding":')
+
+    def test_llama_extract_embedding_accepts_known_shapes_and_rejects_bad_values(self) -> None:
+        self.assertEqual(_embedding_utils.llama.extract_embedding([1, 2.5]), [1.0, 2.5])
+        self.assertEqual(_embedding_utils.llama.extract_embedding([[3, 4]]), [3.0, 4.0])
+        self.assertEqual(_embedding_utils.llama.extract_embedding({"embedding": [5, 6]}), [5.0, 6.0])
+        self.assertEqual(_embedding_utils.llama.extract_embedding({"data": [{"embedding": [7, 8]}]}), [7.0, 8.0])
+
+        bad_payloads: list[object] = [
+            {"data": []},
+            {"embedding": []},
+            {"embedding": [True]},
+            {"embedding": ["bad"]},
+            "bad",
+        ]
+        for payload in bad_payloads:
+            with self.subTest(payload=payload), self.assertRaises((TypeError, ValueError)):
+                _ = _embedding_utils.llama.extract_embedding(payload)
+
+    def test_llama_batch_embeddings_batches_prompts_and_vectors(self) -> None:
+        commands: list[list[str]] = []
+        payloads: list[str] = []
+        run_envs: list[dict[str, str]] = []
+
+        def fake_build_command(prompt_file: Path) -> list[str]:
+            return ["llama-embed", str(prompt_file)]
+
+        def fake_run(
+            command: Sequence[str],
+            options: process.RunOptions | None = None,
+        ) -> process.CompletedProcess[str]:
+            if options is None:
+                raise AssertionError("llama embedding should pass run options")
+            command_list = list(command)
+            commands.append(command_list)
+            payloads.append(Path(command_list[1]).read_text(encoding="utf-8"))
+            if options.env is None:
+                raise AssertionError("llama embedding should pass an environment")
+            run_envs.append(dict(options.env))
+            self.assertTrue(options.check)
+            self.assertTrue(options.capture_output)
+            self.assertEqual(options.timeout, 12)
+            return process.CompletedProcess(command_list, 0, stdout=f"stdout-{len(commands)}")
+
+        def fake_parse(stdout: str) -> JsonObject:
+            payload_by_stdout: dict[str, JsonObject] = {
+                "stdout-1": {"data": [{"embedding": [0.1, 0.2]}, {"embedding": [0.3, 0.4]}]},
+                "stdout-2": {"data": [{"embedding": [0.5, 0.6]}]},
+            }
+            return payload_by_stdout[stdout]
+
+        with (
+            patch.dict(os.environ, {"LD_LIBRARY_PATH": "/existing"}, clear=True),
+            patch.object(_embedding_utils.llama, "build_command", side_effect=fake_build_command),
+            patch.object(_embedding_utils.llama, "llama_dir", return_value=Path("/opt/llama")),
+            patch.object(_embedding_utils.llama, "llama_timeout_seconds", return_value=12),
+            patch.object(_embedding_utils.llama, "parse_llama_stdout", side_effect=fake_parse),
+            patch.object(_embedding_utils.process, "run", side_effect=fake_run),
+        ):
+            vectors = _embedding_utils.llama_batch_embeddings(["alpha", "beta", "gamma"], batch_size=2)
+
+        separator = "<#project-code-intelligence-embedding-separator#>"
+        self.assertEqual(vectors, ["[0.1,0.2]", "[0.3,0.4]", "[0.5,0.6]"])
+        self.assertEqual(payloads, [f"alpha\n{separator}\nbeta", "gamma"])
+        self.assertEqual(commands[0][-2:], ["--embd-separator", separator])
+        self.assertEqual(commands[1][-2:], ["--embd-separator", separator])
+        self.assertEqual(run_envs[0]["LD_LIBRARY_PATH"], "/opt/llama:/existing")
+
+    def test_llama_batch_embeddings_rejects_invalid_inputs_and_response_shape(self) -> None:
+        def fake_build_command(prompt_file: Path) -> list[str]:
+            return ["llama-embed", str(prompt_file)]
+
+        with self.assertRaisesRegex(ValueError, "batch_size"):
+            _ = _embedding_utils.llama_batch_embeddings(["alpha"], batch_size=0)
+        with self.assertRaisesRegex(ValueError, "embedding separator"):
+            _ = _embedding_utils.llama_batch_embeddings(
+                ["alpha <#project-code-intelligence-embedding-separator#> beta"],
+                batch_size=1,
+            )
+
+        with (
+            patch.object(
+                _embedding_utils.llama,
+                "build_command",
+                side_effect=fake_build_command,
+            ),
+            patch.object(_embedding_utils.llama, "llama_dir", return_value=Path("/opt/llama")),
+            patch.object(_embedding_utils.llama, "llama_timeout_seconds", return_value=12),
+            patch.object(_embedding_utils.llama, "parse_llama_stdout", return_value={"data": []}),
+            patch.object(
+                _embedding_utils.process,
+                "run",
+                return_value=process.CompletedProcess(["llama-embed"], 0, stdout="stdout"),
+            ),
+            self.assertRaisesRegex(ValueError, "returned 0 embeddings for a batch of 1 chunks"),
+        ):
+            _ = _embedding_utils.llama_batch_embeddings(["alpha"], batch_size=1)
+
+    def test_llama_batch_embeddings_includes_stderr_tail_on_process_failure(self) -> None:
+        long_stderr = "prefix-" + ("x" * 1300)
+
+        def fake_build_command(prompt_file: Path) -> list[str]:
+            return ["llama-embed", str(prompt_file)]
+
+        with (
+            patch.object(
+                _embedding_utils.llama,
+                "build_command",
+                side_effect=fake_build_command,
+            ),
+            patch.object(_embedding_utils.llama, "llama_dir", return_value=Path("/opt/llama")),
+            patch.object(_embedding_utils.llama, "llama_timeout_seconds", return_value=12),
+            patch.object(
+                _embedding_utils.process,
+                "run",
+                side_effect=process.CalledProcessError(1, ["llama-embed"], stderr=long_stderr),
+            ),
+            self.assertRaisesRegex(RuntimeError, "llama.cpp embedding failed"),
+        ):
+            _ = _embedding_utils.llama_batch_embeddings(["alpha"], batch_size=1)
 
 
 class EmbeddingContractTests(unittest.TestCase):
@@ -252,6 +508,110 @@ class EmbeddingContractTests(unittest.TestCase):
                 "embedding_dimensions": 3,
             },
         )
+
+    def test_start_record_preembedding_selects_only_embedding_eligible_records(self) -> None:
+        selected = make_record("selected")
+        wrong_type = make_record("file-record", record_type="file")
+        already_embedded = make_record("embedded", embedding="[0.1]")
+        skipped = make_record("skipped", metadata={"embedding_skipped": True})
+        run_config = EmbeddingRunConfig(
+            backend=EmbeddingBackend(
+                endpoint="http://127.0.0.1:18081/v1/embeddings", endpoint_model="demo-model", use_llama_cli=False
+            ),
+            max_chars=800,
+        )
+
+        with (
+            patch.object(_preembedding.threading, "Thread", FakeThread),
+            patch.object(_preembedding, "preembedding_ahead_batches", return_value=2),
+            patch.object(_preembedding, "progress_event") as progress_event,
+            patch.object(_preembedding.runtime_state.active_metrics, "add") as metrics_add,
+        ):
+            state = _preembedding.start_record_preembedding(
+                [selected, wrong_type, already_embedded, skipped],
+                record_types={"code_chunk"},
+                batch_size=0,
+                run_config=run_config,
+            )
+
+        if state is None:
+            raise AssertionError("expected preembedding state")
+        self.assertEqual(state.batches, [[selected]])
+        self.assertEqual(state.selected_ids, {id(selected)})
+        self.assertEqual(state.total_records, 1)
+        self.assertEqual(state.results.maxsize, 2)
+        self.assertIsInstance(state.thread, FakeThread)
+        self.assertTrue(cast("FakeThread", state.thread).started)
+        progress_event.assert_called_once()
+        metrics_add.assert_called_once_with("preembedding_records_selected", 1)
+
+    def test_insert_records_with_preembedding_inserts_ready_and_deferred_batches(self) -> None:
+        non_embedding = make_record("file-record", record_type="file")
+        ready = make_record("ready")
+        deferred = make_record("deferred")
+        state = PreEmbeddingState(
+            batches=[[ready], [deferred]],
+            selected_ids={id(ready), id(deferred)},
+            results=queue.Queue[PreEmbeddingResult](),
+            total_records=2,
+        )
+        state.results.put(PreEmbeddingResult(batch=[ready], embedded=1, skipped=0))
+        inserted_batches: list[list[str]] = []
+
+        def fake_insert_records(
+            context: RecordInsertContext,
+            records: list[IntelRecord],
+            progress_fn: object | None = None,
+        ) -> int:
+            _ = context, progress_fn
+            inserted_batches.append([record.record_id for record in records])
+            return len(records)
+
+        with (
+            patch.object(_preembedding, "insert_records", side_effect=fake_insert_records),
+            patch.object(_preembedding, "progress_event") as progress_event,
+        ):
+            inserted, embedded, skipped = _preembedding.insert_records_with_preembedding(
+                insert_context(),
+                [non_embedding, ready, deferred],
+                state,
+            )
+
+        self.assertEqual((inserted, embedded, skipped), (3, 1, 0))
+        self.assertEqual(inserted_batches, [["file-record"], ["ready"], ["deferred"]])
+        self.assertEqual(state.consumed_batches, 2)
+        self.assertTrue(state.cancel_event.is_set())
+        self.assertEqual(progress_event.call_args_list[-1].args[0], "code_intel_preembedding_deferred")
+
+    def test_consume_preembedding_results_falls_back_to_unembedded_insert_on_error(self) -> None:
+        failed = make_record("failed")
+        remaining = make_record("remaining")
+        state = PreEmbeddingState(
+            batches=[[failed], [remaining]],
+            selected_ids={id(failed), id(remaining)},
+            results=queue.Queue[PreEmbeddingResult](),
+            total_records=2,
+        )
+        state.results.put(PreEmbeddingResult(batch=[failed], error=RuntimeError("endpoint failed")))
+        inserted_batches: list[list[str]] = []
+
+        def fake_insert_records(context: RecordInsertContext, records: list[IntelRecord]) -> int:
+            _ = context
+            inserted_batches.append([record.record_id for record in records])
+            return len(records)
+
+        with (
+            patch.object(_preembedding, "insert_records", side_effect=fake_insert_records),
+            patch.object(_preembedding, "progress_event") as progress_event,
+        ):
+            inserted = _preembedding.consume_preembedding_results(insert_context(), state, block=False)
+
+        self.assertEqual(inserted, 2)
+        self.assertEqual(inserted_batches, [["failed", "remaining"]])
+        self.assertTrue(state.cancel_event.is_set())
+        self.assertEqual(state.consumed_batches, 2)
+        progress_event.assert_called_once()
+        self.assertEqual(progress_event.call_args.args[0], "code_intel_preembedding_disabled")
 
     def test_snapshot_embedding_contract_requires_same_model_and_dimensions(self) -> None:
         existing = {"version": 1, "backend": "endpoint", "model": "embed-gemma-300m-FLM", "dimensions": 768}

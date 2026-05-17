@@ -38,7 +38,8 @@ class _TestHandler(FastEmbedHandler):
 
     @override
     def send_header(self, keyword: str, value: str) -> None:
-        pass
+        if not keyword or not value:
+            return
 
     @override
     def end_headers(self) -> None:
