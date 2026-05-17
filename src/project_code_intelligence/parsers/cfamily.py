@@ -432,18 +432,24 @@ def go_records(
 # that happens to share the name.
 RUST_NON_RESOLVABLE_NAMES: frozenset[str] = frozenset({
     # Keywords
+    "all",
+    "any",
     "as",
     "async",
     "await",
     "break",
+    "cfg",
+    "cfg_attr",
     "const",
     "continue",
     "crate",
+    "doc",
     "dyn",
     "else",
     "enum",
     "extern",
     "false",
+    "feature",
     "fn",
     "for",
     "if",
@@ -549,6 +555,9 @@ RUST_ITEM_RE = re.compile(
 )
 RUST_QUALIFIED_CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*(?:<[^>\n(){};]+>)?(?:::[A-Za-z_][A-Za-z0-9_]*)+)\s*\(")
 RUST_SELF_METHOD_CALL_RE = re.compile(r"\bself\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+RUST_RECEIVER_METHOD_CALL_RE = re.compile(
+    r"\b(?!self\b|Self\b)[A-Za-z_][A-Za-z0-9_]*\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\("
+)
 RUST_FN_PARAM_START_RE = re.compile(r"\bfn\s+[A-Za-z_][A-Za-z0-9_]*(?:\s*<[^>{};()]+>)?\s*\(")
 RUST_CLOSURE_PARAMS_RE = re.compile(r"(?:^|[\s=({[,])(?:move\s+)?\|(?P<params>[^|\n{};]{0,240})\|", re.MULTILINE)
 RUST_LOCAL_CLOSURE_BINDING_RE = re.compile(
@@ -615,29 +624,34 @@ def rust_doc_marker_line(prefix: str) -> str:
     return f"{prefix} {RUST_DOC_FENCE_COLLAPSED}" if prefix else RUST_DOC_FENCE_COLLAPSED
 
 
-def rust_collapse_doc_examples(body: str) -> str:
-    lines: list[str] = []
+def rust_collapse_doc_example_lines(lines: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    collapsed: list[tuple[int, str]] = []
     in_block_doc = False
     in_doc_fence = False
-    for line in body.splitlines():
+    for line_no, line in lines:
         stripped = line.lstrip()
         doc_parts = rust_doc_comment_parts(line, in_block_doc=in_block_doc)
         if doc_parts is not None and rust_doc_fence_boundary(doc_parts[1]):
-            lines.append(line)
+            collapsed.append((line_no, line))
             if not in_doc_fence:
-                lines.append(rust_doc_marker_line(doc_parts[0]))
+                collapsed.append((line_no, rust_doc_marker_line(doc_parts[0])))
             in_doc_fence = not in_doc_fence
         elif in_doc_fence and doc_parts is not None:
             pass
         else:
-            lines.append(line)
+            collapsed.append((line_no, line))
 
         starts_block_doc = stripped.startswith(("/**", "/*!"))
         if starts_block_doc and "*/" not in stripped:
             in_block_doc = True
         if in_block_doc and "*/" in stripped:
             in_block_doc = False
-    return "\n".join(lines)
+    return collapsed
+
+
+def rust_collapse_doc_examples(body: str) -> str:
+    lines = list(enumerate(body.splitlines(), 1))
+    return "\n".join(line for _line_no, line in rust_collapse_doc_example_lines(lines))
 
 
 def rust_strip_generic_args(value: str) -> str:
@@ -922,6 +936,34 @@ def rust_local_callable_names(body: str) -> frozenset[str]:
     )
 
 
+def _padding_text(text: str) -> str:
+    return "".join("\n" if char == "\n" else " " for char in text)
+
+
+def rust_attribute_bracket_delta(line: str) -> int:
+    return line.count("[") - line.count("]")
+
+
+def strip_rust_attributes(text: str) -> str:
+    out: list[str] = []
+    in_attribute = False
+    bracket_depth = 0
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        starts_attribute = stripped.startswith(("#[", "#!["))
+        if in_attribute or starts_attribute:
+            out.append(_padding_text(line))
+            bracket_depth += rust_attribute_bracket_delta(line)
+            in_attribute = bracket_depth > 0
+        else:
+            out.append(line)
+    return "".join(out)
+
+
+def rust_receiver_method_names(body: str) -> frozenset[str]:
+    return frozenset(match.group(1) for match in RUST_RECEIVER_METHOD_CALL_RE.finditer(body))
+
+
 def rust_referenced_symbols(
     body: str,
     *,
@@ -930,10 +972,11 @@ def rust_referenced_symbols(
     local_methods: frozenset[str] | None = None,
     defined_symbol: str | None = None,
 ) -> list[str]:
-    body = strip_c_like_comments(body)
+    body = strip_rust_attributes(strip_c_like_comments(body))
     method_names = local_methods or frozenset()
     defined_bare = defined_symbol.rsplit("::", 1)[-1] if defined_symbol else None
     local_callable_names = rust_local_callable_names(body)
+    receiver_method_names = rust_receiver_method_names(body)
     qualified: set[str] = set()
     for match in RUST_QUALIFIED_CALL_RE.finditer(body):
         symbol = str(match.group(1))
@@ -948,7 +991,12 @@ def rust_referenced_symbols(
     qualified_bare = {symbol.rsplit("::", 1)[-1] for symbol in qualified}
     bare: set[str] = set()
     for symbol in extract_referenced_symbols(body):
-        if symbol in qualified_bare or symbol == defined_bare or symbol in local_callable_names:
+        if (
+            symbol in qualified_bare
+            or symbol == defined_bare
+            or symbol in local_callable_names
+            or symbol in receiver_method_names
+        ):
             continue
         if impl_qualifier and symbol in method_names:
             qualified.add(f"{impl_qualifier}::{symbol}")
@@ -965,8 +1013,9 @@ def rust_symbol_subchunks(
     lines: list[str],
 ) -> list[IntelRecord]:
     body_lines = [(line_no, lines[line_no - 1]) for line_no in range(line_start, line_end + 1)]
+    body_lines = rust_collapse_doc_example_lines(body_lines)
     if not body_lines or (
-        line_end - line_start + 1 <= RUST_SUBCHUNK_MIN_LINES
+        len(body_lines) <= RUST_SUBCHUNK_MIN_LINES
         and sum(len(line) + 1 for _no, line in body_lines) <= context.max_chars
     ):
         return []

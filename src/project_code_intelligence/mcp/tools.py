@@ -765,6 +765,9 @@ SEMANTIC_VALIDATION_DISTANCE_PENALTY = 0.16
 SEMANTIC_SOURCE_ROLE_DISTANCE_BOOST = 0.16
 SEMANTIC_NON_SOURCE_DISTANCE_PENALTY = 0.18
 SEMANTIC_GENERATED_DISTANCE_PENALTY = 0.24
+SEMANTIC_DIVERSITY_OVERFETCH_FACTOR = 4
+SEMANTIC_DIVERSITY_MIN_EXTRA_ROWS = 20
+SEMANTIC_DIVERSITY_MAX_SQL_LIMIT = 200
 SEMANTIC_EXECUTABLE_QUERY_TERMS = frozenset({
     "add",
     "added",
@@ -965,6 +968,58 @@ def semantic_non_source_distance_penalty(args: Json, query: str) -> float:
     if query_terms & SEMANTIC_NON_SOURCE_QUERY_TERMS:
         return 0.0
     return SEMANTIC_NON_SOURCE_DISTANCE_PENALTY
+
+
+def semantic_search_diversity_enabled(args: Json) -> bool:
+    if "diversify" in args:
+        return optional_bool(args, "diversify")
+    return not (
+        optional_text(args, "parent_record_id") or optional_text(args, "source_path") or optional_bool(args, "verbose")
+    )
+
+
+def semantic_search_sql_limit(limit: int, *, diversify: bool) -> int:
+    if not diversify:
+        return limit
+    return min(
+        max(limit * SEMANTIC_DIVERSITY_OVERFETCH_FACTOR, limit + SEMANTIC_DIVERSITY_MIN_EXTRA_ROWS),
+        SEMANTIC_DIVERSITY_MAX_SQL_LIMIT,
+    )
+
+
+@dataclass(frozen=True)
+class SemanticSearchLimitPlan:
+    requested: int
+    sql: int
+    diversify: bool
+
+
+def semantic_search_limit_plan(args: Json) -> SemanticSearchLimitPlan:
+    requested = require_int(args, "limit", 10, 1, 50)
+    diversify = semantic_search_diversity_enabled(args)
+    return SemanticSearchLimitPlan(
+        requested=requested,
+        sql=semantic_search_sql_limit(requested, diversify=diversify),
+        diversify=diversify,
+    )
+
+
+def semantic_diversity_key(row: Mapping[str, object]) -> str:
+    return str(row.get("parent_record_id") or row.get("record_id") or "")
+
+
+def diversify_semantic_rows(rows: list[db.DbRow], limit: int) -> list[db.DbRow]:
+    seen: set[str] = set()
+    primary: list[db.DbRow] = []
+    siblings: list[db.DbRow] = []
+    for row in rows:
+        key = semantic_diversity_key(row)
+        if key and key not in seen:
+            seen.add(key)
+            primary.append(row)
+        else:
+            siblings.append(row)
+    return [*primary, *siblings][:limit]
 
 
 def run_text_search_query(
@@ -2053,10 +2108,10 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
     append_default_mixed_search_exclusions(args, clauses, "r")
     embedding, embedding_dimensions = query_embedding(query)
     lexical_terms = semantic_boost_terms(query)
-    rank_terms = semantic_match_terms(args, query)
+    limit_plan = semantic_search_limit_plan(args)
     query_params = [
         embedding,
-        *match_score_params(rank_terms),
+        *match_score_params(semantic_match_terms(args, query)),
         *params,
         semantic_executable_symbol_distance_boost(args, query),
         semantic_structural_symbol_distance_penalty(args, query),
@@ -2064,7 +2119,7 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
         semantic_source_role_distance_boost(args, query),
         semantic_non_source_distance_penalty(args, query),
         semantic_generated_distance_penalty(args, query),
-        require_int(args, "limit", 10, 1, 50),
+        limit_plan.sql,
     ]
     repo_exists: bool | None = None
     with mcp_db.connect() as conn:
@@ -2164,6 +2219,7 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
         ).fetchall()
         if not rows:
             repo_exists = repo_scope_exists(conn, args)
+    rows = diversify_semantic_rows(rows, limit_plan.requested) if limit_plan.diversify else rows[: limit_plan.requested]
     verbose = optional_bool(args, "verbose") or False
     response: Json = {
         "query": query,
