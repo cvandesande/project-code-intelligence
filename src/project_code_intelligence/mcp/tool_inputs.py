@@ -96,6 +96,7 @@ class _SearchFilterArgs(StrictArgs):
     metadata_value: str | None = None
     metadata_contains: dict[str, object] | None = None
     is_untracked: bool | None = None
+    is_generated: bool | None = None
     snapshot_id: int | None = Field(default=None, ge=1)
     include_historical: bool | None = None
     verbose: bool | None = None

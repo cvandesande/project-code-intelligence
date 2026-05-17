@@ -93,6 +93,7 @@ SearchQueryStrategy: TypeAlias = Literal[
 
 SEARCH_TERM_RE = re.compile(r"[A-Za-z0-9_$./:+@-]+")
 IDENTIFIER_QUERY_RE = re.compile(r"[$A-Za-z_][$A-Za-z0-9_$./:+@-]*\Z")
+REGEX_LIKE_QUERY_RE = re.compile(r"(\\[AbBdDsSwWZ]|\(\.\*\)|\.\*|\[[^\]]+\]|\{[0-9,]+\}|\^)")
 SEARCH_OPERATOR_WORDS = frozenset({"and", "or", "not"})
 DEFAULT_MIXED_SEARCH_EXCLUDED_RECORD_TYPES = frozenset({"security_pattern"})
 SECURITY_PATTERN_QUERY_TERMS = frozenset({
@@ -133,7 +134,8 @@ CODE_INTEL_RECORD_SELECT_WEBSEARCH = """
                    ts_rank_cd(r.search_document, websearch_to_tsquery('english', %s)) AS rank,
                    (
                        SELECT coalesce(sum(
-                           CASE WHEN lower(coalesce(r.symbol, '')) = lower(search_terms.term) THEN 40 ELSE 0 END
+                           CASE WHEN coalesce(r.symbol, '') = search_terms.term THEN 120 ELSE 0 END
+                         + CASE WHEN lower(coalesce(r.symbol, '')) = lower(search_terms.term) THEN 80 ELSE 0 END
                          + CASE WHEN lower(coalesce(r.title, '')) = lower(search_terms.term) THEN 32 ELSE 0 END
                          + CASE
                              WHEN r.record_type = 'config_symbol'
@@ -191,7 +193,8 @@ CODE_INTEL_RECORD_SELECT_TERMS = """
                    ) AS rank,
                    (
                        SELECT coalesce(sum(
-                           CASE WHEN lower(coalesce(r.symbol, '')) = lower(search_terms.term) THEN 40 ELSE 0 END
+                           CASE WHEN coalesce(r.symbol, '') = search_terms.term THEN 120 ELSE 0 END
+                         + CASE WHEN lower(coalesce(r.symbol, '')) = lower(search_terms.term) THEN 80 ELSE 0 END
                          + CASE WHEN lower(coalesce(r.title, '')) = lower(search_terms.term) THEN 32 ELSE 0 END
                          + CASE
                              WHEN r.record_type = 'config_symbol'
@@ -237,7 +240,8 @@ CODE_INTEL_RECORD_SELECT_MATCHED_LIST = """
                    NULL::real AS rank,
                    (
                        SELECT coalesce(sum(
-                           CASE WHEN lower(coalesce(r.symbol, '')) = lower(search_terms.term) THEN 40 ELSE 0 END
+                           CASE WHEN coalesce(r.symbol, '') = search_terms.term THEN 120 ELSE 0 END
+                         + CASE WHEN lower(coalesce(r.symbol, '')) = lower(search_terms.term) THEN 80 ELSE 0 END
                          + CASE WHEN lower(coalesce(r.title, '')) = lower(search_terms.term) THEN 32 ELSE 0 END
                          + CASE
                              WHEN r.record_type = 'config_symbol'
@@ -736,10 +740,12 @@ def match_score_params(terms: tuple[str, ...]) -> QueryParams:
 SEMANTIC_BOOST_STOP_WORDS = frozenset({
     "about",
     "after",
+    "are",
     "before",
     "does",
     "happen",
     "happens",
+    "how",
     "into",
     "that",
     "the",
@@ -753,7 +759,75 @@ SEMANTIC_BOOST_STOP_WORDS = frozenset({
 })
 MIN_SEMANTIC_BOOST_TERM_CHARS = 3
 MAX_SEMANTIC_BOOST_TERMS = 8
+SEMANTIC_EXECUTABLE_SYMBOL_DISTANCE_BOOST = 0.12
+SEMANTIC_STRUCTURAL_SYMBOL_DISTANCE_PENALTY = 0.18
+SEMANTIC_VALIDATION_DISTANCE_PENALTY = 0.16
 SEMANTIC_SOURCE_ROLE_DISTANCE_BOOST = 0.16
+SEMANTIC_NON_SOURCE_DISTANCE_PENALTY = 0.18
+SEMANTIC_GENERATED_DISTANCE_PENALTY = 0.24
+SEMANTIC_EXECUTABLE_QUERY_TERMS = frozenset({
+    "add",
+    "added",
+    "adds",
+    "build",
+    "builds",
+    "built",
+    "config",
+    "configuration",
+    "configure",
+    "configured",
+    "configuring",
+    "call",
+    "called",
+    "caller",
+    "calls",
+    "create",
+    "creates",
+    "creating",
+    "emit",
+    "emits",
+    "emitted",
+    "emitting",
+    "execute",
+    "executed",
+    "executes",
+    "flow",
+    "generate",
+    "generated",
+    "generates",
+    "generating",
+    "generation",
+    "handler",
+    "handlers",
+    "implement",
+    "implementation",
+    "implemented",
+    "implements",
+    "invoke",
+    "invoked",
+    "invokes",
+    "logic",
+    "render",
+    "rendered",
+    "rendering",
+    "renders",
+    "run",
+    "runs",
+    "translate",
+    "translated",
+    "translating",
+    "translates",
+    "workflow",
+})
+SEMANTIC_IMPLEMENTATION_SUPPLEMENTAL_TERMS = (
+    "generate",
+    "render",
+    "build",
+    "add",
+    "config",
+    "configuration",
+    "template",
+)
 SEMANTIC_NON_SOURCE_QUERY_TERMS = frozenset({
     "doc",
     "docs",
@@ -774,6 +848,58 @@ SEMANTIC_NON_SOURCE_QUERY_TERMS = frozenset({
     "tests",
     "unit",
 })
+SEMANTIC_STRUCTURAL_QUERY_TERMS = frozenset({
+    "api",
+    "apis",
+    "class",
+    "classes",
+    "crd",
+    "crds",
+    "definition",
+    "definitions",
+    "field",
+    "fields",
+    "interface",
+    "interfaces",
+    "model",
+    "models",
+    "schema",
+    "schemas",
+    "spec",
+    "specs",
+    "struct",
+    "structs",
+    "type",
+    "types",
+    "yaml",
+})
+SEMANTIC_VALIDATION_QUERY_TERMS = frozenset({
+    "validate",
+    "validated",
+    "validates",
+    "validating",
+    "validation",
+    "validator",
+    "validators",
+})
+
+
+def semantic_query_terms(query: str) -> set[str]:
+    return {term.casefold() for term in search_terms(query)}
+
+
+def semantic_has_implementation_intent(args: Json, query: str) -> bool:
+    if optional_text(args, "file_role"):
+        return False
+    content_class = optional_text(args, "content_class")
+    if content_class and content_class != "source":
+        return False
+    query_terms = semantic_query_terms(query)
+    if query_terms & (
+        SEMANTIC_NON_SOURCE_QUERY_TERMS | SEMANTIC_STRUCTURAL_QUERY_TERMS | SEMANTIC_VALIDATION_QUERY_TERMS
+    ):
+        return False
+    return bool(query_terms & SEMANTIC_EXECUTABLE_QUERY_TERMS)
 
 
 def semantic_boost_terms(query: str) -> tuple[str, ...]:
@@ -784,16 +910,61 @@ def semantic_boost_terms(query: str) -> tuple[str, ...]:
     )[:MAX_SEMANTIC_BOOST_TERMS]
 
 
+def semantic_match_terms(args: Json, query: str) -> tuple[str, ...]:
+    terms = list(semantic_boost_terms(query))
+    if semantic_has_implementation_intent(args, query):
+        existing = {term.casefold() for term in terms}
+        for term in SEMANTIC_IMPLEMENTATION_SUPPLEMENTAL_TERMS:
+            if term not in existing:
+                terms.append(term)
+                existing.add(term)
+    return tuple(terms)
+
+
 def semantic_source_role_distance_boost(args: Json, query: str) -> float:
     if optional_text(args, "file_role"):
         return 0.0
     content_class = optional_text(args, "content_class")
     if content_class and content_class != "source":
         return 0.0
-    query_terms = {term.casefold() for term in search_terms(query)}
+    query_terms = semantic_query_terms(query)
     if query_terms & SEMANTIC_NON_SOURCE_QUERY_TERMS:
         return 0.0
     return SEMANTIC_SOURCE_ROLE_DISTANCE_BOOST
+
+
+def semantic_executable_symbol_distance_boost(args: Json, query: str) -> float:
+    return SEMANTIC_EXECUTABLE_SYMBOL_DISTANCE_BOOST if semantic_has_implementation_intent(args, query) else 0.0
+
+
+def semantic_structural_symbol_distance_penalty(args: Json, query: str) -> float:
+    if any(optional_text(args, name) for name in ("source_path", "source_path_prefix", "file_role", "content_class")):
+        return 0.0
+    return SEMANTIC_STRUCTURAL_SYMBOL_DISTANCE_PENALTY if semantic_has_implementation_intent(args, query) else 0.0
+
+
+def semantic_validation_distance_penalty(args: Json, query: str) -> float:
+    if any(optional_text(args, name) for name in ("source_path", "source_path_prefix", "file_role", "content_class")):
+        return 0.0
+    return SEMANTIC_VALIDATION_DISTANCE_PENALTY if semantic_has_implementation_intent(args, query) else 0.0
+
+
+def semantic_generated_distance_penalty(args: Json, query: str) -> float:
+    if any(optional_text(args, name) for name in ("source_path", "source_path_prefix", "file_role", "content_class")):
+        return 0.0
+    query_terms = semantic_query_terms(query)
+    if query_terms & SEMANTIC_NON_SOURCE_QUERY_TERMS:
+        return 0.0
+    return SEMANTIC_GENERATED_DISTANCE_PENALTY
+
+
+def semantic_non_source_distance_penalty(args: Json, query: str) -> float:
+    if any(optional_text(args, name) for name in ("source_path", "source_path_prefix", "file_role", "content_class")):
+        return 0.0
+    query_terms = semantic_query_terms(query)
+    if query_terms & SEMANTIC_NON_SOURCE_QUERY_TERMS:
+        return 0.0
+    return SEMANTIC_NON_SOURCE_DISTANCE_PENALTY
 
 
 def run_text_search_query(
@@ -1501,17 +1672,23 @@ def _execute_text_search(
     return rows, strategy, fallback_reason
 
 
-def _text_search_warnings(strategy: SearchQueryStrategy, fallback_reason: str | None) -> list[Json]:
-    if not strategy.endswith("_fallback"):
-        return []
-    warning: Json = {
-        "kind": "query_strategy_fallback",
-        "query_strategy": strategy,
-        "message": "text search used a broader fallback strategy; ranking may be less precise",
-    }
-    if fallback_reason:
-        warning["fallback_reason"] = fallback_reason
-    return [warning]
+def _text_search_warnings(query: str | None, strategy: SearchQueryStrategy, fallback_reason: str | None) -> list[Json]:
+    warnings: list[Json] = []
+    if query and REGEX_LIKE_QUERY_RE.search(query):
+        warnings.append({
+            "kind": "tokenized_text_search",
+            "message": "text search is tokenized and ranked; regex syntax is treated as ordinary query text",
+        })
+    if strategy.endswith("_fallback"):
+        warning: Json = {
+            "kind": "query_strategy_fallback",
+            "query_strategy": strategy,
+            "message": "text search used a broader fallback strategy; ranking may be less precise",
+        }
+        if fallback_reason:
+            warning["fallback_reason"] = fallback_reason
+        warnings.append(warning)
+    return warnings
 
 
 def related_direction(args: Json) -> RelatedDirection:
@@ -1768,7 +1945,7 @@ def tool_search_code_intel_text(args: Json) -> Json:
     if fallback_reason:
         response["fallback_reason"] = fallback_reason
     warnings = [
-        *_text_search_warnings(strategy, fallback_reason),
+        *_text_search_warnings(query, strategy, fallback_reason),
         *_scope_filter_warnings(args, rows, repo_exists=repo_exists),
     ]
     if warnings:
@@ -1876,12 +2053,17 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
     append_default_mixed_search_exclusions(args, clauses, "r")
     embedding, embedding_dimensions = query_embedding(query)
     lexical_terms = semantic_boost_terms(query)
-    source_role_boost = semantic_source_role_distance_boost(args, query)
+    rank_terms = semantic_match_terms(args, query)
     query_params = [
         embedding,
-        *match_score_params(lexical_terms),
+        *match_score_params(rank_terms),
         *params,
-        source_role_boost,
+        semantic_executable_symbol_distance_boost(args, query),
+        semantic_structural_symbol_distance_penalty(args, query),
+        semantic_validation_distance_penalty(args, query),
+        semantic_source_role_distance_boost(args, query),
+        semantic_non_source_distance_penalty(args, query),
+        semantic_generated_distance_penalty(args, query),
         require_int(args, "limit", 10, 1, 50),
     ]
     repo_exists: bool | None = None
@@ -1901,9 +2083,11 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
                    r.title, r.summary, r.line_start, r.line_end, r.symbol,
                    r.symbol_kind, r.confidence_kind, r.confidence, r.tool, r.rule_id,
                    r.severity, r.updated_at, r.embedding <=> %s::vector AS distance,
+                   coalesce(f.is_generated, false) AS is_generated,
                    (
                        SELECT coalesce(sum(
-                           CASE WHEN lower(coalesce(r.symbol, '')) = lower(search_terms.term) THEN 40 ELSE 0 END
+                           CASE WHEN coalesce(r.symbol, '') = search_terms.term THEN 120 ELSE 0 END
+                         + CASE WHEN lower(coalesce(r.symbol, '')) = lower(search_terms.term) THEN 80 ELSE 0 END
                          + CASE WHEN lower(coalesce(r.title, '')) = lower(search_terms.term) THEN 32 ELSE 0 END
                          + CASE
                              WHEN coalesce(r.symbol, '') ILIKE search_terms.prefix_pattern ESCAPE '\\' THEN 20
@@ -1950,7 +2134,25 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
                          ranked.distance
                          + ranked.quality_penalty
                          - LEAST(ranked.match_score, 80) * 0.01
+                         - CASE
+                             WHEN ranked.symbol_kind IN ('function', 'method', 'shell_function') THEN %s::real
+                             ELSE 0
+                           END
+                         + CASE
+                             WHEN ranked.symbol_kind IN ('struct', 'interface', 'type') THEN %s::real
+                             ELSE 0
+                           END
+                         + CASE
+                             WHEN coalesce(ranked.symbol, '') ILIKE '%%validat%%'
+                               OR coalesce(ranked.title, '') ILIKE '%%validat%%'
+                               OR coalesce(ranked.source_path, '') ILIKE '%%validat%%'
+                               OR coalesce(ranked.record_id, '') ILIKE '%%validat%%'
+                             THEN %s::real
+                             ELSE 0
+                           END
                          - CASE WHEN ranked.file_role = 'source' THEN %s::real ELSE 0 END
+                         + CASE WHEN ranked.content_class <> 'source' THEN %s::real ELSE 0 END
+                         + CASE WHEN ranked.is_generated THEN %s::real ELSE 0 END
                      ) ASC,
                      ranked.distance ASC,
                      ranked.updated_at DESC
@@ -2187,11 +2389,50 @@ def tool_related_code_intel(args: Json) -> Json:
     return ok(response)
 
 
+def static_run_scope_exists(conn: db.DbConnection, args: Json) -> bool:
+    clauses = ["TRUE"]
+    params: QueryParams = []
+    collection = scoped_collection(args)
+    if collection:
+        clauses.append("r.collection = %s")
+        params.append(collection)
+    repo = optional_text(args, "repo")
+    if repo:
+        clauses.append("r.repo = %s")
+        params.append(repo)
+    tool = optional_text(args, "tool")
+    if tool:
+        clauses.append("r.tool_name = %s")
+        params.append(tool)
+    snapshot_clauses, snapshot_params = scoped_snapshot_clauses(args, "r")
+    clauses.extend(snapshot_clauses)
+    params.extend(snapshot_params)
+    return (
+        conn.execute(
+            db.query_sql(
+                query_with_where(
+                    """
+            SELECT 1
+            FROM project_code_intel_static_runs r
+            """,
+                    clauses,
+                    """
+            LIMIT 1
+            """,
+                )
+            ),
+            params,
+        ).fetchone()
+        is not None
+    )
+
+
 def tool_search_static_findings(args: Json) -> Json:
     limit = require_int(args, "limit", 10, 1, 100)
     clauses, params = static_finding_clauses(args)
     params.append(limit)
     repo_exists: bool | None = None
+    static_runs_found: bool | None = None
     with mcp_db.connect() as conn:
         if not table_regclass_exists(conn, "project_code_intel_static_findings"):
             return ok({"error": "static-analysis schema is not initialized"})
@@ -2221,8 +2462,18 @@ def tool_search_static_findings(args: Json) -> Json:
         ).fetchall()
         if not rows:
             repo_exists = repo_scope_exists(conn, args)
+            static_runs_found = static_run_scope_exists(conn, args)
     response: Json = {**snapshot_scope_response(args), "results": cast("JsonValue", rows)}
+    if static_runs_found is not None:
+        response["static_runs_found"] = static_runs_found
     warnings = _scope_filter_warnings(args, rows, repo_exists=repo_exists)
+    if static_runs_found is False:
+        warnings.append({
+            "kind": "static_analysis_not_run",
+            "message": (
+                "no static-analysis runs matched this scope; empty results do not mean a scanner found zero issues"
+            ),
+        })
     if warnings:
         response["warnings"] = warnings
     return ok(response)
