@@ -94,6 +94,7 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "is_generated": {"type": "boolean"},
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
+                "diversify": {"type": "boolean"},
                 "verbose": {"type": "boolean"},
                 "snippet_length": {
                     "type": "integer",

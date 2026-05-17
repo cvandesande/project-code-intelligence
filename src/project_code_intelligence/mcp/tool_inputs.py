@@ -113,6 +113,7 @@ class SearchCodeIntelTextArgs(_SearchFilterArgs):
 class SearchCodeIntelSemanticArgs(_SearchFilterArgs):
     query: str = Field(min_length=1)
     limit: int | None = Field(default=None, ge=1, le=50)
+    diversify: bool | None = None
     snippet_length: int | None = Field(default=None, ge=1, le=800)
 
 

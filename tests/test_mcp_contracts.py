@@ -821,6 +821,49 @@ class McpSemanticSearchTests(unittest.TestCase):
         self.assertNotIn("match_score", result)
         self.assertNotIn("quality_penalty", result)
 
+    def test_semantic_search_diversifies_results_by_parent_by_default(self) -> None:
+        def row(record_id: str, parent_record_id: str) -> dict[str, object]:
+            return {
+                "record_id": record_id,
+                "parent_record_id": parent_record_id,
+                "source_path": "tokio/src/net/unix/datagram/socket.rs",
+                "title": record_id,
+                "summary": record_id,
+                "record_type": "code_chunk",
+                "distance": 0.2,
+                "match_score": 1.0,
+                "quality_penalty": 0.0,
+                "snippet_raw": "```rust\nready();\n```",
+            }
+
+        conn = QueuedConnection([
+            FakeCursor(
+                many=[
+                    row("chunk-a1", "parent-a"),
+                    row("chunk-a2", "parent-a"),
+                    row("chunk-b1", "parent-b"),
+                    row("chunk-a3", "parent-a"),
+                ]
+            )
+        ])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_search_code_intel_semantic({
+                "query": "socket readiness false positive clear readiness loop",
+                "limit": 3,
+            })
+
+        payload = mcp_text_payload(response)
+        results = cast("list[dict[str, object]]", payload["results"])
+        self.assertEqual([result["record_id"] for result in results], ["chunk-a1", "chunk-b1", "chunk-a2"])
+        _query, params = conn.calls[0]
+        self.assertGreater(cast("int", params[-1]), 3)
+
     def test_semantic_search_disables_source_role_boost_for_test_queries(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[])])
 

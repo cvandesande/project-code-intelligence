@@ -1092,6 +1092,38 @@ class RustParserRegressionTests(unittest.TestCase):
             self.assertNotIn(doc_symbol, targets, msg=f"doc example emitted edge to {doc_symbol!r}")
         self.assertIn("Thing::actual", targets)
 
+    def test_rust_symbol_subchunks_collapse_partial_doc_examples(self) -> None:
+        example_lines = [
+            '    /// let client = "client.sock";',
+            '    /// let server = "server.sock";',
+            '    /// assert_eq!("hello world", "hello world");',
+        ] * 12
+        body_lines = [f"        let value_{idx} = {idx};" for idx in range(35)]
+        text = "\n".join([
+            "impl UnixDatagram {",
+            "    /// Opens a datagram socket.",
+            "    ///",
+            "    /// ```no_run",
+            *example_lines,
+            "    /// ```",
+            "    pub fn bind() {",
+            "        Self::ready();",
+            *body_lines,
+            "    }",
+            "    fn ready() {}",
+            "}",
+        ])
+
+        records, _edges = rust_records(fixture_file("src/net/unix/datagram/socket.rs", "rust"), text, 320, 0)
+        chunks = [record for record in records if "::rust_symbol_chunk::" in record.record_id]
+
+        self.assertTrue(chunks)
+        self.assertTrue(any("[rustdoc example collapsed]" in chunk.display_content for chunk in chunks))
+        for chunk in chunks:
+            self.assertNotIn("client.sock", chunk.display_content)
+            self.assertNotIn("server.sock", chunk.display_content)
+            self.assertNotIn("hello world", chunk.display_content)
+
     def test_rust_records_qualify_same_impl_unqualified_method_edges(self) -> None:
         text = "\n".join([
             "pub struct Budget;",
@@ -1160,6 +1192,44 @@ class RustParserRegressionTests(unittest.TestCase):
         self.assertIn("helper", targets)
         self.assertNotIn("f", targets)
         self.assertNotIn("wrapper", targets)
+
+    def test_rust_records_skip_non_self_receiver_method_edges(self) -> None:
+        text = "\n".join([
+            "impl Context {",
+            "    fn defer(&self, waker: Waker) {",
+            "        waker.wake_by_ref();",
+            "        self.clear_ready();",
+            "        free_call();",
+            "    }",
+            "    fn clear_ready(&self) {}",
+            "}",
+            "fn free_call() {}",
+        ])
+
+        _records, edges = rust_records(fixture_file("src/runtime/context.rs", "rust"), text, 2400, 0)
+        targets = {edge.target_symbol for edge in edges}
+
+        self.assertIn("Context::clear_ready", targets)
+        self.assertIn("free_call", targets)
+        self.assertNotIn("wake_by_ref", targets)
+
+    def test_rust_records_skip_cfg_attribute_edges(self) -> None:
+        text = "\n".join([
+            "impl Context {",
+            '    #[cfg(all(tokio_unstable, feature = "time"))]',
+            "    fn maybe_time(&self) {",
+            "        self.clear_ready();",
+            "    }",
+            "    fn clear_ready(&self) {}",
+            "}",
+        ])
+
+        _records, edges = rust_records(fixture_file("src/runtime/context.rs", "rust"), text, 2400, 0)
+        targets = {edge.target_symbol for edge in edges}
+
+        self.assertIn("Context::clear_ready", targets)
+        for attribute_symbol in ("all", "cfg", "feature"):
+            self.assertNotIn(attribute_symbol, targets)
 
 
 class ParserAndRuntimeTests(unittest.TestCase):
