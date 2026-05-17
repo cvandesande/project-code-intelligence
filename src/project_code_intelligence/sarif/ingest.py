@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, cast
 
+from project_code_intelligence import profile_context
 from project_code_intelligence.common import sha256_bytes
 from project_code_intelligence.models import SarifIngest, StaticRun
 from project_code_intelligence.sarif.discovery import discover_sarif_files, explicit_sarif_patterns, repo_for_sarif_file
@@ -34,7 +35,7 @@ from project_code_intelligence.sarif.types import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from project_code_intelligence.models import JsonObject
+    from project_code_intelligence.models import JsonObject, StaticFinding
 
 __all__ = [
     "SarifIngestContext",
@@ -117,6 +118,20 @@ def ensure_sarif_static_run(state: SarifIngestState, run_context: SarifRunContex
     return static_run
 
 
+def annotate_static_source_origin(
+    context: SarifIngestContext,
+    state: SarifIngestState,
+    finding: StaticFinding,
+) -> None:
+    metadata = profile_context.active_profile.static_source_origin_metadata(
+        finding.primary_source_path,
+        context.repos,
+        state.known_source_paths,
+    )
+    if metadata:
+        finding.properties = {**finding.properties, **metadata}
+
+
 def ingest_sarif_result(
     context: SarifIngestContext,
     state: SarifIngestState,
@@ -134,6 +149,7 @@ def ingest_sarif_result(
             "rule_id": finding.rule_id,
         })
         return
+    annotate_static_source_origin(context, state, finding)
     static_run = ensure_sarif_static_run(state, run_context, repo)
     static_run.findings.append(finding)
     state.records_by_repo.setdefault(repo, []).append(

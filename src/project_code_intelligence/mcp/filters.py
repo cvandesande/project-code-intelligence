@@ -186,7 +186,7 @@ def repo_relative_source_path_candidates(args: Json, path: str) -> list[str]:
     return list(dict.fromkeys([path, f"{repo}/{path}"]))
 
 
-def source_path_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]:
+def source_path_column_clauses(args: Json, alias: str, column_name: str) -> tuple[list[str], QueryParams]:
     """Build WHERE clauses for source_path (exact) and source_path_prefix (subtree).
 
     The two filters are mutually exclusive; passing both raises so callers see a
@@ -198,14 +198,15 @@ def source_path_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]
         raise McpProtocolError("source_path and source_path_prefix are mutually exclusive")
     if source_path:
         candidates = repo_relative_source_path_candidates(args, source_path)
+        path_column = column(alias, column_name)
         if len(candidates) == 1:
             if not optional_text(args, "repo"):
                 return (
-                    [f"({column(alias, 'source_path')} = %s OR {column(alias, 'source_path')} LIKE %s ESCAPE '\\')"],
+                    [f"({path_column} = %s OR {path_column} LIKE %s ESCAPE '\\')"],
                     [candidates[0], source_path_suffix_pattern(candidates[0])],
                 )
-            return [f"{column(alias, 'source_path')} = %s"], [candidates[0]]
-        return [f"{column(alias, 'source_path')} = ANY(%s)"], [candidates]
+            return [f"{path_column} = %s"], [candidates[0]]
+        return [f"{path_column} = ANY(%s)"], [candidates]
     if source_path_prefix:
         patterns = [
             source_path_prefix_pattern(candidate)
@@ -214,17 +215,21 @@ def source_path_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]
         if not optional_text(args, "repo"):
             patterns.append(source_path_prefix_suffix_pattern(source_path_prefix))
         if len(patterns) > 1:
-            path_column = column(alias, "source_path")
+            path_column = column(alias, column_name)
             pattern_params: QueryParams = list(patterns)
             return (
                 ["(" + " OR ".join(f"{path_column} LIKE %s ESCAPE '\\'" for _ in patterns) + ")"],
                 pattern_params,
             )
         return (
-            [f"{column(alias, 'source_path')} LIKE %s ESCAPE '\\'"],
+            [f"{column(alias, column_name)} LIKE %s ESCAPE '\\'"],
             [patterns[0]],
         )
     return [], []
+
+
+def source_path_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]:
+    return source_path_column_clauses(args, alias, "source_path")
 
 
 def _metadata_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]:
@@ -295,12 +300,14 @@ def static_finding_clauses(args: Json) -> tuple[list[str], QueryParams]:
         ("level", "f.level"),
         ("baseline_state", "f.baseline_state"),
         ("tool", "r.tool_name"),
-        ("source_path", "f.primary_source_path"),
     ):
         value = optional_text(args, arg_name)
         if value:
             clauses.append(f"{db_column} = %s")
             params.append(value)
+    path_clauses, path_params = source_path_column_clauses(args, "f", "primary_source_path")
+    clauses.extend(path_clauses)
+    params.extend(path_params)
     snapshot_clauses, snapshot_params = scoped_snapshot_clauses(args, "f")
     clauses.extend(snapshot_clauses)
     params.extend(snapshot_params)

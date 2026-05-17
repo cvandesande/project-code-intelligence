@@ -8,11 +8,26 @@ from typing import cast
 
 from project_code_intelligence import db, profile_context
 from project_code_intelligence.code_profiles.base import GenericProfile
-from project_code_intelligence.models import PARSER_VERSION, IntelEdge, IntelFile, IntelRecord, JsonObject, Snapshot
+from project_code_intelligence.models import (
+    PARSER_VERSION,
+    IntelEdge,
+    IntelFile,
+    IntelRecord,
+    JsonObject,
+    Snapshot,
+    StaticCodeFlowStep,
+    StaticFinding,
+    StaticLocation,
+    StaticRule,
+    StaticRun,
+)
 from project_code_intelligence.storage import (
     RecordInsertContext,
+    copy_unchanged_parser_failures,
+    copy_unchanged_records_and_edges,
     file_signature,
     insert_records,
+    insert_static_runs,
     parser_failure_metadata,
     pre_resolve_edge_targets,
     resolve_edge_targets,
@@ -271,6 +286,214 @@ class StorageContractTests(unittest.TestCase):
             ],
         )
 
+    def test_insert_static_runs_persists_normalized_sarif_children(self) -> None:
+        fake = FakeRowsConnection([
+            [{"id": 101}],
+            [],
+            [{"id": 201}],
+            [],
+            [],
+            [],
+            [],
+        ])
+        snapshot = snapshot_fixture()
+        skipped = StaticRun(
+            repo="missing",
+            sarif_path="missing.sarif",
+            sarif_sha256="missing-sha",
+            run_index=0,
+            tool_name="missing-tool",
+        )
+        run = StaticRun(
+            repo=".",
+            sarif_path="report.sarif",
+            sarif_sha256="report-sha",
+            run_index=2,
+            tool_name="ruff",
+            tool_version="1.2.3",
+            semantic_version="1.2.3",
+            information_uri="https://example.invalid/ruff",
+            automation_id="ci",
+            metadata={"b": 2, "a": 1},
+            rules=[
+                StaticRule(
+                    rule_id="F401",
+                    name="unused-import",
+                    short_description="unused import",
+                    full_description="import is unused",
+                    default_level="warning",
+                    help_uri="https://example.invalid/F401",
+                    properties={"z": 1, "a": 2},
+                    metadata={"source": "sarif"},
+                )
+            ],
+            findings=[
+                StaticFinding(
+                    finding_key="finding-1",
+                    rule_id="F401",
+                    rule_index=0,
+                    level="warning",
+                    kind="fail",
+                    message="unused import",
+                    baseline_state="new",
+                    primary_source_path="src/main.py",
+                    primary_uri="file:///repo/src/main.py",
+                    line_start=3,
+                    line_end=3,
+                    column_start=1,
+                    column_end=5,
+                    fingerprints={"stable": "fingerprint"},
+                    suppressions=[{"kind": "external"}],
+                    properties={"precision": "high"},
+                    raw_result={"ruleId": "F401"},
+                    locations=[
+                        StaticLocation(
+                            ordinal=0,
+                            location_kind="primary",
+                            source_path="src/main.py",
+                            uri="file:///repo/src/main.py",
+                            message="unused import",
+                            line_start=3,
+                            line_end=3,
+                            column_start=1,
+                            column_end=5,
+                            snippet="import os",
+                            properties={"region": "primary"},
+                        )
+                    ],
+                    code_flows=[
+                        StaticCodeFlowStep(
+                            flow_index=0,
+                            thread_index=0,
+                            step_index=0,
+                            source_path="src/main.py",
+                            uri="file:///repo/src/main.py",
+                            message="import introduced",
+                            line_start=3,
+                            line_end=3,
+                            column_start=1,
+                            column_end=5,
+                            importance="essential",
+                            properties={"flow": "main"},
+                        )
+                    ],
+                )
+            ],
+        )
+
+        counts = insert_static_runs(
+            cast("db.DbConnection", fake),
+            snapshot_ids_by_repo={".": 7},
+            snapshot_by_repo={".": snapshot},
+            runs=[skipped, run],
+        )
+
+        self.assertEqual(
+            counts,
+            {
+                "static_runs": 1,
+                "static_rules": 1,
+                "static_findings": 1,
+                "static_locations": 1,
+                "static_code_flow_steps": 1,
+            },
+        )
+        self.assertEqual(len(fake.sql), 7)
+        self.assertIn("INSERT INTO project_code_intel_static_runs", fake.sql[0])
+        self.assertEqual(fake.params[0][0:5], [7, "test", ".", "commit", "report.sarif"])
+        self.assertEqual(fake.params[0][12], '{"a":1,"b":2}')
+        self.assertIn("INSERT INTO project_code_intel_static_rules", fake.sql[1])
+        self.assertEqual(fake.params[1][0:4], [101, "test", ".", "F401"])
+        self.assertEqual(fake.params[1][9], '{"a":2,"z":1}')
+        self.assertIn("INSERT INTO project_code_intel_static_findings", fake.sql[2])
+        self.assertEqual(fake.params[2][0:6], [101, 7, "test", ".", "commit", "finding-1"])
+        self.assertEqual(fake.params[2][18], '{"stable":"fingerprint"}')
+        self.assertEqual(fake.params[2][19], '[{"kind":"external"}]')
+        self.assertEqual(fake.params[2][20], '{"precision":"high"}')
+        self.assertEqual(fake.params[2][21], '{"ruleId":"F401"}')
+        self.assertIn("DELETE FROM project_code_intel_static_locations", fake.sql[3])
+        self.assertEqual(fake.params[3], [201])
+        self.assertIn("DELETE FROM project_code_intel_static_code_flows", fake.sql[4])
+        self.assertEqual(fake.params[4], [201])
+        self.assertIn("INSERT INTO project_code_intel_static_locations", fake.sql[5])
+        self.assertEqual(
+            fake.params[5][0:6],
+            [201, 0, "primary", "src/main.py", "file:///repo/src/main.py", "unused import"],
+        )
+        self.assertIn("INSERT INTO project_code_intel_static_code_flows", fake.sql[6])
+        self.assertEqual(
+            fake.params[6][0:7],
+            [201, 0, 0, 0, "src/main.py", "file:///repo/src/main.py", "import introduced"],
+        )
+
+    def test_copy_unchanged_rows_returns_zero_for_empty_or_self_copy_inputs(self) -> None:
+        fake = FakeRowsConnection([])
+        snapshot = snapshot_fixture()
+
+        self.assertEqual(
+            copy_unchanged_parser_failures(
+                cast("db.DbConnection", fake),
+                previous_snapshot_id=None,
+                snapshot=snapshot,
+                snapshot_id=7,
+                unchanged_paths={"src/main.py"},
+            ),
+            0,
+        )
+        self.assertEqual(
+            copy_unchanged_parser_failures(
+                cast("db.DbConnection", fake),
+                previous_snapshot_id=7,
+                snapshot=snapshot,
+                snapshot_id=7,
+                unchanged_paths={"src/main.py"},
+            ),
+            0,
+        )
+        self.assertEqual(
+            copy_unchanged_records_and_edges(
+                cast("db.DbConnection", fake),
+                previous_snapshot_id=6,
+                snapshot=snapshot,
+                snapshot_id=7,
+                unchanged_paths=set(),
+            ),
+            (0, 0),
+        )
+        self.assertEqual(fake.sql, [])
+
+    def test_copy_unchanged_rows_uses_sorted_paths_and_snapshot_metadata(self) -> None:
+        fake = FakeRowsConnection([[{"count": "2"}], [{"count": 3}], [{"count": 4}]])
+        snapshot = snapshot_fixture()
+        paths = {"src/b.py", "src/a.py"}
+
+        parser_failures = copy_unchanged_parser_failures(
+            cast("db.DbConnection", fake),
+            previous_snapshot_id=6,
+            snapshot=snapshot,
+            snapshot_id=7,
+            unchanged_paths=paths,
+        )
+        records, edges = copy_unchanged_records_and_edges(
+            cast("db.DbConnection", fake),
+            previous_snapshot_id=6,
+            snapshot=snapshot,
+            snapshot_id=7,
+            unchanged_paths=paths,
+        )
+
+        self.assertEqual(parser_failures, 2)
+        self.assertEqual((records, edges), (3, 4))
+        self.assertIn("project_code_intel_parser_failures", fake.sql[0])
+        self.assertEqual(fake.params[0], [7, "test", ".", "commit", 6, ["src/a.py", "src/b.py"]])
+        self.assertIn("project_code_intel_records", fake.sql[1])
+        self.assertEqual(
+            fake.params[1],
+            [7, "test", ".", "project", "main", "commit", "tree", 7, 6, ["src/a.py", "src/b.py"]],
+        )
+        self.assertIn("project_code_intel_edges", fake.sql[2])
+        self.assertEqual(fake.params[2], [7, "test", ".", "commit", 6, ["src/a.py", "src/b.py"]])
+
     def test_pre_resolve_edge_targets_uses_same_file_then_same_directory_priority(self) -> None:
         fake = FakeRowsConnection([
             cast(
@@ -317,6 +540,66 @@ class StorageContractTests(unittest.TestCase):
         self.assertEqual(same_dir.target_path, "src/main.py")
         self.assertIsNone(missing.target_record_id)
 
+    def test_pre_resolve_edge_targets_skips_non_resolvable_member_calls(self) -> None:
+        fake = FakeRowsConnection([
+            cast(
+                "list[db.DbRow]",
+                [
+                    {
+                        "symbol": "run",
+                        "record_id": "src/bench.ts::function::run::000001",
+                        "source_path": "src/bench.ts",
+                    },
+                ],
+            )
+        ])
+        member_call = IntelEdge(
+            source_record_id="src/schema.ts::function::parse::000010",
+            edge_type="call_candidate",
+            target_symbol="run",
+            source_path="src/schema.ts",
+            metadata={"call_kind": "member_call", "target_resolvable": False},
+        )
+
+        resolved = pre_resolve_edge_targets(cast("db.DbConnection", fake), 7, [member_call])
+
+        self.assertEqual(resolved, 0)
+        self.assertIsNone(member_call.target_record_id)
+        self.assertEqual(fake.sql, [])
+
+    def test_pre_resolve_edge_targets_prefers_value_symbols_over_type_declarations(self) -> None:
+        fake = FakeRowsConnection([
+            cast(
+                "list[db.DbRow]",
+                [
+                    {
+                        "symbol": "$constructor",
+                        "record_id": "src/core.ts::interface::$constructor::000001",
+                        "source_path": "src/core.ts",
+                        "symbol_kind": "interface",
+                    },
+                    {
+                        "symbol": "$constructor",
+                        "record_id": "src/core.ts::function::$constructor::000020",
+                        "source_path": "src/core.ts",
+                        "symbol_kind": "function",
+                    },
+                ],
+            )
+        ])
+        call = IntelEdge(
+            source_record_id="src/schema.ts::constant::$ZodString::000010",
+            edge_type="call_candidate",
+            target_symbol="$constructor",
+            source_path="src/schema.ts",
+            metadata={"call_kind": "member_call", "member": "$constructor", "qualifier": "core"},
+        )
+
+        resolved = pre_resolve_edge_targets(cast("db.DbConnection", fake), 7, [call])
+
+        self.assertEqual(resolved, 1)
+        self.assertEqual(call.target_record_id, "src/core.ts::function::$constructor::000020")
+
     def test_resolve_edge_targets_batches_candidates_and_reports_progress(self) -> None:
         fake = FakeRowsConnection([
             cast(
@@ -338,6 +621,10 @@ class StorageContractTests(unittest.TestCase):
         self.assertEqual(fake.params[1], [7, "target", "target", "target", 42, 3, 7])
         self.assertIn("candidate_edges AS MATERIALIZED", fake.sql[0])
         self.assertIn("IS NOT DISTINCT FROM", fake.sql[0])
+        self.assertIn("metadata->>'target_resolvable'", fake.sql[0])
+        self.assertIn(
+            "r.symbol_kind IN ('function', 'method', 'constant', 'class', 'enum', 'shell_function')", fake.sql[0]
+        )
 
 
 if __name__ == "__main__":

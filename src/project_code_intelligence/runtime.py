@@ -189,12 +189,6 @@ class RuntimeMetrics:
         with self.lock:
             self.phase_done += value
 
-    def set_phase_progress(self, done: int, total: int | None = None) -> None:
-        with self.lock:
-            self.phase_done = max(0, done)
-            if total is not None:
-                self.phase_total = max(0, total)
-
     def end_phase(self, name: str, metric_field: str) -> None:
         with self.lock:
             if self.active_phase == name and self.active_phase_started is not None:

@@ -126,6 +126,13 @@ CODE_INTEL_RECORD_SELECT_WEBSEARCH = """
                            CASE WHEN lower(coalesce(r.symbol, '')) = lower(search_terms.term) THEN 40 ELSE 0 END
                          + CASE WHEN lower(coalesce(r.title, '')) = lower(search_terms.term) THEN 32 ELSE 0 END
                          + CASE
+                             WHEN r.record_type = 'config_symbol'
+                              AND lower(regexp_replace(coalesce(r.symbol, ''), '^CONFIG_', '', 'i'))
+                                  = lower(search_terms.term)
+                             THEN 80
+                             ELSE 0
+                           END
+                         + CASE
                              WHEN coalesce(r.symbol, '') ILIKE search_terms.prefix_pattern ESCAPE '\\' THEN 20
                              ELSE 0
                            END
@@ -177,6 +184,13 @@ CODE_INTEL_RECORD_SELECT_TERMS = """
                            CASE WHEN lower(coalesce(r.symbol, '')) = lower(search_terms.term) THEN 40 ELSE 0 END
                          + CASE WHEN lower(coalesce(r.title, '')) = lower(search_terms.term) THEN 32 ELSE 0 END
                          + CASE
+                             WHEN r.record_type = 'config_symbol'
+                              AND lower(regexp_replace(coalesce(r.symbol, ''), '^CONFIG_', '', 'i'))
+                                  = lower(search_terms.term)
+                             THEN 80
+                             ELSE 0
+                           END
+                         + CASE
                              WHEN coalesce(r.symbol, '') ILIKE search_terms.prefix_pattern ESCAPE '\\' THEN 20
                              ELSE 0
                            END
@@ -215,6 +229,13 @@ CODE_INTEL_RECORD_SELECT_MATCHED_LIST = """
                        SELECT coalesce(sum(
                            CASE WHEN lower(coalesce(r.symbol, '')) = lower(search_terms.term) THEN 40 ELSE 0 END
                          + CASE WHEN lower(coalesce(r.title, '')) = lower(search_terms.term) THEN 32 ELSE 0 END
+                         + CASE
+                             WHEN r.record_type = 'config_symbol'
+                              AND lower(regexp_replace(coalesce(r.symbol, ''), '^CONFIG_', '', 'i'))
+                                  = lower(search_terms.term)
+                             THEN 80
+                             ELSE 0
+                           END
                          + CASE
                              WHEN coalesce(r.symbol, '') ILIKE search_terms.prefix_pattern ESCAPE '\\' THEN 20
                              ELSE 0
@@ -304,7 +325,38 @@ _COMPACT_RECORD_STRIP = frozenset({
     "embedding_text",
     "embedding_text_truncated",
 })
-_COMPACT_EDGE_STRIP = frozenset({"snapshot_id", "collection", "repo", "commit_sha"})
+_COMPACT_EDGE_KEYS = (
+    "edge_type",
+    "direction",
+    "confidence_kind",
+    "source_symbol",
+    "target_symbol",
+    "source_record_id",
+    "target_record_id",
+    "source_path",
+    "target_path",
+    "source_line_start",
+    "source_line_end",
+    "target_line_start",
+    "target_line_end",
+    "target_resolved",
+    "target_kind",
+    "edge_source",
+)
+_COMPACT_STATUS_SNAPSHOT_KEYS = (
+    "id",
+    "collection",
+    "repo",
+    "repo_role",
+    "branch",
+    "commit_sha",
+    "dirty",
+    "head_commit",
+    "head_matches_snapshot",
+    "head_status",
+    "head_status_reason",
+    "index_age_seconds",
+)
 
 # Per-record metadata fields that are valuable but heavy enough to balloon a
 # compact response. doc_links in particular carries every URL in a README, which
@@ -483,10 +535,19 @@ def _format_records(
     return [fmt(row, snippet_length, snippet_terms) for row in rows]
 
 
+def _compact_edge(row: Mapping[str, object]) -> dict[str, object]:
+    out: dict[str, object] = {}
+    for key in _COMPACT_EDGE_KEYS:
+        value = row.get(key)
+        if value is not None and not _is_compact_noise(key, value):
+            out[key] = value
+    return out
+
+
 def _format_edges(rows: Sequence[Mapping[str, object]], *, verbose: bool) -> list[dict[str, object]]:
     if verbose:
         return [dict(row) for row in rows]
-    return [{k: v for k, v in row.items() if k not in _COMPACT_EDGE_STRIP} for row in rows]
+    return [_compact_edge(row) for row in rows]
 
 
 @dataclass(frozen=True)
@@ -746,6 +807,43 @@ def _annotate_status_snapshots(snapshot_rows: list[db.DbRow]) -> list[Json]:
     return snapshots
 
 
+def _compact_status_snapshots(snapshots: list[Json], *, omit_collection: bool) -> list[Json]:
+    compact: list[Json] = []
+    for snapshot in snapshots:
+        item: Json = {}
+        for key in _COMPACT_STATUS_SNAPSHOT_KEYS:
+            if omit_collection and key == "collection":
+                continue
+            if key in snapshot:
+                item[key] = snapshot[key]
+        compact.append(item)
+    return compact
+
+
+def _status_rows_for_response(rows: list[db.DbRow], *, omit_collection: bool) -> list[Json]:
+    if not omit_collection:
+        return [{key: cast("JsonValue", value) for key, value in row.items()} for row in rows]
+    result: list[Json] = []
+    for row in rows:
+        item: Json = {}
+        for key, value in row.items():
+            if key != "collection":
+                item[key] = cast("JsonValue", value)
+        result.append(item)
+    return result
+
+
+def _status_json_rows_for_response(rows: list[Json], *, omit_collection: bool) -> list[Json]:
+    if not omit_collection:
+        return rows
+    result: list[Json] = []
+    for row in rows:
+        item = dict(row)
+        _ = item.pop("collection", None)
+        result.append(item)
+    return result
+
+
 def _status_file_breakdowns(
     conn: db.DbConnection, filters: StatusFilters, directory_depth: int
 ) -> dict[str, list[db.DbRow]]:
@@ -827,6 +925,8 @@ def _status_queryability(
     snapshots: list[Json],
     records_by_type: list[db.DbRow],
     edges_by_type: list[db.DbRow],
+    *,
+    include_details: bool,
 ) -> Json:
     text_record_types = sorted({
         str(row.get("record_type"))
@@ -843,149 +943,244 @@ def _status_queryability(
     edge_types = sorted({
         str(row.get("edge_type")) for row in edges_by_type if row.get("edge_type") and _positive_int(row.get("edges"))
     })
-    return {
-        "text_record_types": text_record_types,
-        "semantic_record_types": semantic_record_types,
-        "text_only_record_types": sorted(set(text_record_types) - set(semantic_record_types)),
-        "configured_embed_record_types": configured_embed_record_types,
-        "empty_embed_record_types": empty_embed_record_types,
-        "edge_types": edge_types,
+    queryability: dict[str, JsonValue] = {
+        "text_record_type_count": len(text_record_types),
+        "semantic_record_type_count": len(semantic_record_types),
+        "text_only_record_type_count": len(set(text_record_types) - set(semantic_record_types)),
+        "configured_embed_record_type_count": len(configured_embed_record_types),
+        "empty_embed_record_type_count": len(empty_embed_record_types),
+        "edge_type_count": len(edge_types),
+        "has_text": bool(text_record_types),
+        "has_semantic": bool(semantic_record_types),
+        "has_edges": bool(edge_types),
     }
+    if include_details:
+        queryability.update({
+            "text_record_types": text_record_types,
+            "semantic_record_types": semantic_record_types,
+            "text_only_record_types": sorted(set(text_record_types) - set(semantic_record_types)),
+            "configured_embed_record_types": configured_embed_record_types,
+            "empty_embed_record_types": empty_embed_record_types,
+            "edge_types": edge_types,
+        })
+    return queryability
 
 
-def tool_code_intel_status(args: Json) -> Json:
-    filters = status_filters(args)
-    directory_depth = require_int(args, "directory_depth", 1, 1, 5)
-    with mcp_db.connect() as conn:
-        if not code_intel_tables_exist(conn):
-            return ok({"schema_present": False})
-        validate_explicit_snapshot_id(conn, args)
-        schema_versions = (
-            schema_migration_versions(conn)
-            if table_regclass_exists(conn, "project_code_intel_schema_migrations")
-            else []
-        )
-        snapshot_rows = conn.execute(
-            db.query_sql(
-                query_with_where(
-                    """
+@dataclass(frozen=True)
+class StatusIncludeFlags:
+    verbose: bool
+    snapshots: bool
+    record_types: bool
+    queryability: bool
+    breakdowns: bool
+    static_summary: bool
+
+
+@dataclass(frozen=True)
+class StatusRows:
+    schema_versions: list[str]
+    snapshots: list[Json]
+    records: list[db.DbRow]
+    records_by_type: list[db.DbRow]
+    files: list[db.DbRow]
+    edges: list[db.DbRow]
+    edge_types: list[db.DbRow]
+    breakdowns: dict[str, list[db.DbRow]] | None
+    static_rows: tuple[list[db.DbRow], list[db.DbRow]] | None
+
+
+def _status_include_flags(args: Json) -> StatusIncludeFlags:
+    verbose = optional_bool(args, "verbose") or False
+    return StatusIncludeFlags(
+        verbose=verbose,
+        snapshots=verbose or (optional_bool(args, "include_snapshots") or False),
+        record_types=verbose or (optional_bool(args, "include_record_types") or False),
+        queryability=verbose or (optional_bool(args, "include_queryability") or False),
+        breakdowns=verbose or (optional_bool(args, "include_breakdowns") or False),
+        static_summary=verbose or (optional_bool(args, "include_static_summary") or False),
+    )
+
+
+def _status_scope_response(args: Json) -> tuple[Json, bool]:
+    result = snapshot_scope_response(args)
+    collection = scoped_collection(args)
+    if collection:
+        result["collection"] = collection
+    repo = optional_text(args, "repo")
+    if repo:
+        result["repo"] = repo
+    return result, collection is not None
+
+
+def _load_status_rows(
+    conn: db.DbConnection,
+    filters: StatusFilters,
+    includes: StatusIncludeFlags,
+    directory_depth: int,
+) -> StatusRows:
+    schema_versions = (
+        schema_migration_versions(conn) if table_regclass_exists(conn, "project_code_intel_schema_migrations") else []
+    )
+    snapshot_rows = conn.execute(
+        db.query_sql(
+            query_with_where(
+                """
             SELECT s.id, s.collection, s.repo, s.repo_role, s.branch, s.commit_sha,
                    s.tree_sha, s.dirty, s.metadata, s.created_at
             FROM project_code_intel_snapshots s
 """,
-                    filters.snapshots.clauses,
-                    """
+                filters.snapshots.clauses,
+                """
             ORDER BY s.created_at DESC, s.collection, s.repo
             LIMIT %s
             """,
-                )
-            ),
-            [*filters.snapshots.params, mcp_db.mcp_max_status_rows()],
-        ).fetchall()
-        snapshots = _annotate_status_snapshots(snapshot_rows)
-        counts = conn.execute(
-            db.query_sql(
-                query_with_where(
-                    """
+            )
+        ),
+        [*filters.snapshots.params, mcp_db.mcp_max_status_rows()],
+    ).fetchall()
+    snapshots = _annotate_status_snapshots(snapshot_rows)
+    records = conn.execute(
+        db.query_sql(
+            query_with_where(
+                """
             SELECT r.collection, r.repo, count(*) AS records, count(r.embedding) AS embedded_records
             FROM project_code_intel_records r
             """,
-                    filters.records.clauses,
-                    """
+                filters.records.clauses,
+                """
             GROUP BY r.collection, r.repo
             ORDER BY r.collection, r.repo
             """,
-                )
-            ),
-            filters.records.params,
-        ).fetchall()
-        by_type = conn.execute(
-            db.query_sql(
-                query_with_where(
-                    """
+            )
+        ),
+        filters.records.params,
+    ).fetchall()
+    records_by_type = conn.execute(
+        db.query_sql(
+            query_with_where(
+                """
             SELECT r.collection, r.repo, r.record_type,
                    count(*) AS count,
                    count(r.embedding) AS embedded_records
             FROM project_code_intel_records r
             """,
-                    filters.records.clauses,
-                    """
+                filters.records.clauses,
+                """
             GROUP BY r.collection, r.repo, r.record_type
             ORDER BY r.collection, r.repo, r.record_type
             """,
-                )
-            ),
-            filters.records.params,
-        ).fetchall()
-        files = conn.execute(
-            db.query_sql(
-                query_with_where(
-                    """
+            )
+        ),
+        filters.records.params,
+    ).fetchall()
+    files = conn.execute(
+        db.query_sql(
+            query_with_where(
+                """
             SELECT f.collection, f.repo, count(*) AS files,
                    count(*) FILTER (WHERE f.skipped_reason IS NOT NULL) AS skipped_files,
                    count(*) FILTER (WHERE f.is_untracked) AS untracked_files,
                    count(*) FILTER (WHERE f.indexed_dirty AND NOT f.is_untracked) AS dirty_files
             FROM project_code_intel_files f
             """,
-                    filters.files.clauses,
-                    """
+                filters.files.clauses,
+                """
             GROUP BY f.collection, f.repo
             ORDER BY f.collection, f.repo
             """,
-                )
-            ),
-            filters.files.params,
-        ).fetchall()
-        edges = conn.execute(
-            db.query_sql(
-                query_with_where(
-                    """
+            )
+        ),
+        filters.files.params,
+    ).fetchall()
+    edges = conn.execute(
+        db.query_sql(
+            query_with_where(
+                """
             SELECT e.collection, e.repo, count(*) AS edges
             FROM project_code_intel_edges e
             """,
-                    filters.edges.clauses,
-                    """
+                filters.edges.clauses,
+                """
             GROUP BY e.collection, e.repo
             ORDER BY e.collection, e.repo
             """,
-                )
-            ),
-            filters.edges.params,
-        ).fetchall()
-        edge_types = conn.execute(
-            db.query_sql(
-                query_with_where(
-                    """
+            )
+        ),
+        filters.edges.params,
+    ).fetchall()
+    edge_types = conn.execute(
+        db.query_sql(
+            query_with_where(
+                """
             SELECT e.edge_type, count(*) AS edges
             FROM project_code_intel_edges e
             """,
-                    filters.edges.clauses,
-                    """
+                filters.edges.clauses,
+                """
             GROUP BY e.edge_type
             ORDER BY e.edge_type
             """,
-                )
-            ),
-            filters.edges.params,
-        ).fetchall()
-        breakdowns = _status_file_breakdowns(conn, filters, directory_depth)
-        static_runs, static_findings = static_status_rows(conn, filters)
-    queryability = _status_queryability(snapshots, by_type, edge_types)
-    return ok({
+            )
+        ),
+        filters.edges.params,
+    ).fetchall()
+    return StatusRows(
+        schema_versions=schema_versions,
+        snapshots=snapshots,
+        records=records,
+        records_by_type=records_by_type,
+        files=files,
+        edges=edges,
+        edge_types=edge_types,
+        breakdowns=_status_file_breakdowns(conn, filters, directory_depth) if includes.breakdowns else None,
+        static_rows=static_status_rows(conn, filters) if includes.static_summary else None,
+    )
+
+
+def tool_code_intel_status(args: Json) -> Json:
+    filters = status_filters(args)
+    directory_depth = require_int(args, "directory_depth", 1, 1, 5)
+    includes = _status_include_flags(args)
+    scope_response, collection_scoped = _status_scope_response(args)
+    omit_scoped_collection = collection_scoped and not includes.verbose
+    with mcp_db.connect() as conn:
+        if not code_intel_tables_exist(conn):
+            return ok({"schema_present": False})
+        validate_explicit_snapshot_id(conn, args)
+        rows = _load_status_rows(conn, filters, includes, directory_depth)
+    queryability = _status_queryability(
+        rows.snapshots,
+        rows.records_by_type,
+        rows.edge_types,
+        include_details=includes.queryability,
+    )
+    response: dict[str, object] = {
         "schema_present": True,
-        "schema_versions": schema_versions,
-        **snapshot_scope_response(args),
-        "snapshots": snapshots,
-        "files": files,
-        "records": counts,
-        "records_by_type": by_type,
-        "edges": edges,
+        "schema_versions": rows.schema_versions,
+        **scope_response,
+        "snapshots": (
+            _status_json_rows_for_response(rows.snapshots, omit_collection=omit_scoped_collection)
+            if includes.snapshots
+            else _compact_status_snapshots(rows.snapshots, omit_collection=omit_scoped_collection)
+        ),
+        "files": _status_rows_for_response(rows.files, omit_collection=omit_scoped_collection),
+        "records": _status_rows_for_response(rows.records, omit_collection=omit_scoped_collection),
+        "edges": _status_rows_for_response(rows.edges, omit_collection=omit_scoped_collection),
         "queryability": queryability,
-        "language_breakdown": breakdowns["language"],
-        "directory_breakdown": breakdowns["directory"],
-        "static_runs": static_runs,
-        "static_findings": static_findings,
-    })
+    }
+    if includes.record_types:
+        response["records_by_type"] = _status_rows_for_response(
+            rows.records_by_type,
+            omit_collection=omit_scoped_collection,
+        )
+    if rows.breakdowns is not None:
+        response["language_breakdown"] = rows.breakdowns["language"]
+        response["directory_breakdown"] = rows.breakdowns["directory"]
+    if rows.static_rows is not None:
+        static_runs, static_findings = rows.static_rows
+        response["static_runs"] = static_runs
+        response["static_findings"] = static_findings
+    return ok(response)
 
 
 def _execute_text_search(
@@ -1093,7 +1288,7 @@ def annotate_related_edges(
         target_resolved = related_edge_target_resolved(edge)
         edge["direction"] = edge_direction
         edge["target_resolved"] = target_resolved
-        edge["target_kind"] = "project_symbol" if target_resolved else "unresolved"
+        edge["target_kind"] = "project_symbol" if target_resolved else unresolved_edge_target_kind(edge)
         if context.record_id and context.parent_record_ids:
             edge["edge_source"] = (
                 "parent_record"
@@ -1107,6 +1302,13 @@ def annotate_related_edges(
         )
     )
     return edges
+
+
+def unresolved_edge_target_kind(edge: Mapping[str, object]) -> str:
+    metadata = edge.get("metadata")
+    if isinstance(metadata, Mapping) and cast("Mapping[object, object]", metadata).get("call_kind") == "member_call":
+        return "member_call"
+    return "unresolved"
 
 
 def related_edge_target_resolved(edge: Mapping[str, object]) -> bool:

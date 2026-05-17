@@ -28,6 +28,12 @@ class CodeIntelStatusArgs(StrictArgs):
     snapshot_id: int | None = Field(default=None, ge=1)
     include_historical: bool | None = None
     directory_depth: int | None = Field(default=None, ge=1, le=5)
+    verbose: bool | None = None
+    include_snapshots: bool | None = None
+    include_record_types: bool | None = None
+    include_queryability: bool | None = None
+    include_breakdowns: bool | None = None
+    include_static_summary: bool | None = None
 
 
 class _SearchFilterArgs(StrictArgs):
@@ -136,6 +142,7 @@ class SearchStaticFindingsArgs(StrictArgs):
     level: str | None = None
     baseline_state: str | None = None
     source_path: str | None = None
+    source_path_prefix: str | None = None
     snapshot_id: int | None = Field(default=None, ge=1)
     include_historical: bool | None = None
 

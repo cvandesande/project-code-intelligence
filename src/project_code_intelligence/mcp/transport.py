@@ -9,7 +9,7 @@ import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from project_code_intelligence import db, progress
+from project_code_intelligence import config, db, progress
 from project_code_intelligence.common import default_collection
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError, McpWritePermissionError
 from project_code_intelligence.mcp.protocol import (
@@ -31,8 +31,11 @@ PROTOCOL_VERSION = "2024-11-05"
 
 
 def set_mcp_environment_defaults() -> None:
+    cwd = Path.cwd().resolve()
+    if config.DATABASE_SCOPE_PATH_ENV not in os.environ:
+        os.environ[config.DATABASE_SCOPE_PATH_ENV] = str(cwd)
     if "PROJECT_CODE_INTELLIGENCE_COLLECTION" not in os.environ:
-        os.environ["PROJECT_CODE_INTELLIGENCE_COLLECTION"] = default_collection(Path.cwd().resolve())
+        os.environ["PROJECT_CODE_INTELLIGENCE_COLLECTION"] = default_collection(cwd)
         os.environ["PROJECT_CODE_INTELLIGENCE_COLLECTION_DEFAULTED"] = "1"
 
 

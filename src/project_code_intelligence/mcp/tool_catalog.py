@@ -30,7 +30,7 @@ _SNIPPET_LENGTH_DESC = "Snippet chars, default 300."
 
 TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
     "code_intel_status": ToolDefinition(
-        "Index status: snapshots, counts, queryability, language/directory rollups.",
+        "Index status. Compact by default; verbose/flags add rollups and full snapshots.",
         {
             "type": "object",
             "properties": {
@@ -39,6 +39,15 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
                 "directory_depth": {"type": "integer", "minimum": 1, "maximum": 5},
+                "verbose": {"type": "boolean"},
+                "include_snapshots": {"type": "boolean"},
+                "include_record_types": {"type": "boolean"},
+                "include_queryability": {
+                    "type": "boolean",
+                    "description": "Full queryability record-type lists.",
+                },
+                "include_breakdowns": {"type": "boolean"},
+                "include_static_summary": {"type": "boolean"},
             },
             "additionalProperties": False,
         },
@@ -226,6 +235,7 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "level": {"type": "string"},
                 "baseline_state": {"type": "string"},
                 "source_path": {"type": "string", "description": _SOURCE_PATH_DESC},
+                "source_path_prefix": {"type": "string", "description": _SOURCE_PATH_PREFIX_DESC},
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
             },
