@@ -38,6 +38,7 @@ from project_code_intelligence.mcp.protocol import (
     scoped_collection,
 )
 from project_code_intelligence.mcp.tool_catalog import TOOL_DEFINITIONS, ToolDefinition
+from project_code_intelligence.models import SOURCE_LANGUAGES
 from project_code_intelligence.storage import row_int, schema_migration_versions
 
 if TYPE_CHECKING:
@@ -2709,6 +2710,249 @@ def tool_get_static_code_flow(args: Json) -> Json:
     return ok({"found": True, "finding_id": finding_id, "flow_index": flow_index, "steps": rows})
 
 
+LIST_CODE_INTEL_FILES_SELECT_SLIM = """
+            WITH record_backed_files AS (
+                SELECT
+                    NULL::bigint AS id,
+                    r.snapshot_id,
+                    r.collection,
+                    r.repo,
+                    r.repo_role,
+                    r.branch,
+                    r.commit_sha,
+                    r.tree_sha,
+                    r.source_path,
+                    NULL::text AS git_blob_sha,
+                    max(r.file_sha256) AS file_sha256,
+                    NULL::bigint AS size_bytes,
+                    (array_agg(r.language ORDER BY r.id))[1] AS language,
+                    (array_agg(r.file_role ORDER BY r.id))[1] AS file_role,
+                    (array_agg(r.content_class ORDER BY r.id))[1] AS content_class,
+                    bool_or(r.file_role = 'generated' OR r.content_class = 'generated') AS is_generated,
+                    bool_or(r.file_role = 'vendor' OR r.content_class = 'vendor') AS is_vendor,
+                    bool_or(r.file_role = 'test' OR r.content_class = 'test') AS is_test,
+                    bool_or(
+                        r.file_role IN ('source', 'source-include')
+                        OR r.content_class = 'source'
+                        OR r.language = ANY(%s::text[])
+                    ) AS is_source,
+                    bool_or(
+                        r.file_role IN ('build', 'build-include', 'build-script', 'package', 'project-manifest')
+                        OR r.content_class = 'build'
+                    ) AS is_build,
+                    bool_or(r.file_role = 'config' OR r.content_class = 'config') AS is_config,
+                    bool_or(r.file_role = 'doc' OR r.content_class = 'doc' OR r.language = 'doc') AS is_doc,
+                    NULL::text AS skipped_reason,
+                    false AS is_untracked,
+                    false AS indexed_dirty,
+                    jsonb_build_object('inventory_source', 'records') AS metadata,
+                    min(r.created_at) AS created_at
+                FROM project_code_intel_records r
+                LEFT JOIN project_code_intel_files existing
+                  ON existing.snapshot_id = r.snapshot_id
+                 AND existing.source_path = r.source_path
+                WHERE existing.id IS NULL
+                GROUP BY
+                    r.snapshot_id,
+                    r.collection,
+                    r.repo,
+                    r.repo_role,
+                    r.branch,
+                    r.commit_sha,
+                    r.tree_sha,
+                    r.source_path
+            ),
+            file_inventory AS (
+                SELECT
+                    f.id,
+                    f.snapshot_id,
+                    f.collection,
+                    f.repo,
+                    f.repo_role,
+                    f.branch,
+                    f.commit_sha,
+                    f.tree_sha,
+                    f.source_path,
+                    f.git_blob_sha,
+                    f.file_sha256,
+                    f.size_bytes,
+                    f.language,
+                    f.file_role,
+                    f.content_class,
+                    f.is_generated,
+                    f.is_vendor,
+                    f.is_test,
+                    f.is_source,
+                    f.is_build,
+                    f.is_config,
+                    f.is_doc,
+                    f.skipped_reason,
+                    f.is_untracked,
+                    f.indexed_dirty,
+                    f.metadata,
+                    f.created_at
+                FROM project_code_intel_files f
+                UNION ALL
+                SELECT
+                    id,
+                    snapshot_id,
+                    collection,
+                    repo,
+                    repo_role,
+                    branch,
+                    commit_sha,
+                    tree_sha,
+                    source_path,
+                    git_blob_sha,
+                    file_sha256,
+                    size_bytes,
+                    language,
+                    file_role,
+                    content_class,
+                    is_generated,
+                    is_vendor,
+                    is_test,
+                    is_source,
+                    is_build,
+                    is_config,
+                    is_doc,
+                    skipped_reason,
+                    is_untracked,
+                    indexed_dirty,
+                    metadata,
+                    created_at
+                FROM record_backed_files
+            )
+            SELECT f.id, f.source_path, f.size_bytes, f.language, f.file_role, f.content_class,
+                   f.is_generated, f.is_vendor, f.is_test, f.is_source, f.is_build,
+                   f.is_config, f.is_doc, f.skipped_reason
+            FROM file_inventory f
+            """
+
+
+LIST_CODE_INTEL_FILES_SELECT_FULL = """
+            WITH record_backed_files AS (
+                SELECT
+                    NULL::bigint AS id,
+                    r.snapshot_id,
+                    r.collection,
+                    r.repo,
+                    r.repo_role,
+                    r.branch,
+                    r.commit_sha,
+                    r.tree_sha,
+                    r.source_path,
+                    NULL::text AS git_blob_sha,
+                    max(r.file_sha256) AS file_sha256,
+                    NULL::bigint AS size_bytes,
+                    (array_agg(r.language ORDER BY r.id))[1] AS language,
+                    (array_agg(r.file_role ORDER BY r.id))[1] AS file_role,
+                    (array_agg(r.content_class ORDER BY r.id))[1] AS content_class,
+                    bool_or(r.file_role = 'generated' OR r.content_class = 'generated') AS is_generated,
+                    bool_or(r.file_role = 'vendor' OR r.content_class = 'vendor') AS is_vendor,
+                    bool_or(r.file_role = 'test' OR r.content_class = 'test') AS is_test,
+                    bool_or(
+                        r.file_role IN ('source', 'source-include')
+                        OR r.content_class = 'source'
+                        OR r.language = ANY(%s::text[])
+                    ) AS is_source,
+                    bool_or(
+                        r.file_role IN ('build', 'build-include', 'build-script', 'package', 'project-manifest')
+                        OR r.content_class = 'build'
+                    ) AS is_build,
+                    bool_or(r.file_role = 'config' OR r.content_class = 'config') AS is_config,
+                    bool_or(r.file_role = 'doc' OR r.content_class = 'doc' OR r.language = 'doc') AS is_doc,
+                    NULL::text AS skipped_reason,
+                    false AS is_untracked,
+                    false AS indexed_dirty,
+                    jsonb_build_object('inventory_source', 'records') AS metadata,
+                    min(r.created_at) AS created_at
+                FROM project_code_intel_records r
+                LEFT JOIN project_code_intel_files existing
+                  ON existing.snapshot_id = r.snapshot_id
+                 AND existing.source_path = r.source_path
+                WHERE existing.id IS NULL
+                GROUP BY
+                    r.snapshot_id,
+                    r.collection,
+                    r.repo,
+                    r.repo_role,
+                    r.branch,
+                    r.commit_sha,
+                    r.tree_sha,
+                    r.source_path
+            ),
+            file_inventory AS (
+                SELECT
+                    f.id,
+                    f.snapshot_id,
+                    f.collection,
+                    f.repo,
+                    f.repo_role,
+                    f.branch,
+                    f.commit_sha,
+                    f.tree_sha,
+                    f.source_path,
+                    f.git_blob_sha,
+                    f.file_sha256,
+                    f.size_bytes,
+                    f.language,
+                    f.file_role,
+                    f.content_class,
+                    f.is_generated,
+                    f.is_vendor,
+                    f.is_test,
+                    f.is_source,
+                    f.is_build,
+                    f.is_config,
+                    f.is_doc,
+                    f.skipped_reason,
+                    f.is_untracked,
+                    f.indexed_dirty,
+                    f.metadata,
+                    f.created_at
+                FROM project_code_intel_files f
+                UNION ALL
+                SELECT
+                    id,
+                    snapshot_id,
+                    collection,
+                    repo,
+                    repo_role,
+                    branch,
+                    commit_sha,
+                    tree_sha,
+                    source_path,
+                    git_blob_sha,
+                    file_sha256,
+                    size_bytes,
+                    language,
+                    file_role,
+                    content_class,
+                    is_generated,
+                    is_vendor,
+                    is_test,
+                    is_source,
+                    is_build,
+                    is_config,
+                    is_doc,
+                    skipped_reason,
+                    is_untracked,
+                    indexed_dirty,
+                    metadata,
+                    created_at
+                FROM record_backed_files
+            )
+            SELECT f.id, f.snapshot_id, f.collection, f.repo, f.repo_role, f.branch,
+                   f.commit_sha, f.tree_sha, f.source_path, f.git_blob_sha, f.file_sha256,
+                   f.size_bytes, f.language, f.file_role, f.content_class,
+                   f.is_generated, f.is_vendor, f.is_test, f.is_source, f.is_build,
+                   f.is_config, f.is_doc, f.skipped_reason, f.is_untracked,
+                   f.indexed_dirty, f.metadata, f.created_at
+            FROM file_inventory f
+            """
+
+
 def tool_list_code_intel_files(args: Json) -> Json:
     limit = require_int(args, "limit", 50, 1, 500)
     clauses, params = scoped_collection_repo_clauses(args, "f")
@@ -2737,22 +2981,7 @@ def tool_list_code_intel_files(args: Json) -> Json:
     if optional_bool(args, "only_skipped"):
         clauses.append("f.skipped_reason IS NOT NULL")
     verbose = optional_bool(args, "verbose") or False
-    params.append(limit)
-
-    files_select_slim = """
-            SELECT f.id, f.source_path, f.size_bytes, f.language, f.file_role, f.content_class,
-                   f.is_generated, f.is_vendor, f.is_test, f.is_source, f.is_build,
-                   f.is_config, f.is_doc, f.skipped_reason
-            FROM project_code_intel_files f
-            """
-    files_select_full = """
-            SELECT f.id, f.snapshot_id, f.collection, f.repo, f.repo_role, f.branch,
-                   f.commit_sha, f.tree_sha, f.source_path, f.git_blob_sha, f.file_sha256,
-                   f.size_bytes, f.language, f.file_role, f.content_class,
-                   f.is_generated, f.is_vendor, f.is_test, f.is_source, f.is_build,
-                   f.is_config, f.is_doc, f.skipped_reason, f.metadata, f.created_at
-            FROM project_code_intel_files f
-            """
+    query_params = [sorted(SOURCE_LANGUAGES), *params, limit]
 
     repo_exists: bool | None = None
     with mcp_db.connect() as conn:
@@ -2762,7 +2991,7 @@ def tool_list_code_intel_files(args: Json) -> Json:
         rows = conn.execute(
             db.query_sql(
                 query_with_where(
-                    files_select_full if verbose else files_select_slim,
+                    LIST_CODE_INTEL_FILES_SELECT_FULL if verbose else LIST_CODE_INTEL_FILES_SELECT_SLIM,
                     clauses,
                     """
             ORDER BY f.source_path
@@ -2770,7 +2999,7 @@ def tool_list_code_intel_files(args: Json) -> Json:
             """,
                 )
             ),
-            params,
+            query_params,
         ).fetchall()
         if not rows:
             repo_exists = repo_scope_exists(conn, args)
