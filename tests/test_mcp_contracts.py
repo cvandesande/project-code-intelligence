@@ -495,8 +495,8 @@ class McpTextSearchExecutionTests(unittest.TestCase):
 
     def test_text_search_treats_empty_optional_query_string_as_omitted(self) -> None:
         definition = TOOL_DEFINITIONS["search_code_intel_text"]
-        validate_tool_arguments(definition, {"query": ""})
-        validate_tool_arguments(definition, {"mode": "enumerate", "query": ""})
+        _ = validate_tool_arguments(definition, {"query": ""})
+        _ = validate_tool_arguments(definition, {"mode": "enumerate", "query": ""})
 
         conn = QueuedConnection([FakeCursor(many=[])])
         with (
@@ -608,9 +608,9 @@ class McpTextSearchExecutionTests(unittest.TestCase):
     def test_text_search_snippet_length_rejects_out_of_range(self) -> None:
         definition = TOOL_DEFINITIONS["search_code_intel_text"]
         with self.assertRaises(McpProtocolError):
-            validate_tool_arguments(definition, {"query": "x", "snippet_length": 0})
+            _ = validate_tool_arguments(definition, {"query": "x", "snippet_length": 0})
         with self.assertRaises(McpProtocolError):
-            validate_tool_arguments(definition, {"query": "x", "snippet_length": 1000})
+            _ = validate_tool_arguments(definition, {"query": "x", "snippet_length": 1000})
 
     def test_text_search_mode_echoed_only_when_explicitly_set(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[])])
@@ -1119,10 +1119,10 @@ class McpRelatedCodeIntelTests(unittest.TestCase):
     def test_related_accepts_direction_argument(self) -> None:
         definition = TOOL_DEFINITIONS["related_code_intel"]
 
-        validate_tool_arguments(definition, {"symbol": "parse", "direction": "outgoing"})
+        _ = validate_tool_arguments(definition, {"symbol": "parse", "direction": "outgoing"})
 
         with self.assertRaises(McpProtocolError):
-            validate_tool_arguments(definition, {"symbol": "parse", "direction": "sideways"})
+            _ = validate_tool_arguments(definition, {"symbol": "parse", "direction": "sideways"})
 
     def test_related_direction_filters_symbol_edges(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[])])
@@ -1763,17 +1763,27 @@ class McpContractTests(unittest.TestCase):
         self.assertEqual(properties["limit"]["description"], "Max results, 1-50.")
         self.assertIn("Exact indexed search", text_search.description)
 
-        validate_tool_arguments(text_search, {"query": "hello", "limit": 10})
-        validate_tool_arguments(text_search, {"query": "hello world", "query_mode": "all_terms"})
+        _ = validate_tool_arguments(text_search, {"query": "hello", "limit": 10})
+        _ = validate_tool_arguments(text_search, {"query": "hello world", "query_mode": "all_terms"})
+
+        list_files = TOOL_DEFINITIONS["list_code_intel_files"]
+        normalized = validate_tool_arguments(
+            list_files,
+            {"language": "", "source_path_prefix": "", "is_generated": None, "is_source": False},
+        )
+        self.assertNotIn("language", normalized)
+        self.assertNotIn("source_path_prefix", normalized)
+        self.assertNotIn("is_generated", normalized)
+        self.assertFalse(cast("bool", normalized["is_source"]))
 
         with self.assertRaises(McpProtocolError):
-            validate_tool_arguments(text_search, {"query": "hello", "surprise": True})
+            _ = validate_tool_arguments(text_search, {"query": "hello", "surprise": True})
         with self.assertRaises(McpProtocolTypeError):
-            validate_tool_arguments(text_search, {"query": "hello", "limit": "10"})
+            _ = validate_tool_arguments(text_search, {"query": "hello", "limit": "10"})
         with self.assertRaises(McpProtocolError):
-            validate_tool_arguments(text_search, {"query": "hello", "limit": 500})
+            _ = validate_tool_arguments(text_search, {"query": "hello", "limit": 500})
         with self.assertRaises(McpProtocolError):
-            validate_tool_arguments(text_search, {"query": "hello", "query_mode": "broad"})
+            _ = validate_tool_arguments(text_search, {"query": "hello", "query_mode": "broad"})
 
     def test_required_tool_arguments_are_enforced_before_handlers(self) -> None:
         record_fetch = TOOL_DEFINITIONS["get_code_intel_record"]
@@ -1785,16 +1795,16 @@ class McpContractTests(unittest.TestCase):
         self.assertIn("record_id", record_properties)
         self.assertNotIn("record_ids", record_properties)
 
-        validate_tool_arguments(record_fetch, {"record_id": "a", "include_metadata": True})
+        _ = validate_tool_arguments(record_fetch, {"record_id": "a", "include_metadata": True})
         with self.assertRaises(McpProtocolTypeError):
-            validate_tool_arguments(record_fetch, {"record_id": 1})
+            _ = validate_tool_arguments(record_fetch, {"record_id": 1})
         with self.assertRaises(McpProtocolError):
-            validate_tool_arguments(record_fetch, {"record_id": ""})
+            _ = validate_tool_arguments(record_fetch, {"record_id": ""})
         with self.assertRaises(McpProtocolError) as missing_ctx:
-            validate_tool_arguments(record_fetch, {})
+            _ = validate_tool_arguments(record_fetch, {})
         self.assertIn("missing required argument: record_id", str(missing_ctx.exception))
         with self.assertRaises(McpProtocolError) as batch_on_single_ctx:
-            validate_tool_arguments(record_fetch, {"record_id": "a", "record_ids": ["b"]})
+            _ = validate_tool_arguments(record_fetch, {"record_id": "a", "record_ids": ["b"]})
         self.assertIn("unknown argument: record_ids", str(batch_on_single_ctx.exception))
 
         batch_fetch = TOOL_DEFINITIONS["get_code_intel_records"]
@@ -1806,11 +1816,11 @@ class McpContractTests(unittest.TestCase):
         self.assertIn("record_ids", batch_properties)
         self.assertNotIn("record_id", batch_properties)
 
-        validate_tool_arguments(batch_fetch, {"record_ids": ["a", "b"], "include_metadata": True})
+        _ = validate_tool_arguments(batch_fetch, {"record_ids": ["a", "b"], "include_metadata": True})
         with self.assertRaises(McpProtocolError):
-            validate_tool_arguments(batch_fetch, {"record_ids": []})
+            _ = validate_tool_arguments(batch_fetch, {"record_ids": []})
         with self.assertRaises(McpProtocolError) as single_on_batch_ctx:
-            validate_tool_arguments(batch_fetch, {"record_id": "a", "record_ids": ["b"]})
+            _ = validate_tool_arguments(batch_fetch, {"record_id": "a", "record_ids": ["b"]})
         self.assertIn("unknown argument: record_id", str(single_on_batch_ctx.exception))
 
     def test_tool_call_rejects_non_object_params_and_arguments(self) -> None:
@@ -1856,6 +1866,36 @@ class McpErrorVisibilityTests(unittest.TestCase):
         self.assertIn("PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD", message)
         self.assertIn("PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH", message)
         self.assertIn("restart the client", message)
+
+
+class McpArgumentNormalizationTests(unittest.TestCase):
+    def test_tool_call_passes_normalized_arguments_to_handlers(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            _ = handle_tool_call(
+                {
+                    "params": {
+                        "name": "list_code_intel_files",
+                        "arguments": {
+                            "source_path": "pkg/client/file.go",
+                            "language": "",
+                            "is_generated": None,
+                            "is_source": False,
+                        },
+                    }
+                },
+                1,
+            )
+
+        query, _ = conn.calls[0]
+        self.assertNotIn("f.language = %s", query)
+        self.assertNotIn("f.is_generated = %s", query)
+        self.assertIn("f.is_source = %s", query)
 
 
 class McpToolSchemaCompatibilityTests(unittest.TestCase):
@@ -2095,6 +2135,108 @@ class McpListFilesRecordBackedTests(unittest.TestCase):
         self.assertTrue(any(param is True for param in params))
 
 
+class McpStatusRuntimeIdentityTests(unittest.TestCase):
+    def test_status_can_include_runtime_identity_without_secret_values(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[]) for _ in range(6)])
+        credential_value = "".join(("super", "-", "secret"))
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "HOME": "/home/tester",
+                    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://db.example/pci?sslmode=prefer",
+                    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "pci_ro",
+                    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": credential_value,
+                    "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/work/kubernetes-ingress",
+                    "PROJECT_CODE_INTELLIGENCE_COLLECTION": "kubernetes-ingress",
+                },
+                clear=True,
+            ),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools, "table_regclass_exists", return_value=False),
+            patch.object(mcp_tools.git_utils, "run_git", return_value="abc123"),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_code_intel_status({"include_runtime": True})
+
+        payload = mcp_text_payload(response)
+        runtime = cast("dict[str, object]", payload["runtime"])
+        package = cast("dict[str, object]", runtime["package"])
+        process = cast("dict[str, object]", runtime["process"])
+        database = cast("dict[str, object]", runtime["database"])
+        config_section = cast("dict[str, object]", runtime["config"])
+
+        self.assertEqual(package["name"], "project-code-intelligence")
+        self.assertIn("mcp/tools.py", cast("str", package["module_path"]))
+        self.assertEqual(package["source_git_commit"], "abc123")
+        self.assertIsInstance(process["pid"], int)
+        self.assertIn("python", cast("str", process["executable"]))
+        self.assertEqual(database["dsn_source"], "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL")
+        self.assertEqual(database["user_source"], "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER")
+        self.assertEqual(database["password_source"], "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD")
+        self.assertTrue(database["password_set"])
+        self.assertEqual(database["scope_path"], "/work/kubernetes-ingress")
+        self.assertIn("pci_ro", cast("str", database["target"]))
+        self.assertEqual(len(cast("str", database["fingerprint"])), 16)
+        self.assertEqual(
+            config_section["user_config_path"], "/home/tester/.config/project-code-intelligence/pci-index.env"
+        )
+        self.assertNotIn(credential_value, json.dumps(runtime))
+
+
+class McpListFilesBooleanFilterTests(unittest.TestCase):
+    def test_list_files_omitted_boolean_is_not_a_filter(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            _ = mcp_tools.tool_list_code_intel_files({"source_path": "pkg/client/file.go"})
+
+        query, _ = conn.calls[0]
+        self.assertNotIn("f.is_generated = %s", query)
+        self.assertNotIn("f.is_source = %s", query)
+
+    def test_list_files_warns_on_empty_results_with_overconstrained_false_boolean_filters(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_list_code_intel_files({
+                "source_path": "pkg/client/applyconfiguration/configuration/v1/accesscontrol.go",
+                "is_generated": False,
+                "is_source": False,
+                "only_skipped": False,
+            })
+
+        payload = mcp_text_payload(response)
+        warnings = cast("list[dict[str, object]]", payload["warnings"])
+        overconstrained_warning = next(
+            warning for warning in warnings if warning["kind"] == "overconstrained_boolean_filters"
+        )
+        self.assertEqual(overconstrained_warning["filters"], ["is_generated", "is_source"])
+        self.assertIn("false is an active filter", cast("str", overconstrained_warning["message"]))
+
+    def test_list_files_does_not_warn_for_single_false_boolean_filter(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_list_code_intel_files({"is_generated": False})
+
+        payload = mcp_text_payload(response)
+        warnings = cast("list[dict[str, object]]", payload.get("warnings", []))
+        self.assertFalse(any(warning["kind"] == "overconstrained_boolean_filters" for warning in warnings))
+
+
 class McpToolShapeTests(unittest.TestCase):
     def test_list_files_default_selects_slim_columns(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[])])
@@ -2135,7 +2277,7 @@ class McpToolShapeTests(unittest.TestCase):
     def test_list_files_rejects_legacy_include_metadata(self) -> None:
         definition = TOOL_DEFINITIONS["list_code_intel_files"]
         with self.assertRaises(McpProtocolError):
-            validate_tool_arguments(definition, {"include_metadata": True})
+            _ = validate_tool_arguments(definition, {"include_metadata": True})
 
     def test_compact_record_drops_null_envelope_fields(self) -> None:
         conn = QueuedConnection([

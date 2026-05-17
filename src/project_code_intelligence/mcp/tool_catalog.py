@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from pydantic import ValidationError
 
@@ -30,6 +30,10 @@ _LIMIT_50_DESC = "Max results, 1-50."
 _LIMIT_100_DESC = "Max results, 1-100."
 _LIMIT_500_DESC = "Max results, 1-500."
 _SNIPPET_LENGTH_DESC = "Snippet chars, default 300."
+_BOOLEAN_FILTER_DESC = (
+    "Omit boolean filters unless you want to filter for that exact boolean value; "
+    "false is an active filter, not a default."
+)
 
 
 TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
@@ -55,6 +59,10 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 },
                 "include_breakdowns": {"type": "boolean"},
                 "include_static_summary": {"type": "boolean"},
+                "include_runtime": {
+                    "type": "boolean",
+                    "description": "Server executable/module path and redacted DB identity.",
+                },
             },
             "additionalProperties": False,
         },
@@ -90,8 +98,8 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "metadata_key": {"type": "string"},
                 "metadata_value": {"type": "string"},
                 "metadata_contains": {"type": "object"},
-                "is_untracked": {"type": "boolean"},
-                "is_generated": {"type": "boolean"},
+                "is_untracked": {"type": "boolean", "description": _BOOLEAN_FILTER_DESC},
+                "is_generated": {"type": "boolean", "description": _BOOLEAN_FILTER_DESC},
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
                 "diversify": {"type": "boolean"},
@@ -127,8 +135,8 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "metadata_key": {"type": "string"},
                 "metadata_value": {"type": "string"},
                 "metadata_contains": {"type": "object"},
-                "is_untracked": {"type": "boolean"},
-                "is_generated": {"type": "boolean"},
+                "is_untracked": {"type": "boolean", "description": _BOOLEAN_FILTER_DESC},
+                "is_generated": {"type": "boolean", "description": _BOOLEAN_FILTER_DESC},
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
                 "verbose": {"type": "boolean"},
@@ -231,14 +239,14 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "content_class": {"type": "string"},
                 "source_path": {"type": "string", "description": _SOURCE_PATH_DESC},
                 "source_path_prefix": {"type": "string", "description": _SOURCE_PATH_PREFIX_DESC},
-                "is_test": {"type": "boolean"},
-                "is_doc": {"type": "boolean"},
-                "is_generated": {"type": "boolean"},
-                "is_vendor": {"type": "boolean"},
-                "is_source": {"type": "boolean"},
-                "is_build": {"type": "boolean"},
-                "is_config": {"type": "boolean"},
-                "is_untracked": {"type": "boolean"},
+                "is_test": {"type": "boolean", "description": _BOOLEAN_FILTER_DESC},
+                "is_doc": {"type": "boolean", "description": _BOOLEAN_FILTER_DESC},
+                "is_generated": {"type": "boolean", "description": _BOOLEAN_FILTER_DESC},
+                "is_vendor": {"type": "boolean", "description": _BOOLEAN_FILTER_DESC},
+                "is_source": {"type": "boolean", "description": _BOOLEAN_FILTER_DESC},
+                "is_build": {"type": "boolean", "description": _BOOLEAN_FILTER_DESC},
+                "is_config": {"type": "boolean", "description": _BOOLEAN_FILTER_DESC},
+                "is_untracked": {"type": "boolean", "description": _BOOLEAN_FILTER_DESC},
                 "only_skipped": {"type": "boolean"},
                 "verbose": {"type": "boolean"},
                 "snapshot_id": {"type": "integer", "minimum": 1},
@@ -350,7 +358,7 @@ def _translate_validation_error(exc: ValidationError) -> Exception:
 _DEFINITION_NAMES: dict[int, str] = {id(definition): name for name, definition in TOOL_DEFINITIONS.items()}
 
 
-def validate_tool_arguments(definition: ToolDefinition, arguments: Json) -> None:
+def validate_tool_arguments(definition: ToolDefinition, arguments: Json) -> Json:
     name = _DEFINITION_NAMES.get(id(definition))
     if name is None:
         raise McpProtocolError("unknown tool definition")
@@ -358,6 +366,7 @@ def validate_tool_arguments(definition: ToolDefinition, arguments: Json) -> None
     if model is None:
         raise McpProtocolError(f"no validator registered for tool {name!r}")
     try:
-        _ = model.model_validate(arguments)
+        validated = model.model_validate(arguments)
     except ValidationError as exc:
         raise _translate_validation_error(exc) from exc
+    return cast("Json", validated.model_dump(exclude_none=True))

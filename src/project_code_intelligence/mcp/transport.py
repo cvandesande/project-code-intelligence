@@ -82,7 +82,7 @@ def handle_tool_call(request: Json, request_id: JsonValue) -> Json:
         raise McpProtocolTypeError("arguments must be an object")
     arguments = arguments_value
     definition, handler = TOOLS[name]
-    validate_tool_arguments(definition, arguments)
+    arguments = validate_tool_arguments(definition, arguments)
     if definition.write_tool and not db.allow_writes():
         raise McpWritePermissionError("writes are disabled")
     return result_response(request_id, handler(arguments))
