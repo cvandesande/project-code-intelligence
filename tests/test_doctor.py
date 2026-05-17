@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 import unittest
 from unittest.mock import patch
 
 from project_code_intelligence import config
+from project_code_intelligence.db import DatabaseRole, PostgresBootstrapResult
 from project_code_intelligence.doctor import (
     CheckResult,
     GpuInfo,
@@ -12,6 +14,7 @@ from project_code_intelligence.doctor import (
     check_gpu_support,
     color_text,
     cpu_suggests_supported_amd_npu,
+    format_postgres_bootstrap_result,
     format_result,
     format_summary,
     gpu_memory_summary,
@@ -24,6 +27,8 @@ from project_code_intelligence.doctor import (
     version_at_least,
     version_tuple,
 )
+from project_code_intelligence.doctor import cli as doctor_cli
+from project_code_intelligence.doctor.database import check_database
 from project_code_intelligence.embedding.bench import EmbeddingRequestResult
 
 
@@ -43,6 +48,32 @@ def require_check_result(item: CheckResult | None) -> CheckResult:
     if item is None:
         raise AssertionError("expected diagnostic result")
     return item
+
+
+class _FakeCursor:
+    def __init__(self, row: dict[str, object] | None) -> None:
+        self._row = row
+
+    def fetchone(self) -> dict[str, object] | None:
+        return self._row
+
+
+class _FakeMaintenanceConnection:
+    def __enter__(self) -> _FakeMaintenanceConnection:
+        return self
+
+    def __exit__(self, _exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+    @staticmethod
+    def execute(query: object, params: object | None = None) -> _FakeCursor:
+        _ = query
+        _ = params
+        return _FakeCursor({
+            "database_name": "postgres",
+            "user_name": "postgres",
+            "version": "PostgreSQL 17",
+        })
 
 
 class DoctorTests(unittest.TestCase):
@@ -201,8 +232,9 @@ class DoctorTests(unittest.TestCase):
             )
 
         self.assertIn("✓ READY", output)
-        self.assertIn("Database", output)
-        self.assertIn("codeintel @ 127.0.0.1:5433", output)
+        self.assertIn("Postgres", output)
+        self.assertIn("127.0.0.1:5433", output)
+        self.assertNotIn("codeintel @ 127.0.0.1:5433", output)
         self.assertNotIn("postgresql://codeintel@", output)
         self.assertNotIn("codeintel:codeintel", output)
         self.assertIn("Active path", output)
@@ -210,14 +242,32 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("http://127.0.0.1:18081/v1/embeddings", output)
         self.assertNotIn("response model=embed-gemma-300m-FLM; dimensions=", output)
         self.assertNotIn("Available embedding paths", output)
-        self.assertIn("Switch embedding runtime", output)
-        self.assertIn("cpu: docker compose --profile cpu up -d --build fastembed", output)
+        self.assertNotIn("Switch embedding runtime", output)
+        self.assertNotIn("cpu: docker compose --profile cpu up -d --build fastembed", output)
         self.assertNotIn("npu: docker compose --profile npu up -d lemonade-npu", output)
         self.assertNotIn("PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT=", output)
         self.assertNotIn("PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL=", output)
-        self.assertIn("amdgpu: docker compose --profile amdgpu up -d --build llama-rocm", output)
+        self.assertNotIn("amdgpu: docker compose --profile amdgpu up -d --build llama-rocm", output)
         self.assertNotIn("nvidia: docker compose --profile nvidia", output)
         self.assertNotIn("card=card0", output)
+
+    def test_format_summary_suggests_database_initialization_for_db_issues(self) -> None:
+        with patch("project_code_intelligence.process.container_engine_name", return_value="docker"):
+            output = format_summary(
+                [
+                    CheckResult("platform", "ok", "Python 3.13 on Linux"),
+                    CheckResult("database", "fail", "Could not connect to PostgreSQL/pgvector."),
+                ],
+                color=False,
+            )
+
+        self.assertIn("Start a local database", output)
+        self.assertIn("docker compose up -d pgvector", output)
+        self.assertIn("Prepare Postgres roles", output)
+        self.assertIn("pci-doctor --init-postgres", output)
+        self.assertIn("Index a repo and bootstrap its inferred database", output)
+        self.assertNotIn("Prepare inferred DB roles", output)
+        self.assertNotIn("pci-doctor --init-db", output)
 
     def test_format_summary_keeps_gpu_memory_summary_compact(self) -> None:
         output = format_summary(
@@ -251,6 +301,9 @@ class DoctorTests(unittest.TestCase):
 
         self.assertIn("AMD 1002:1586 · amdgpu · VRAM 512 MiB · shared 62.5 GiB", output)
         self.assertIn("AMD NPU 1022:17F0 · amdxdna · accel0", output)
+        self.assertIn("Postgres", output)
+        self.assertIn("db.example.invalid:30432", output)
+        self.assertNotIn("code-intel @ db.example.invalid:30432", output)
         self.assertNotIn("shared/unified=62.5", output)
         self.assertNotIn("card=card0", output)
         self.assertNotIn("\n│               GiB", output)
@@ -320,6 +373,127 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("AMD NPU firmware version", output)
         self.assertNotIn("npu-kernel", output)
         self.assertNotIn("npu-firmware", output)
+
+
+class DoctorDatabaseTests(unittest.TestCase):
+    def test_check_database_uses_maintenance_database_for_inferred_settings(self) -> None:
+        admin_credential = "-".join(("admin", "fixture"))
+        settings = config.DatabaseSettings(
+            dsn="postgresql://db.example.invalid/pci_test?sslmode=prefer",
+            dbname="pci_test",
+            admin_user="postgres",
+            admin_password=admin_credential,
+            database_inferred=True,
+        )
+        with (
+            patch("project_code_intelligence.doctor.database.config.DatabaseSettings.from_env", return_value=settings),
+            patch("project_code_intelligence.doctor.database.db.connect", return_value=_FakeMaintenanceConnection()),
+            patch("project_code_intelligence.process.container_engine_name", return_value="docker"),
+        ):
+            results = check_database()
+
+        by_name = {item.name: item for item in results}
+        self.assertEqual(by_name["database"].status, "ok")
+        self.assertNotIn("project-database", by_name)
+
+        output = format_summary(results, color=False)
+
+        self.assertIn("✓ Postgres", output)
+        self.assertNotIn("Project DB", output)
+        self.assertNotIn("pci-doctor --init-db", output)
+        self.assertNotIn("docker compose up -d pgvector", output)
+
+    def test_format_postgres_bootstrap_result_prints_index_admin_exports(self) -> None:
+        credential = " ".join(("secret", "value"))
+        output = format_postgres_bootstrap_result(
+            PostgresBootstrapResult(
+                postgres_url="postgresql://db.example.invalid:5432?sslmode=prefer",
+                index_role=DatabaseRole(
+                    name="pci_index_admin",
+                    password=credential,
+                    created=True,
+                    database_url="postgresql://db.example.invalid:5432?sslmode=prefer",
+                ),
+                vector_template_ready=True,
+                vector_template_created=True,
+            ),
+            color=False,
+        )
+
+        self.assertIn("project-code-intelligence postgres roles", output)
+        self.assertIn("pci_index_admin created", output)
+        self.assertIn("CREATEDB", output)
+        self.assertIn("CREATEROLE", output)
+        self.assertIn("pgvector", output)
+        self.assertIn("created in template1", output)
+        self.assertIn(
+            "export PROJECT_CODE_INTELLIGENCE_DATABASE_URL='postgresql://db.example.invalid:5432?sslmode=prefer'",
+            output,
+        )
+        self.assertIn("export PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER=pci_index_admin", output)
+        self.assertIn("export PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD='secret value'", output)
+        self.assertNotIn("Project DB", output)
+        self.assertNotIn("pci-doctor --init-db", output)
+
+    def test_format_postgres_bootstrap_result_prints_ready_for_existing_index_admin(self) -> None:
+        credential = " ".join(("secret", "value"))
+        output = format_postgres_bootstrap_result(
+            PostgresBootstrapResult(
+                postgres_url="postgresql://db.example.invalid:5432?sslmode=prefer",
+                index_role=DatabaseRole(
+                    name="pci_index_admin",
+                    password=credential,
+                    created=False,
+                    database_url="postgresql://db.example.invalid:5432?sslmode=prefer",
+                ),
+                vector_template_ready=True,
+                vector_template_created=False,
+            ),
+            color=False,
+        )
+
+        self.assertIn("pci_index_admin ready", output)
+        self.assertIn("ready in template1", output)
+
+    def test_init_postgres_reads_postgres_admin_environment(self) -> None:
+        captured_settings: list[config.DatabaseSettings] = []
+        postgres_credential = "-".join(("postgres", "fixture"))
+        index_credential = "-".join(("index", "fixture"))
+
+        def fake_bootstrap(settings: config.DatabaseSettings) -> PostgresBootstrapResult:
+            captured_settings.append(settings)
+            return PostgresBootstrapResult(
+                postgres_url="postgresql://db.example.invalid:5432?sslmode=prefer",
+                index_role=DatabaseRole(
+                    name="pci_index_admin",
+                    password=index_credential,
+                    created=True,
+                    database_url="postgresql://db.example.invalid:5432?sslmode=prefer",
+                ),
+                vector_template_ready=True,
+                vector_template_created=False,
+            )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://db.example.invalid:5432?sslmode=prefer",
+                    "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER": "postgres",
+                    "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD": postgres_credential,
+                    "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER": "pci_index_admin",
+                    "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD": index_credential,
+                },
+                clear=True,
+            ),
+            patch("project_code_intelligence.doctor.cli.db.bootstrap_postgres_roles", side_effect=fake_bootstrap),
+            patch("project_code_intelligence.doctor.cli.write_stdout"),
+        ):
+            status = doctor_cli.init_postgres_roles(doctor_cli.DoctorArgs(color="never"))
+
+        self.assertEqual(status, 0)
+        self.assertEqual(captured_settings[0].admin_user, "postgres")
+        self.assertEqual(captured_settings[0].admin_password, postgres_credential)
 
 
 class DoctorEndpointTests(unittest.TestCase):

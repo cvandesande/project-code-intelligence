@@ -34,7 +34,6 @@ from project_code_intelligence.embeddings import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-OPENAI_EMBEDDING_ENDPOINT = "https://api.openai.com/v1/embeddings"
 VOYAGE_EMBEDDING_ENDPOINT = "https://api.voyageai.com/v1/embeddings"
 
 

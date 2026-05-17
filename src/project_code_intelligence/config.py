@@ -11,8 +11,10 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from urllib.parse import urlsplit, urlunsplit
+from pathlib import Path
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
+from project_code_intelligence.common import default_database_name
 from project_code_intelligence.exceptions import ConfigError
 
 Env = Mapping[str, str]
@@ -39,6 +41,7 @@ DEFAULT_LARGE_GPU_EMBEDDING_MODEL = "Qwen3-Embedding-4B-Q8_0.gguf"
 DEFAULT_APPLE_EMBED_MODEL = "mlx-community/Qwen3-Embedding-0.6B-8bit"
 DEFAULT_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
 DEFAULT_VOYAGE_EMBEDDING_MODEL = "voyage-3.5"
+DATABASE_SCOPE_PATH_ENV = "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH"
 
 
 def _env(env: Env | None) -> Env:
@@ -153,6 +156,74 @@ def mask_database_dsn(dsn: str) -> str:
     return urlunsplit((parts.scheme, f"{user}{host}{port}", parts.path, query, ""))
 
 
+def database_url_dbname(dsn: str) -> str | None:
+    parts = urlsplit(dsn)
+    if parts.scheme not in {"postgres", "postgresql"}:
+        return None
+    dbname = unquote(parts.path.lstrip("/"))
+    return dbname or None
+
+
+def database_url_defines_database(dsn: str) -> bool:
+    parts = urlsplit(dsn)
+    if parts.scheme not in {"postgres", "postgresql"}:
+        return True
+    return bool(unquote(parts.path.lstrip("/")))
+
+
+def database_url_with_dbname(dsn: str, dbname: str) -> str:
+    parts = urlsplit(dsn)
+    if parts.scheme not in {"postgres", "postgresql"}:
+        return dsn
+    return urlunsplit((parts.scheme, parts.netloc, "/" + quote(dbname, safe=""), parts.query, parts.fragment))
+
+
+def database_url_without_credentials_or_dbname(dsn: str) -> str:
+    parts = urlsplit(dsn)
+    if parts.scheme not in {"postgres", "postgresql"}:
+        return dsn
+    host = parts.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    port = f":{parts.port}" if parts.port else ""
+    return urlunsplit((parts.scheme, f"{host}{port}", "", parts.query, parts.fragment))
+
+
+def database_url_without_credentials(dsn: str) -> str:
+    parts = urlsplit(dsn)
+    if parts.scheme not in {"postgres", "postgresql"}:
+        return dsn
+    host = parts.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    port = f":{parts.port}" if parts.port else ""
+    return urlunsplit((parts.scheme, f"{host}{port}", parts.path, parts.query, parts.fragment))
+
+
+def database_url_with_credentials(dsn: str, user: str, password: str | None = None) -> str:
+    parts = urlsplit(dsn)
+    if parts.scheme not in {"postgres", "postgresql"}:
+        return dsn
+    host = parts.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    port = f":{parts.port}" if parts.port else ""
+    userinfo = quote(user, safe="")
+    if password is not None:
+        userinfo += ":" + quote(password, safe="")
+    return urlunsplit((parts.scheme, f"{userinfo}@{host}{port}", parts.path, parts.query, parts.fragment))
+
+
+def configured_database_scope_path(env: Env | None = None) -> Path:
+    configured = env_text(DATABASE_SCOPE_PATH_ENV, env=env)
+    path = Path(configured).expanduser() if configured else Path.cwd()
+    return path.resolve(strict=False)
+
+
+def inferred_database_name(env: Env | None = None) -> str:
+    return default_database_name(configured_database_scope_path(env=env))
+
+
 def embedding_api_key(endpoint: str | None = None, *, env: Env | None = None) -> str | None:
     configured = env_text("PROJECT_CODE_INTELLIGENCE_EMBEDDING_API_KEY", env=env)
     if configured:
@@ -176,15 +247,24 @@ class DatabaseSettings:
     dbname: str | None = DEFAULT_PGVECTOR_DB
     user: str | None = DEFAULT_PGVECTOR_USER
     password: str | None = DEFAULT_PGVECTOR_PASS
+    admin_user: str | None = None
+    admin_password: str | None = None
     sslmode: str = "prefer"
     connect_timeout_seconds: int = DEFAULT_DB_CONNECT_TIMEOUT_SECONDS
     keepalives_idle_seconds: int = DEFAULT_DB_KEEPALIVES_IDLE_SECONDS
     keepalives_interval_seconds: int = DEFAULT_DB_KEEPALIVES_INTERVAL_SECONDS
     keepalives_count: int = DEFAULT_DB_KEEPALIVES_COUNT
     allow_writes: bool = False
+    database_inferred: bool = False
 
     @classmethod
-    def from_env(cls, env: Env | None = None, *, role: str = "writer") -> DatabaseSettings:
+    def from_env(
+        cls,
+        env: Env | None = None,
+        *,
+        role: str = "writer",
+        admin_scope: str = "database",
+    ) -> DatabaseSettings:
         # MCP role: prefer MCP-specific env vars (separate read-only credentials);
         # fall back to the writer's settings so existing single-role deployments keep working.
         mcp = role == "mcp"
@@ -193,6 +273,16 @@ class DatabaseSettings:
         )
         legacy_dsn = env_text("PGVECTOR_DSN", env=env)
         dsn = database_url or legacy_dsn
+        dsn_defines_database = bool(dsn and database_url_defines_database(dsn))
+        explicit_dbname = env_text("PGVECTOR_DB", env=env)
+        database_inferred = not dsn_defines_database and explicit_dbname is None
+        dbname = (
+            database_url_dbname(dsn)
+            if dsn_defines_database and dsn
+            else explicit_dbname or inferred_database_name(env=env)
+        )
+        if dsn and not dsn_defines_database and dbname:
+            dsn = database_url_with_dbname(dsn, dbname)
         dsn_user = (env_text("PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER", env=env) if mcp else None) or env_text(
             "PROJECT_CODE_INTELLIGENCE_DATABASE_USER", env=env
         )
@@ -205,6 +295,14 @@ class DatabaseSettings:
         password = (env_text("PROJECT_CODE_INTELLIGENCE_MCP_PGVECTOR_PASS", env=env) if mcp else None) or env_text(
             "PGVECTOR_PASS", DEFAULT_PGVECTOR_PASS, env=env
         )
+        if admin_scope == "database":
+            admin_user = env_text("PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER", env=env)
+            admin_password = env_text("PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD", env=env)
+        elif admin_scope == "postgres":
+            admin_user = env_text("PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER", env=env)
+            admin_password = env_text("PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD", env=env)
+        else:
+            raise ValueError("admin_scope must be 'database' or 'postgres'")
         return cls(
             dsn=dsn,
             dsn_source="PROJECT_CODE_INTELLIGENCE_DATABASE_URL" if database_url else "PGVECTOR_DSN",
@@ -212,9 +310,11 @@ class DatabaseSettings:
             dsn_password=dsn_password,
             host=env_text("PGVECTOR_HOST", DEFAULT_PGVECTOR_HOST, env=env) or DEFAULT_PGVECTOR_HOST,
             port=env_text("PGVECTOR_PORT", DEFAULT_PGVECTOR_PORT, env=env) or DEFAULT_PGVECTOR_PORT,
-            dbname=env_text("PGVECTOR_DB", DEFAULT_PGVECTOR_DB, env=env),
+            dbname=dbname,
             user=user,
             password=password,
+            admin_user=admin_user,
+            admin_password=admin_password,
             sslmode=env_text("PGVECTOR_SSLMODE", "prefer", env=env) or "prefer",
             connect_timeout_seconds=env_int(
                 "PROJECT_CODE_INTELLIGENCE_DB_CONNECT_TIMEOUT_SECONDS",
@@ -241,6 +341,7 @@ class DatabaseSettings:
                 minimum=1,
             ),
             allow_writes=env_bool("PROJECT_CODE_INTELLIGENCE_ALLOW_WRITES", default=False, env=env),
+            database_inferred=database_inferred,
         )
 
     def missing_connection_names(self) -> list[str]:
@@ -265,22 +366,45 @@ class DatabaseSettings:
                 extras.append("PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD=<set>")
             suffix = " " + " ".join(extras) if extras else ""
             return f"{self.dsn_source}=<hidden>{suffix}"
+        dbname = self.dbname or "<unset>"
+        if self.database_inferred:
+            dbname = f"{dbname} (inferred)"
         return (
             f"PGVECTOR_HOST={self.host} "
             f"PGVECTOR_PORT={self.port} "
-            f"PGVECTOR_DB={self.dbname or '<unset>'} "
+            f"PGVECTOR_DB={dbname} "
             f"PGVECTOR_USER={self.user or '<unset>'} "
             f"PGVECTOR_PASS={'<set>' if self.password else '<unset>'}"
         )
 
     def display_target(self) -> str:
         if self.dsn:
-            return mask_database_dsn(self.dsn)
+            dsn = database_url_with_credentials(self.dsn, self.dsn_user) if self.dsn_user else self.dsn
+            return mask_database_dsn(dsn)
         host = self.host
         if ":" in host and not host.startswith("["):
             host = f"[{host}]"
         target = f"postgresql://{self.user or '<unset>'}@{host}:{self.port}/{self.dbname or '<unset>'}"
         return f"{target} sslmode={self.sslmode}"
+
+    def postgres_url(self) -> str:
+        if self.dsn:
+            return database_url_without_credentials_or_dbname(self.dsn)
+        host = self.host
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"postgresql://{host}:{self.port}?sslmode={quote(self.sslmode, safe='')}"
+
+    def role_database_url(self, user: str, password: str | None = None) -> str:
+        if self.dsn:
+            return database_url_with_credentials(self.dsn, user, password)
+        host = self.host
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        userinfo = quote(user, safe="")
+        if password is not None:
+            userinfo += ":" + quote(password, safe="")
+        return f"postgresql://{userinfo}@{host}:{self.port}/{self.dbname or '<unset>'}?sslmode={self.sslmode}"
 
 
 @dataclass(frozen=True)
@@ -289,16 +413,13 @@ class IngestSettings:
     profile: str = "generic"
     repos: str | None = None
     mode: str = "incremental"
-    explicit_sarif: str | None = None
     sarif_max_bytes: int = 50 * 1024 * 1024
     embedding_endpoint: str | None = None
     embedding_endpoint_model: str = "local"
     embedding_max_chars: int = 3000
-    embedding_min_chars: int = 800
     preembed: bool = True
     preembedding_ahead_batches: int = 16
     runtime_heartbeat_seconds: int = 300
-    token_chars_per_token: float = 4.0
 
     @classmethod
     def from_env(cls, env: Env | None = None) -> IngestSettings:
@@ -308,7 +429,6 @@ class IngestSettings:
             profile=env_text("PROJECT_CODE_INTELLIGENCE_PROFILE", "generic", env=env) or "generic",
             repos=env_text("PROJECT_CODE_INTELLIGENCE_REPOS", env=env),
             mode=env_text("PROJECT_CODE_INTELLIGENCE_MODE", "incremental", env=env) or "incremental",
-            explicit_sarif=env_text("PROJECT_CODE_INTELLIGENCE_SARIF", env=env),
             sarif_max_bytes=env_int(
                 "PROJECT_CODE_INTELLIGENCE_SARIF_MAX_BYTES",
                 50 * 1024 * 1024,
@@ -323,12 +443,6 @@ class IngestSettings:
                 env=env,
                 minimum=1,
             ),
-            embedding_min_chars=env_int(
-                "PROJECT_CODE_INTELLIGENCE_EMBEDDING_MIN_CHARS",
-                800,
-                env=env,
-                minimum=200,
-            ),
             preembed=env_bool("PROJECT_CODE_INTELLIGENCE_PREEMBED", default=True, env=env),
             preembedding_ahead_batches=env_int(
                 "PROJECT_CODE_INTELLIGENCE_PREEMBED_AHEAD_BATCHES",
@@ -341,12 +455,6 @@ class IngestSettings:
                 300,
                 env=env,
                 minimum=0,
-            ),
-            token_chars_per_token=env_float(
-                "PROJECT_CODE_INTELLIGENCE_TOKEN_CHARS_PER_TOKEN",
-                4.0,
-                env=env,
-                minimum=1.0,
             ),
         )
 

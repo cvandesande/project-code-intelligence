@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import cast
 
 from project_code_intelligence import config, console_ui, ingest_code_intel, mcp_smoke_render, process, progress
-from project_code_intelligence.common import default_collection
+from project_code_intelligence.common import database_scope_path_for_root_repos, default_collection, parse_repos
 from project_code_intelligence.embeddings import (
     EmbeddingEndpointUnavailableError,
     preflight_embedding_endpoint,
@@ -35,20 +35,31 @@ def index_parser() -> argparse.ArgumentParser:
         "--collection",
         help=(
             "Collection/workspace name. Defaults to the repo name for one path, "
-            "or the common parent directory name for multiple paths."
+            "or the current working directory name for multiple paths."
         ),
     )
     _ = parser.add_argument(
         "--reset-code-intel",
         "--reset",
         action="store_true",
-        help="Delete code-intelligence data for the given repository path(s), then exit.",
+        help="Drop the inferred project database for the given repository path(s), then exit.",
     )
     _ = parser.add_argument(
-        "--reset-all-code-intel",
-        "--reset-all",
+        "--init-db",
         action="store_true",
-        help="Delete all code-intelligence data in the configured database, then exit.",
+        help="Create the inferred project database and schema for the given repository path(s), then exit.",
+    )
+    _ = parser.add_argument(
+        "--mcp-config",
+        choices=ingest_code_intel.MCP_CONFIG_FORMATS,
+        help=(
+            "Emit read-only pci-mcp configuration after a successful run. "
+            "Use with --init-db to initialize the DB and print config without indexing."
+        ),
+    )
+    _ = parser.add_argument(
+        "--mcp-server-name",
+        help="Server key/name for generated MCP client config snippets. Defaults to pci-<collection>.",
     )
     _ = parser.add_argument(
         "--i-know-this-deletes-code-intel-db",
@@ -84,7 +95,10 @@ def index_parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "repo_paths",
         nargs="*",
-        help="Repository path(s) to index. Use . for the current directory.",
+        help=(
+            "Repository path(s) to index. Use . for the current directory. "
+            "For multiple paths, run from the workspace directory and pass repo subdirectories."
+        ),
     )
     return parser
 
@@ -94,7 +108,9 @@ class IndexNamespace(argparse.Namespace):
     dry_run: bool
     collection: str | None
     reset_code_intel: bool
-    reset_all_code_intel: bool
+    init_db: bool
+    mcp_config: str | None
+    mcp_server_name: str | None
     i_know_this_deletes_code_intel_db: bool
     embed: bool | None
     prune_snapshots: bool
@@ -123,8 +139,8 @@ def repo_paths_to_ingest_args(repo_paths: list[str]) -> list[str]:
         root = repo_path.parent
         repos = repo_path.name or "."
     else:
-        root = Path(os.path.commonpath([str(path) for path in absolute_paths]))
-        repos = ",".join(path.relative_to(root).as_posix() or "." for path in absolute_paths)
+        root, workspace_repos = multi_repo_workspace_and_repos(repo_paths)
+        repos = ",".join(workspace_repos)
     return ["--root", str(root), "--repos", repos]
 
 
@@ -132,22 +148,56 @@ def inferred_collection_for_repo_paths(repo_paths: list[str]) -> str:
     absolute_paths = [Path(path).expanduser().resolve(strict=False) for path in repo_paths]
     if len(absolute_paths) == 1:
         return default_collection(absolute_paths[0])
-    root = Path(os.path.commonpath([str(path) for path in absolute_paths]))
+    root, _ = multi_repo_workspace_and_repos(repo_paths)
     return default_collection(root)
+
+
+def inferred_database_scope_path_for_repo_paths(repo_paths: list[str]) -> Path:
+    absolute_paths = [Path(path).expanduser().resolve(strict=False) for path in repo_paths]
+    if len(absolute_paths) == 1:
+        return absolute_paths[0]
+    if absolute_paths:
+        root, _ = multi_repo_workspace_and_repos(repo_paths)
+        return root
+    return Path.cwd().resolve(strict=False)
+
+
+def multi_repo_workspace_and_repos(repo_paths: list[str]) -> tuple[Path, list[str]]:
+    workspace = Path.cwd().resolve(strict=False)
+    repos: list[str] = []
+    for path in repo_paths:
+        resolved = Path(path).expanduser().resolve(strict=False)
+        try:
+            relative = resolved.relative_to(workspace)
+        except ValueError as exc:
+            message = (
+                "multiple repository paths must be inside the current working directory; "
+                "cd to the workspace directory and pass repo subdirectories"
+            )
+            raise ValueError(message) from exc
+        repos.append(relative.as_posix() or ".")
+    return workspace, repos
 
 
 def parse_index_args(argv: list[str] | None = None) -> tuple[IndexNamespace, list[str]]:
     public_argv, passthrough = split_index_argv(argv)
     parser = index_parser()
     parsed = parser.parse_args(public_argv, namespace=IndexNamespace())
-    if parsed.reset_code_intel and parsed.reset_all_code_intel:
-        parser.error("--reset and --reset-all cannot be combined")
-    if parsed.reset_all_code_intel and parsed.repo_paths:
-        parser.error("--reset-all does not accept repository paths")
-    if parsed.reset_all_code_intel and parsed.collection:
-        parser.error("--reset-all does not accept --collection")
-    if not parsed.reset_all_code_intel and not parsed.repo_paths:
+    if not parsed.repo_paths:
         parser.error("one or more repository paths are required; use . for the current directory")
+    if len(parsed.repo_paths) > 1:
+        try:
+            _, _ = multi_repo_workspace_and_repos(parsed.repo_paths)
+        except ValueError as exc:
+            parser.error(str(exc))
+    if parsed.reset_code_intel and parsed.init_db:
+        parser.error("--init-db cannot be combined with --reset")
+    if parsed.reset_code_intel and parsed.mcp_config:
+        parser.error("--mcp-config cannot be combined with --reset")
+    if parsed.json and parsed.mcp_config:
+        parser.error("--mcp-config cannot be combined with --json")
+    if parsed.dry_run and parsed.mcp_config:
+        parser.error("--mcp-config cannot be combined with --dry-run")
     return parsed, normalized_passthrough(passthrough)
 
 
@@ -162,11 +212,28 @@ def set_index_environment_defaults() -> None:
     _ = os.environ.setdefault("PROJECT_CODE_INTELLIGENCE_EMBED_RECORD_TYPES", DEFAULT_EMBED_RECORD_TYPES)
 
 
+def set_index_database_scope_default(parsed: IndexNamespace) -> None:
+    if parsed.repo_paths:
+        scope_path = inferred_database_scope_path_for_repo_paths(parsed.repo_paths)
+    else:
+        scope_path = database_scope_path_for_root_repos(Path.cwd(), parse_repos("."))
+    _ = os.environ.setdefault(config.DATABASE_SCOPE_PATH_ENV, str(scope_path))
+
+
 def apply_index_embed_override(parsed: IndexNamespace) -> None:
     if parsed.embed is not None:
         os.environ["PROJECT_CODE_INTELLIGENCE_EMBED"] = "1" if parsed.embed else "0"
         if not parsed.embed:
             os.environ["PROJECT_CODE_INTELLIGENCE_EMBED_ONLY"] = "0"
+
+
+def forwarded_mcp_config_args(parsed: IndexNamespace) -> list[str]:
+    forwarded: list[str] = []
+    if parsed.mcp_config:
+        forwarded.extend(["--mcp-config", parsed.mcp_config])
+    if parsed.mcp_server_name:
+        forwarded.extend(["--mcp-server-name", parsed.mcp_server_name])
+    return forwarded
 
 
 def forwarded_index_args(parsed: IndexNamespace, passthrough: list[str]) -> list[str]:
@@ -179,8 +246,9 @@ def forwarded_index_args(parsed: IndexNamespace, passthrough: list[str]) -> list
             forwarded = ["--collection", inferred_collection_for_repo_paths(parsed.repo_paths), *forwarded]
     if parsed.reset_code_intel:
         forwarded = ["--reset-code-intel", "--reset-only", *forwarded]
-    if parsed.reset_all_code_intel:
-        forwarded = ["--reset-all-code-intel", "--reset-code-intel", "--reset-only", *forwarded]
+    if parsed.init_db:
+        forwarded = ["--init-db-only", *forwarded]
+    forwarded = [*forwarded_mcp_config_args(parsed), *forwarded]
     if parsed.i_know_this_deletes_code_intel_db:
         forwarded = ["--i-know-this-deletes-code-intel-db", *forwarded]
     if parsed.dry_run:
@@ -253,6 +321,7 @@ def print_index_startup(
 def index_main(argv: list[str] | None = None) -> int:
     parsed, passthrough = parse_index_args(argv)
     set_index_environment_defaults()
+    set_index_database_scope_default(parsed)
     apply_index_embed_override(parsed)
     forwarded = forwarded_index_args(parsed, passthrough)
     embed = config.env_bool("PROJECT_CODE_INTELLIGENCE_EMBED")
@@ -260,17 +329,19 @@ def index_main(argv: list[str] | None = None) -> int:
 
     embedding_endpoint: str | None = None
     embedding_model: str | None = None
-    if (embed or embed_only) and not parsed.reset_code_intel:
+    if (embed or embed_only) and not parsed.reset_code_intel and not parsed.init_db:
         embedding_endpoint, embedding_model = _resolve_index_embedding()
         forwarded = [
             *index_embedding_args(embed_only=embed_only, endpoint=embedding_endpoint, model=embedding_model),
             *forwarded,
         ]
 
-    is_reset = parsed.reset_code_intel or parsed.reset_all_code_intel
+    is_reset = parsed.reset_code_intel
+    is_init_db = parsed.init_db
     if (
         not parsed.json
         and not is_reset
+        and not is_init_db
         and not print_index_startup(
             parsed, embed=embed or embed_only, endpoint=embedding_endpoint, model=embedding_model
         )

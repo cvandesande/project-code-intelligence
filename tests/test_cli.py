@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
-from project_code_intelligence import cli
+from project_code_intelligence import cli, config
 from project_code_intelligence.embeddings import EmbeddingEndpointUnavailableError
 
 
@@ -31,8 +31,11 @@ def mcp_response(payload: dict[str, object]) -> dict[str, object]:
 class CliWrapperTests(unittest.TestCase):
     def test_pci_index_enables_embeddings_by_default(self) -> None:
         forwarded: list[str] = []
+        captured_scope_path: str | None = None
 
         def fake_ingest_main(args: list[str]) -> int:
+            nonlocal captured_scope_path
+            captured_scope_path = os.environ.get(config.DATABASE_SCOPE_PATH_ENV)
             forwarded.extend(args)
             return 0
 
@@ -50,6 +53,7 @@ class CliWrapperTests(unittest.TestCase):
         self.assertIn("--collection", forwarded)
         self.assertEqual(forwarded[forwarded.index("--repos") + 1], Path.cwd().name)
         self.assertEqual(forwarded[forwarded.index("--collection") + 1], Path.cwd().name)
+        self.assertEqual(captured_scope_path, str(Path.cwd().resolve()))
         self.assertIn("--dry-run", forwarded)
 
     def test_pci_index_requires_repo_path_for_indexing(self) -> None:
@@ -64,7 +68,7 @@ class CliWrapperTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
         ingest_main.assert_not_called()
 
-    def test_repo_paths_map_to_common_root_and_repo_list(self) -> None:
+    def test_multiple_repo_paths_map_to_cwd_root_and_repo_list(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             repo_a = root / "repo-a"
@@ -72,9 +76,39 @@ class CliWrapperTests(unittest.TestCase):
             repo_a.mkdir()
             repo_b.mkdir()
 
-            args = cli.repo_paths_to_ingest_args([str(repo_a), str(repo_b)])
+            original_cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                args = cli.repo_paths_to_ingest_args([str(repo_a), str(repo_b)])
+            finally:
+                os.chdir(original_cwd)
 
         self.assertEqual(args, ["--root", str(root.resolve()), "--repos", "repo-a,repo-b"])
+
+    def test_multiple_repo_paths_must_be_under_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            inside_repo = workspace / "repo-a"
+            outside_repo = root / "repo-b"
+            inside_repo.mkdir(parents=True)
+            outside_repo.mkdir()
+
+            original_cwd = Path.cwd()
+            os.chdir(workspace)
+            try:
+                with (
+                    patch.dict(os.environ, {}, clear=True),
+                    patch("project_code_intelligence.cli.ingest_code_intel.cli_main") as ingest_main,
+                    patch("sys.stderr", io.StringIO()),
+                    self.assertRaises(SystemExit) as raised,
+                ):
+                    _ = cli.index_main(["repo-a", str(outside_repo), "--dry-run"])
+            finally:
+                os.chdir(original_cwd)
+
+        self.assertEqual(raised.exception.code, 2)
+        ingest_main.assert_not_called()
 
     def test_single_repo_path_maps_to_parent_root_and_repo_name(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -94,11 +128,71 @@ class CliWrapperTests(unittest.TestCase):
             repo_a.mkdir()
             repo_b.mkdir()
 
-            single_collection = cli.inferred_collection_for_repo_paths([str(repo_a)])
-            workspace_collection = cli.inferred_collection_for_repo_paths([str(repo_a), str(repo_b)])
+            original_cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                single_collection = cli.inferred_collection_for_repo_paths([str(repo_a)])
+                workspace_collection = cli.inferred_collection_for_repo_paths(["repo-a", "repo-b"])
+            finally:
+                os.chdir(original_cwd)
 
         self.assertEqual(single_collection, "repo-a")
         self.assertEqual(workspace_collection, root.name)
+
+    def test_database_scope_is_inferred_from_repo_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo_a = root / "repo-a"
+            repo_b = root / "repo-b"
+            repo_a.mkdir()
+            repo_b.mkdir()
+
+            original_cwd = Path.cwd()
+            os.chdir(root)
+            try:
+                single_scope = cli.inferred_database_scope_path_for_repo_paths([str(repo_a)])
+                workspace_scope = cli.inferred_database_scope_path_for_repo_paths(["repo-a", "repo-b"])
+            finally:
+                os.chdir(original_cwd)
+
+        self.assertEqual(single_scope, repo_a.resolve())
+        self.assertEqual(workspace_scope, root.resolve())
+
+    def test_pci_index_multiple_repos_use_one_workspace_database_scope(self) -> None:
+        forwarded: list[str] = []
+        captured_scope_path: str | None = None
+
+        def fake_ingest_main(args: list[str]) -> int:
+            nonlocal captured_scope_path
+            captured_scope_path = os.environ.get(config.DATABASE_SCOPE_PATH_ENV)
+            forwarded.extend(args)
+            return 0
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo_a = root / "repo-a"
+            repo_b = root / "repo-b"
+            repo_a.mkdir()
+            repo_b.mkdir()
+
+            original_cwd = Path.cwd()
+            os.chdir(root)
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("project_code_intelligence.cli.ingest_code_intel.cli_main", side_effect=fake_ingest_main),
+            ):
+                try:
+                    status = cli.index_main(["repo-a", "repo-b", "--no-embed", "--dry-run"])
+                finally:
+                    os.chdir(original_cwd)
+
+            expected_root = str(root.resolve())
+
+        self.assertEqual(status, 0)
+        self.assertEqual(captured_scope_path, expected_root)
+        self.assertEqual(forwarded[forwarded.index("--root") + 1], expected_root)
+        self.assertEqual(forwarded[forwarded.index("--repos") + 1], "repo-a,repo-b")
+        self.assertEqual(forwarded[forwarded.index("--collection") + 1], root.name)
 
     def test_pci_index_collection_override_forwards_to_ingest(self) -> None:
         forwarded: list[str] = []
@@ -181,6 +275,61 @@ class CliWrapperTests(unittest.TestCase):
         self.assertNotIn("--embed", forwarded)
         self.assertNotIn("--embedding-endpoint", forwarded)
 
+    def test_pci_index_exposes_and_forwards_init_db(self) -> None:
+        forwarded: list[str] = []
+
+        def fake_ingest_main(args: list[str]) -> int:
+            forwarded.extend(args)
+            return 0
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("project_code_intelligence.cli.ingest_code_intel.cli_main", side_effect=fake_ingest_main),
+        ):
+            status = cli.index_main(["--init-db", "."])
+
+        self.assertEqual(status, 0)
+        self.assertIn("--init-db", cli.index_parser().format_help())
+        self.assertIn("--init-db-only", forwarded)
+        self.assertIn("--root", forwarded)
+        self.assertIn("--repos", forwarded)
+        self.assertNotIn("--embed", forwarded)
+        self.assertNotIn("--embedding-endpoint", forwarded)
+
+    def test_pci_index_forwards_mcp_config_options(self) -> None:
+        forwarded: list[str] = []
+
+        def fake_ingest_main(args: list[str]) -> int:
+            forwarded.extend(args)
+            return 0
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("project_code_intelligence.cli.ingest_code_intel.cli_main", side_effect=fake_ingest_main),
+        ):
+            status = cli.index_main(["--init-db", "--mcp-config", "codex", "--mcp-server-name", "pci-demo", "."])
+
+        self.assertEqual(status, 0)
+        self.assertIn("--mcp-config", cli.index_parser().format_help())
+        self.assertIn("--mcp-server-name", cli.index_parser().format_help())
+        self.assertIn("--mcp-config", forwarded)
+        self.assertEqual(forwarded[forwarded.index("--mcp-config") + 1], "codex")
+        self.assertIn("--mcp-server-name", forwarded)
+        self.assertEqual(forwarded[forwarded.index("--mcp-server-name") + 1], "pci-demo")
+        self.assertIn("--init-db-only", forwarded)
+
+    def test_pci_index_init_db_and_reset_conflict(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("project_code_intelligence.cli.ingest_code_intel.cli_main") as ingest_main,
+            patch("sys.stderr", io.StringIO()),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            _ = cli.index_main(["--init-db", "--reset", "."])
+
+        self.assertEqual(raised.exception.code, 2)
+        ingest_main.assert_not_called()
+
     def test_pci_index_reset_alias_forwards_reset_flags(self) -> None:
         forwarded: list[str] = []
 
@@ -198,50 +347,18 @@ class CliWrapperTests(unittest.TestCase):
         self.assertIn("--reset-code-intel", forwarded)
         self.assertIn("--reset-only", forwarded)
 
-    def test_pci_index_reset_all_forwards_explicit_all_reset(self) -> None:
-        forwarded: list[str] = []
-
-        def fake_ingest_main(args: list[str]) -> int:
-            forwarded.extend(args)
-            return 0
-
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch("project_code_intelligence.cli.ingest_code_intel.cli_main", side_effect=fake_ingest_main),
-        ):
-            status = cli.index_main(["--reset-all", "--i-know-this-deletes-code-intel-db"])
-
-        self.assertEqual(status, 0)
-        self.assertIn("--reset-all", cli.index_parser().format_help())
-        self.assertIn("--reset-all-code-intel", forwarded)
-        self.assertIn("--reset-code-intel", forwarded)
-        self.assertIn("--reset-only", forwarded)
-        self.assertNotIn("--root", forwarded)
-        self.assertNotIn("--repos", forwarded)
-
-    def test_pci_index_reset_all_rejects_repo_paths(self) -> None:
+    def test_pci_index_reset_all_is_removed(self) -> None:
         with (
             patch.dict(os.environ, {}, clear=True),
             patch("project_code_intelligence.cli.ingest_code_intel.cli_main") as ingest_main,
             patch("sys.stderr", io.StringIO()),
             self.assertRaises(SystemExit) as raised,
         ):
-            _ = cli.index_main(["--reset-all", "."])
+            _ = cli.index_main(["--reset-all"])
 
         self.assertEqual(raised.exception.code, 2)
         ingest_main.assert_not_called()
-
-    def test_pci_index_reset_all_rejects_collection(self) -> None:
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch("project_code_intelligence.cli.ingest_code_intel.cli_main") as ingest_main,
-            patch("sys.stderr", io.StringIO()),
-            self.assertRaises(SystemExit) as raised,
-        ):
-            _ = cli.index_main(["--reset-all", "--collection", "workspace"])
-
-        self.assertEqual(raised.exception.code, 2)
-        ingest_main.assert_not_called()
+        self.assertNotIn("--reset-all", cli.index_parser().format_help())
 
     def test_mcp_smoke_current_workspace_probes_available_repos(self) -> None:
         calls: list[tuple[str, dict[str, object], int]] = []
@@ -356,17 +473,6 @@ class IndexStartupTests(unittest.TestCase):
             patch("project_code_intelligence.cli.print_index_startup") as mock_startup,
         ):
             status = cli.index_main(["--reset", "--i-know-this-deletes-code-intel-db", "."])
-
-        self.assertEqual(status, 0)
-        mock_startup.assert_not_called()
-
-    def test_pci_index_reset_all_skips_startup_header(self) -> None:
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch("project_code_intelligence.cli.ingest_code_intel.cli_main", return_value=0),
-            patch("project_code_intelligence.cli.print_index_startup") as mock_startup,
-        ):
-            status = cli.index_main(["--reset-all", "--i-know-this-deletes-code-intel-db"])
 
         self.assertEqual(status, 0)
         mock_startup.assert_not_called()

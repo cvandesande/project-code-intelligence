@@ -15,7 +15,6 @@ class FakeLive:
         self.renderable = renderable
         self.kwargs = kwargs
         self.started = False
-        self.stopped = False
 
     def start(self) -> None:
         self.started = True
@@ -24,7 +23,7 @@ class FakeLive:
         self.renderable = renderable
 
     def stop(self) -> None:
-        self.stopped = True
+        self.started = False
 
 
 def emit_without_live(emitter: progress.RichEmitter, event: str, values: JsonObject) -> None:
@@ -136,18 +135,32 @@ class ProgressRenderingTests(unittest.TestCase):
             "127.0.0.1:18081 · AMD ROCm",
         )
 
+    def test_endpoint_row_text_labels_embedding_rate_before_framework(self) -> None:
+        self.assertEqual(
+            progress.embedding_endpoint_row_text("http://127.0.0.1:18081/v1/embeddings", "AMD ROCm", 42.4),
+            "127.0.0.1:18081 · 42 embeddings/s · AMD ROCm",
+        )
+        self.assertEqual(progress.embedding_rate_text(1.25), "1.2 embeddings/s")
+
     def test_compact_endpoint_target_handles_remote_host(self) -> None:
         self.assertEqual(
             progress.compact_endpoint_target("https://f5ai.pd.f5net.com/v1/embeddings"),
             "f5ai.pd.f5net.com",
         )
 
-    def test_live_progress_row_names_count_units(self) -> None:
+    def test_live_progress_row_shows_percent_without_count_detail(self) -> None:
         detail = progress.live_progress_row_text({"phase": "embedding", "phase_done": 12, "phase_total": 40})
 
         if detail is None:
             raise AssertionError("expected progress row detail")
-        self.assertIn("12/40 embedding records", detail)
+        self.assertIn("30%", detail)
+        self.assertNotIn("12/40 embedding records", detail)
+
+    def test_live_embeddings_row_is_suppressed_during_embedding_phase(self) -> None:
+        counts: JsonObject = {"embedded_records": 12, "preembedded_records": 0, "embedded_records_per_second": 4.8}
+
+        self.assertIsNone(progress.live_embeddings_row_text(counts, {"phase": "embedding"}))
+        self.assertEqual(progress.live_embeddings_row_text(counts, {"phase": "db_upload"}), "12 · 4.8 embeddings/s")
 
     def test_live_progress_shows_current_repo_before_discovery_finishes(self) -> None:
         emitter = progress.RichEmitter()

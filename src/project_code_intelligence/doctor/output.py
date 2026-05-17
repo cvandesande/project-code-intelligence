@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import io
 import re
+import shlex
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from rich.box import ROUNDED
 from rich.console import Console, Group
@@ -27,11 +29,10 @@ if TYPE_CHECKING:
 
     from rich.console import RenderableType
 
+    from project_code_intelligence.db import PostgresBootstrapResult
     from project_code_intelligence.doctor.types import CheckResult, ColorMode, Status
 
 ANSI_RESET = "\033[0m"
-ANSI_BOLD = "\033[1m"
-ANSI_BOLD_CYAN = "\033[1;36m"
 ANSI_DIM = "\033[2m"
 STATUS_COLORS: dict[Status, str] = {
     "ok": "\033[32m",
@@ -68,18 +69,6 @@ def should_use_color(
 
 def color_text(text: str, color: str, *, enabled: bool) -> str:
     return f"{color}{text}{ANSI_RESET}" if enabled else text
-
-
-def heading_text(text: str, *, color: bool = False) -> str:
-    return color_text(text, ANSI_BOLD, enabled=color)
-
-
-def label_text(text: str, *, color: bool = False) -> str:
-    return color_text(text, ANSI_BOLD, enabled=color)
-
-
-def profile_text(text: str, *, color: bool = False) -> str:
-    return color_text(text, ANSI_BOLD_CYAN, enabled=color)
 
 
 def status_text(status: Status, *, color: bool = False) -> str:
@@ -256,9 +245,16 @@ def _shorten_npu(item: CheckResult) -> str:
 
 
 def _shorten_db(msg: str) -> str:
-    match = re.search(r"connected to (\S+) as \S+ at postgresql://[^@/]*@([^/?\s]+)", msg)
+    match = re.search(r"\bat\s+(postgresql://\S+)", msg)
     if match:
-        return f"{match.group(1)} @ {match.group(2)}"
+        dsn = match.group(1)
+        parts = urlsplit(dsn)
+        host = parts.hostname
+        if host:
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            port = f":{parts.port}" if parts.port is not None else ""
+            return f"{host}{port}"
     return msg
 
 
@@ -325,7 +321,7 @@ def _services_section(by_name: Mapping[str, CheckResult]) -> Table:
     table = _section_table()
     if database := by_name.get("database"):
         detail = _shorten_db(database.message) if database.status == "ok" else database.message
-        _row(table, database.status, "Database", detail)
+        _row(table, database.status, "Postgres", detail)
     if (pgvector := by_name.get("pgvector")) and pgvector.status != "ok":
         _row(table, pgvector.status, "pgvector", pgvector.message)
     if (schema := by_name.get("schema")) and schema.status != "ok":
@@ -378,7 +374,14 @@ def _build_main_panel(by_name: Mapping[str, CheckResult], results: Sequence[Chec
         _services_section(by_name),
     ]
     issues = summary_issue_items(results)
-    service_names = {"database", "database-config", "pgvector", "embedding-endpoint", "embedding-config", "embedding"}
+    service_names = {
+        "database",
+        "database-config",
+        "pgvector",
+        "embedding-endpoint",
+        "embedding-config",
+        "embedding",
+    }
     non_service_issues = [item for item in issues if item.name not in service_names]
     if non_service_issues:
         parts.extend((Text(), Text("Needs attention", style="bold"), _issues_table(non_service_issues)))
@@ -414,15 +417,20 @@ def _next_steps(
     issues: Sequence[CheckResult],
 ) -> list[tuple[str, str]]:
     engine = process.container_engine_name()
-    db_names = {"database", "database-config", "pgvector", "schema", "schema-version"}
+    server_db_names = {"database", "database-config"}
+    project_db_names = {"pgvector", "schema", "schema-version"}
     embedding_names = {"embedding-endpoint", "embedding-config", "embedding", "apple-metal", "apple-metal-model"}
     issue_names = {item.name for item in issues}
     steps: list[tuple[str, str]] = []
-    if issue_names & db_names:
+    if issue_names & server_db_names:
         steps.extend((
             ("Start a local database", f"{engine} compose up -d pgvector"),
+            ("Prepare Postgres roles", "pci-doctor --init-postgres"),
+            ("Index a repo and bootstrap its inferred database", "pci-index ."),
             ("Use an existing Postgres", "set PROJECT_CODE_INTELLIGENCE_DATABASE_URL"),
         ))
+    elif issue_names & project_db_names:
+        steps.append(("Index a repo and bootstrap its inferred database", "pci-index ."))
     if issue_names & embedding_names:
         steps.extend(
             (_PROFILE_FRIENDLY_DESCRIPTIONS.get(profile, f"Start {profile} embeddings"), cmd)
@@ -440,37 +448,6 @@ def _next_steps_section(steps: Sequence[tuple[str, str]]) -> Group:
         table.add_row(Text("→", style="dim"), Text(description))
         table.add_row("", Text(command, style="bold cyan"))
     return Group(Text("Next steps", style="bold"), table)
-
-
-def _switch_renderables(by_name: Mapping[str, CheckResult]) -> list[RenderableType]:
-    active_profile, _ = active_embedding_profile(by_name)
-    commands = [
-        (profile, command)
-        for profile, command in local_embedding_startup_commands(by_name)
-        if profile != active_profile
-    ]
-    if not commands:
-        return []
-    pieces: list[RenderableType] = [Text("Switch embedding runtime", style="bold")]
-    pieces.append(Text("  Stop current local embedding service first: pci-doctor --stop-embedding", style="dim"))
-    for profile, command in commands:
-        pieces.append(Text.assemble("  ", (profile, "bold cyan"), ": ", command))
-    return pieces
-
-
-def _stop_renderables(by_name: Mapping[str, CheckResult]) -> list[RenderableType]:
-    db_running = ok_result(by_name, "database")
-    embedding_running = ok_result(by_name, "embedding-endpoint")
-    if not db_running and not embedding_running:
-        return []
-    pieces: list[RenderableType] = []
-    if db_running and embedding_running:
-        pieces.append(Text("Stop all services: pci-doctor --stop", style="dim"))
-    if embedding_running:
-        pieces.append(Text("Stop embedding server: pci-doctor --stop-embedding", style="dim"))
-    if db_running:
-        pieces.append(Text("Stop database: pci-doctor --stop-database", style="dim"))
-    return pieces
 
 
 def _build_console(buffer: io.StringIO, *, color: bool) -> Console:
@@ -493,21 +470,67 @@ def format_summary(results: Sequence[CheckResult], *, color: bool = False) -> st
 
     console.print(_build_main_panel(by_name, results))
 
-    switch = _switch_renderables(by_name)
-    if switch:
-        console.print()
-        for piece in switch:
-            console.print(piece)
+    return buffer.getvalue().rstrip("\n")
 
-    stops = _stop_renderables(by_name)
-    if stops:
-        console.print()
-        for piece in stops:
-            console.print(piece)
 
-    console.print()
-    console.print(
-        Text("--verbose for all checks · --json for machine-readable output", style="dim"),
+def _shell_export(name: str, value: str) -> str:
+    return f"export {name}={shlex.quote(value)}"
+
+
+def format_postgres_bootstrap_result(result: PostgresBootstrapResult, *, color: bool = False) -> str:
+    buffer = io.StringIO()
+    console = _build_console(buffer, color=color)
+    role_state = "created" if result.index_role.created else "ready"
+
+    header = Table.grid(expand=True)
+    header.add_column()
+    header.add_column(justify="right")
+    header.add_row(
+        Text("project-code-intelligence postgres roles", style="bold"),
+        _status_pill("ok"),
     )
 
-    return buffer.getvalue().rstrip("\n")
+    accounts = _section_table()
+    _row(accounts, "ok", "pci-index", f"{result.index_role.name} {role_state} · CREATEDB · CREATEROLE")
+    if result.vector_template_ready:
+        vector_state = (
+            f"created in {result.template_database}"
+            if result.vector_template_created
+            else f"ready in {result.template_database}"
+        )
+        _row(accounts, "ok", "pgvector", vector_state)
+
+    panel = Panel(
+        Group(
+            header,
+            Text(),
+            Text("Postgres", style="bold"),
+            Text(f"  {result.postgres_url}", overflow="fold"),
+            Text(),
+            Text("Accounts", style="bold"),
+            accounts,
+            Text(),
+            Text("Use this role as PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_* for pci-index.", overflow="fold"),
+            Text(
+                "pci-index creates inferred project databases, schema, and scoped RO/RW roles. "
+                f"New project databases inherit pgvector from {result.template_database}.",
+                overflow="fold",
+            ),
+        ),
+        box=ROUNDED,
+        padding=(1, 2),
+        border_style="dim",
+        expand=True,
+        width=SUMMARY_WIDTH,
+    )
+    console.print(panel)
+
+    password = result.index_role.password or ""
+    exports = "\n".join((
+        "",
+        "Export for pci-index",
+        _shell_export("PROJECT_CODE_INTELLIGENCE_DATABASE_URL", result.postgres_url),
+        _shell_export("PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER", result.index_role.name),
+        _shell_export("PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD", password),
+    ))
+    return buffer.getvalue().rstrip("\n") + exports

@@ -27,6 +27,7 @@ from project_code_intelligence.doctor.hardware import (
 from project_code_intelligence.doctor.output import (
     color_text,
     exit_code,
+    format_postgres_bootstrap_result,
     format_result,
     format_summary,
     should_use_color,
@@ -51,6 +52,7 @@ __all__ = [
     "cpu_suggests_supported_amd_npu",
     "discover_gpus",
     "exit_code",
+    "format_postgres_bootstrap_result",
     "format_result",
     "format_summary",
     "gpu_memory_summary",
