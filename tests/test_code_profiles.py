@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from typing import TYPE_CHECKING
 
+from project_code_intelligence.code_profiles.base import GenericProfile
 from project_code_intelligence.code_profiles.example import ExampleProfile, string_list
 
 if TYPE_CHECKING:
@@ -15,6 +16,7 @@ def base_classification() -> JsonObject:
         "content_class": "source",
         "is_source": True,
         "is_test": False,
+        "is_generated": False,
     }
 
 
@@ -40,6 +42,24 @@ class ExampleProfileTests(unittest.TestCase):
         self.assertEqual(architecture["file_role"], "architecture-doc")
         self.assertEqual(ordinary["file_role"], "source")
         self.assertEqual(original["file_role"], "source")
+
+    def test_generic_profile_preserves_generated_file_role(self) -> None:
+        profile = GenericProfile()
+        classification = {
+            **base_classification(),
+            "file_role": "generated",
+            "content_class": "generated",
+            "is_generated": True,
+        }
+
+        updated = profile.classify_file(
+            "pkg/client/applyconfiguration/example/v1/virtualserver.go",
+            "go",
+            classification,
+        )
+
+        self.assertEqual(updated["file_role"], "generated")
+        self.assertEqual(updated["content_class"], "generated")
 
     def test_file_metadata_extracts_service_and_deployment_scope(self) -> None:
         profile = ExampleProfile()

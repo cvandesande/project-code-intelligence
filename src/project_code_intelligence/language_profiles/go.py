@@ -15,6 +15,11 @@ GO_FUNC_RE = re.compile(r"(?m)^\s*func\s+(?:\(([^)]*)\)\s*)?([A-Za-z_][A-Za-z0-9
 GO_TYPE_RE = re.compile(r"(?m)^\s*type\s+([A-Za-z_][A-Za-z0-9_]*)\s+(struct|interface)\b")
 GO_IMPORT_LINE_RE = re.compile(r'import\s+(?:"([^"]+)"|(?:[A-Za-z_][A-Za-z0-9_]*|\.)\s+"([^"]+)")')
 GO_IMPORT_PATH_RE = re.compile(r'"([^"]+)"')
+GO_RECEIVER_RE = re.compile(
+    r"^\s*(?:(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s+)?"
+    r"(?P<pointer>\*)?\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*)\.)?"
+    r"(?P<type>[A-Za-z_][A-Za-z0-9_]*)"
+)
 
 GO_METADATA_KEYS = (
     "go_package",
@@ -48,10 +53,8 @@ def go_import_paths(text: str) -> list[str]:
 
 
 def receiver_type(receiver: str) -> str | None:
-    names = [match.group(0) for match in re.finditer(r"[A-Za-z_][A-Za-z0-9_]*", receiver.replace("*", " "))]
-    if not names:
-        return None
-    return names[-1]
+    match = GO_RECEIVER_RE.match(receiver)
+    return match.group("type") if match else None
 
 
 def go_file_metadata(_path: str, text: str) -> JsonObject:

@@ -967,6 +967,160 @@ class TypescriptParserRegressionTests(unittest.TestCase):
         self.assertIn(("$constructor", "function"), kinds_by_symbol)
 
 
+class GoParserRegressionTests(unittest.TestCase):
+    def test_go_records_emit_method_receiver_metadata(self) -> None:
+        text = "\n".join([
+            "package configs",
+            "",
+            "func (cnf *Configurator) AddOrUpdateVirtualServer(name string) {",
+            "    cnf.generatePolicies(name)",
+            "}",
+            "",
+            "func (c Configuration) AddOrUpdateVirtualServer(name string) {",
+            "    c.Apply(name)",
+            "}",
+        ])
+
+        records, _edges = go_records(fixture_file("internal/configs/virtualserver.go", "go"), text, 2400, 0)
+        methods = [
+            record
+            for record in records
+            if record.record_type == "symbol_definition" and record.symbol == "AddOrUpdateVirtualServer"
+        ]
+
+        self.assertEqual(len(methods), 2)
+        by_receiver = {str(record.metadata["go_receiver_type"]): record for record in methods}
+        self.assertEqual(set(by_receiver), {"Configurator", "Configuration"})
+        self.assertEqual(by_receiver["Configurator"].symbol_kind, "method")
+        self.assertEqual(by_receiver["Configurator"].metadata["go_receiver_name"], "cnf")
+        self.assertTrue(by_receiver["Configurator"].metadata["go_receiver_pointer"])
+        self.assertEqual(by_receiver["Configurator"].metadata["go_package"], "configs")
+        self.assertEqual(
+            by_receiver["Configurator"].metadata["qualified_symbol"],
+            "Configurator.AddOrUpdateVirtualServer",
+        )
+        self.assertFalse(by_receiver["Configuration"].metadata["go_receiver_pointer"])
+        self.assertEqual(
+            by_receiver["Configuration"].metadata["qualified_symbol"],
+            "Configuration.AddOrUpdateVirtualServer",
+        )
+
+    def test_go_records_strip_comments_from_call_edges(self) -> None:
+        text = "\n".join([
+            "package configs",
+            "",
+            "func generatePolicies() {",
+            "    // syncPolicy() is handled by the caller.",
+            "    applyPolicy()",
+            "}",
+        ])
+
+        _records, edges = go_records(fixture_file("internal/configs/policy.go", "go"), text, 2400, 0)
+        targets = {edge.target_symbol for edge in edges}
+
+        self.assertIn("applyPolicy", targets)
+        self.assertNotIn("syncPolicy", targets)
+
+    def test_security_records_ignore_comment_only_backticks(self) -> None:
+        text = "\n".join([
+            "# Use `pci-index` to refresh the local index.",
+            "run_command() {",
+            "    echo ok",
+            "}",
+        ])
+
+        records = security_records(fixture_file("scripts/README.sh", "shell"), text)
+
+        self.assertFalse([record for record in records if record.rule_id == "shell_backtick_execution"])
+
+    def test_security_records_ignore_python_docstring_backticks(self) -> None:
+        text = "\n".join([
+            '"""',
+            "Run `pci-index` before checking examples.",
+            '"""',
+            "",
+            "def run():",
+            "    return True",
+        ])
+
+        records = security_records(fixture_file("pkg/example.py", "python"), text)
+
+        self.assertFalse([record for record in records if record.rule_id == "shell_backtick_execution"])
+
+    def test_security_records_ignore_python_string_and_inline_comment_backticks(self) -> None:
+        text = "\n".join([
+            "def validate_listener(name):",
+            "    expected = 'listener.http must use `http` mode'",
+            "    return name == expected  # reject unknown `listener.http` values",
+        ])
+
+        records = security_records(fixture_file("pkg/listeners.py", "python"), text)
+
+        self.assertFalse([record for record in records if record.rule_id == "shell_backtick_execution"])
+
+
+class RustParserRegressionTests(unittest.TestCase):
+    def test_rust_records_collapse_doc_examples_and_skip_doc_edges(self) -> None:
+        text = "\n".join([
+            "impl Thing {",
+            "    /// Returns readiness.",
+            "    ///",
+            "    /// ```no_run",
+            "    /// fn f() {",
+            "    ///     let guard = ready();",
+            "    ///     guard.get_ref();",
+            "    ///     guard.clear_ready_matching();",
+            "    /// }",
+            "    /// ```",
+            "    pub fn poll(&self) {",
+            "        self.actual();",
+            "    }",
+            "    pub fn actual(&self) {}",
+            "}",
+        ])
+
+        records, edges = rust_records(fixture_file("src/io/async_fd.rs", "rust"), text, 2400, 0)
+        impl_record = next(
+            record for record in records if record.record_type == "symbol_definition" and record.symbol == "Thing"
+        )
+        targets = {edge.target_symbol for edge in edges}
+
+        self.assertIn("[rustdoc example collapsed]", impl_record.display_content)
+        for doc_example_text in ("fn f()", "ready();", "guard.get_ref();", "guard.clear_ready_matching();"):
+            self.assertNotIn(doc_example_text, impl_record.display_content)
+        for doc_symbol in ("f", "ready", "get_ref", "clear_ready_matching"):
+            self.assertNotIn(doc_symbol, targets, msg=f"doc example emitted edge to {doc_symbol!r}")
+        self.assertIn("Thing::actual", targets)
+
+    def test_rust_records_qualify_same_impl_unqualified_method_edges(self) -> None:
+        text = "\n".join([
+            "pub struct Budget;",
+            "impl Budget {",
+            "    pub fn poll(&self) -> bool {",
+            "        initial();",
+            "        has_remaining()",
+            "    }",
+            "    pub fn initial() -> Self {",
+            "        Budget",
+            "    }",
+            "    pub fn has_remaining() -> bool {",
+            "        true",
+            "    }",
+            "}",
+        ])
+
+        records, edges = rust_records(fixture_file("task/coop/mod.rs", "rust"), text, 2400, 0)
+        symbols = {record.symbol for record in records if record.record_type == "symbol_definition"}
+        targets = {edge.target_symbol for edge in edges}
+
+        self.assertIn("Budget::initial", symbols)
+        self.assertIn("Budget::has_remaining", symbols)
+        self.assertIn("Budget::initial", targets)
+        self.assertIn("Budget::has_remaining", targets)
+        self.assertNotIn("initial", targets)
+        self.assertNotIn("has_remaining", targets)
+
+
 class ParserAndRuntimeTests(unittest.TestCase):
     def test_full_repo_ingest_replaces_rows_even_when_plan_started_incremental(self) -> None:
         plan = IngestPlan(
