@@ -38,6 +38,8 @@ class RecordSpec:
     analyzer: str | None = None
     analyzer_version: str | None = None
     parent_record_id: str | None = None
+    file_role: str | None = None
+    content_class: str | None = None
 
 
 def line_offsets(text: str) -> list[int]:
@@ -116,6 +118,8 @@ def markdown_fence_for(body: str) -> str:
 
 
 def make_record(intel_file: IntelFile, spec: RecordSpec) -> IntelRecord:
+    file_role = spec.file_role or intel_file.file_role
+    content_class = spec.content_class or intel_file.content_class
     metadata = dict(spec.metadata or {})
     metadata.update({
         key: value
@@ -131,8 +135,8 @@ def make_record(intel_file: IntelFile, spec: RecordSpec) -> IntelRecord:
         "",
         f"- Repo: `{intel_file.repo}`",
         f"- Role: `{intel_file.repo_role}`",
-        f"- File role: `{intel_file.file_role}`",
-        f"- Content class: `{intel_file.content_class}`",
+        f"- File role: `{file_role}`",
+        f"- Content class: `{content_class}`",
     ]
     if spec.line_start is not None:
         display.append(f"- Lines: {spec.line_start}-{spec.line_end}")
@@ -148,8 +152,8 @@ def make_record(intel_file: IntelFile, spec: RecordSpec) -> IntelRecord:
         collection=intel_file.collection,
         source_path=intel_file.source_path,
         language=intel_file.language,
-        file_role=intel_file.file_role,
-        content_class=intel_file.content_class,
+        file_role=file_role,
+        content_class=content_class,
         record_type=spec.record_type,
         record_id=spec.record_id,
         parent_record_id=spec.parent_record_id,

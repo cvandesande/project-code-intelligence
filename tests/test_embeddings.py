@@ -41,7 +41,7 @@ from project_code_intelligence.runtime import PreEmbeddingResult, PreEmbeddingSt
 from project_code_intelligence.storage import RecordInsertContext
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from project_code_intelligence.models import JsonObject
 
@@ -561,11 +561,15 @@ class EmbeddingContractTests(unittest.TestCase):
         def fake_insert_records(
             context: RecordInsertContext,
             records: list[IntelRecord],
-            progress_fn: object | None = None,
+            progress_fn: Callable[[int], None] | None = None,
         ) -> int:
-            _ = context, progress_fn
+            _ = context
+            if progress_fn is not None:
+                progress_fn(len(records))
             inserted_batches.append([record.record_id for record in records])
             return len(records)
+
+        progress: list[int] = []
 
         with (
             patch.object(_preembedding, "insert_records", side_effect=fake_insert_records),
@@ -575,10 +579,12 @@ class EmbeddingContractTests(unittest.TestCase):
                 insert_context(),
                 [non_embedding, ready, deferred],
                 state,
+                progress_fn=progress.append,
             )
 
         self.assertEqual((inserted, embedded, skipped), (3, 1, 0))
         self.assertEqual(inserted_batches, [["file-record"], ["ready"], ["deferred"]])
+        self.assertEqual(progress, [1, 1, 1])
         self.assertEqual(state.consumed_batches, 2)
         self.assertTrue(state.cancel_event.is_set())
         self.assertEqual(progress_event.call_args_list[-1].args[0], "code_intel_preembedding_deferred")
@@ -595,19 +601,30 @@ class EmbeddingContractTests(unittest.TestCase):
         state.results.put(PreEmbeddingResult(batch=[failed], error=RuntimeError("endpoint failed")))
         inserted_batches: list[list[str]] = []
 
-        def fake_insert_records(context: RecordInsertContext, records: list[IntelRecord]) -> int:
+        def fake_insert_records(
+            context: RecordInsertContext,
+            records: list[IntelRecord],
+            progress_fn: Callable[[int], None] | None = None,
+        ) -> int:
             _ = context
+            if progress_fn is not None:
+                progress_fn(len(records))
             inserted_batches.append([record.record_id for record in records])
             return len(records)
+
+        progress: list[int] = []
 
         with (
             patch.object(_preembedding, "insert_records", side_effect=fake_insert_records),
             patch.object(_preembedding, "progress_event") as progress_event,
         ):
-            inserted = _preembedding.consume_preembedding_results(insert_context(), state, block=False)
+            inserted = _preembedding.consume_preembedding_results(
+                insert_context(), state, block=False, progress_fn=progress.append
+            )
 
         self.assertEqual(inserted, 2)
         self.assertEqual(inserted_batches, [["failed", "remaining"]])
+        self.assertEqual(progress, [2])
         self.assertTrue(state.cancel_event.is_set())
         self.assertEqual(state.consumed_batches, 2)
         progress_event.assert_called_once()

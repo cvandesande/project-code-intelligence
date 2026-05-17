@@ -390,7 +390,7 @@ class RichEmitter:
         if self.embedding_model:
             _add_row(rows, "Model", _shorten_model(self.embedding_model))
         _add_embedding_endpoint_row(
-            rows, self.embedding_endpoint, self.embedding_framework, counts.get("embedded_records_per_second")
+            rows, self.embedding_endpoint, self.embedding_framework, live_endpoint_embedding_rate(counts, progress)
         )
         _add_live_progress_row(rows, progress)
         _add_live_embeddings_row(rows, counts, progress)
@@ -506,20 +506,28 @@ def _add_live_workers_row(rows: Table, counts: JsonObject, progress: JsonObject)
 
 
 def live_embeddings_row_text(counts: JsonObject, progress: JsonObject) -> str | None:
-    if progress.get("phase") == "embedding":
+    phase = progress.get("phase")
+    if phase == "embedding":
         return None
-    embedded = _coerce_int(counts.get("embedded_records")) + _coerce_int(counts.get("preembedded_records"))
+    if phase == "db_upload":
+        preembedded = _coerce_int(counts.get("preembedded_records"))
+        return f"{_format_count(preembedded)} ready" if preembedded else None
+    embedded = _coerce_int(counts.get("embedded_records"))
     if not embedded:
         return None
-    rate = counts.get("embedded_records_per_second")
-    rate_label = embedding_rate_text(rate)
-    rate_text = f" · {rate_label}" if rate_label else ""
-    return f"{_format_count(embedded)}{rate_text}"
+    return _format_count(embedded)
+
+
+def live_endpoint_embedding_rate(counts: JsonObject, progress: JsonObject) -> object:
+    if progress.get("phase") != "embedding":
+        return None
+    return counts.get("embedded_records_per_second")
 
 
 def _add_live_embeddings_row(rows: Table, counts: JsonObject, progress: JsonObject) -> None:
     if detail := live_embeddings_row_text(counts, progress):
-        _add_row(rows, "Embeddings", detail)
+        label = "Pre-embedding" if progress.get("phase") == "db_upload" else "Embeddings"
+        _add_row(rows, label, detail)
 
 
 def _resolve_duration(report: JsonObject, timing: JsonObject) -> float | None:

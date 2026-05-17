@@ -9,9 +9,11 @@ from project_code_intelligence.models import CHUNKER_VERSION, IntelFile, IntelRe
 from project_code_intelligence.records import RecordSpec, make_record
 
 
-def security_api_refs(text: str) -> list[str]:
+def security_api_refs(text: str, *, language: str | None = None) -> list[str]:
     refs: list[str] = []
     for pattern, rule_id, _severity, _confidence, _summary in profile_context.active_profile.security_patterns():
+        if language is not None and not profile_context.active_profile.should_apply_pattern(rule_id, language):
+            continue
         if re.search(pattern, text):
             refs.append(rule_id)
     return sorted(set(refs))

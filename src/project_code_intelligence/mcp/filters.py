@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError
@@ -179,11 +180,39 @@ def source_path_prefix_suffix_pattern(prefix: str) -> str:
     return f"%/{escaped}/%"
 
 
+_WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:/")
+
+
+def normalize_source_path_filter(path: str, arg_name: str = "source_path") -> str:
+    normalized = path.strip().replace("\\", "/")
+    if normalized.startswith("/") or _WINDOWS_ABSOLUTE_PATH_RE.match(normalized):
+        raise McpProtocolError(
+            f"{arg_name} must be repo-relative, not absolute; "
+            "run code_intel_status to find repo keys and pass repo plus a repo-relative path"
+        )
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized.strip("/")
+
+
 def repo_relative_source_path_candidates(args: Json, path: str) -> list[str]:
+    path = normalize_source_path_filter(path)
     repo = optional_text(args, "repo")
-    if not repo or repo in {".", path} or path.startswith(f"{repo}/"):
+    if not repo or repo == ".":
         return [path]
-    return list(dict.fromkeys([path, f"{repo}/{path}"]))
+    normalized_repo = normalize_source_path_filter(repo, "repo")
+    if path == normalized_repo or path.startswith(f"{normalized_repo}/{normalized_repo}/"):
+        return [path]
+    if path.startswith(f"{normalized_repo}/"):
+        repo_relative = path.removeprefix(f"{normalized_repo}/")
+        candidates = [path]
+        if repo_relative.startswith("src/"):
+            candidates.append(f"{normalized_repo}/{path}")
+        return list(dict.fromkeys(candidates))
+    candidates = [path, f"{normalized_repo}/{path}"]
+    if path.startswith("src/"):
+        candidates.append(f"{normalized_repo}/{normalized_repo}/{path}")
+    return list(dict.fromkeys(candidates))
 
 
 def source_path_column_clauses(args: Json, alias: str, column_name: str) -> tuple[list[str], QueryParams]:

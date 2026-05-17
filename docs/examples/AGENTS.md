@@ -1,6 +1,6 @@
 # Code Intelligence Guide for AI Assistants
 
-This project has a `project-code-intelligence` MCP server attached. Before you decide it's just a fancier grep, read this.
+This project has a `project-code-intelligence` MCP server attached. For non-trivial code discovery, use it before broad rg/find or speculative file reads. Use rg/direct reads for known small files and final verification.
 
 ## The actual problem it solves
 

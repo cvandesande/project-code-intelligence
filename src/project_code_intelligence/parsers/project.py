@@ -327,7 +327,7 @@ def shell_records(
             **common_extracts(body),
             "symbols_defined": [name],
             "symbols_referenced": extract_referenced_symbols(body),
-            "security_sensitive_apis": security_api_refs(body),
+            "security_sensitive_apis": security_api_refs(body, language=intel_file.language),
         }
         rtype = (
             "service_entrypoint"

@@ -25,16 +25,20 @@ class ToolDefinition:
 _SOURCE_PATH_DESC = "Exact path; repo-relative accepted."
 _SOURCE_PATH_PREFIX_DESC = "Subtree prefix; repo-relative accepted. Mutex with source_path."
 _CONFIDENCE_KIND_DESC = "confirmed or heuristic_candidate."
+_COLLECTION_DESC = "Collection scope; omit when repo alone is enough."
+_LIMIT_50_DESC = "Max results, 1-50."
+_LIMIT_100_DESC = "Max results, 1-100."
+_LIMIT_500_DESC = "Max results, 1-500."
 _SNIPPET_LENGTH_DESC = "Snippet chars, default 300."
 
 
 TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
     "code_intel_status": ToolDefinition(
-        "Index status. Compact by default; verbose/flags add rollups and full snapshots.",
+        "First call for non-trivial code discovery; checks index freshness, coverage, and queryability.",
         {
             "type": "object",
             "properties": {
-                "collection": {"type": "string"},
+                "collection": {"type": "string", "description": _COLLECTION_DESC},
                 "repo": {"type": "string"},
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
@@ -53,19 +57,23 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         },
     ),
     "search_code_intel_text": ToolDefinition(
-        "Text search/list records. Auto handles identifiers; broad search excludes security_pattern.",
+        "Exact indexed search for identifiers, symbols, filenames, config keys, and known strings.",
         {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "minLength": 1},
-                "mode": {"type": "string", "enum": ["search", "enumerate"]},
+                "query": {"type": "string", "description": "Empty string is treated as omitted."},
+                "mode": {
+                    "type": "string",
+                    "enum": ["search", "enumerate"],
+                    "description": "search requires query; enumerate lists records by filters and forbids query.",
+                },
                 "query_mode": {
                     "type": "string",
                     "enum": ["auto", "websearch", "all_terms", "any_terms"],
                     "description": "auto (default), websearch (FTS only), all_terms, any_terms.",
                 },
-                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
-                "collection": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": _LIMIT_50_DESC},
+                "collection": {"type": "string", "description": _COLLECTION_DESC},
                 "repo": {"type": "string"},
                 "record_type": {"type": "string"},
                 "language": {"type": "string"},
@@ -94,13 +102,13 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         },
     ),
     "search_code_intel_semantic": ToolDefinition(
-        "Semantic search embedded records. Use text search for symbols. Broad search excludes security_pattern.",
+        "Concept search for behavior when identifiers are unknown. Use text search for symbols.",
         {
             "type": "object",
             "properties": {
-                "query": {"type": "string"},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
-                "collection": {"type": "string"},
+                "query": {"type": "string", "minLength": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": _LIMIT_50_DESC},
+                "collection": {"type": "string", "description": _COLLECTION_DESC},
                 "repo": {"type": "string"},
                 "record_type": {"type": "string"},
                 "language": {"type": "string"},
@@ -130,29 +138,53 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         },
     ),
     "get_code_intel_record": ToolDefinition(
-        "Fetch one or many records by record_id. Compact by default; include_content adds body.",
+        "Fetch one record by record_id. Compact by default; include_content/include_metadata add body/metadata.",
         {
             "type": "object",
             "properties": {
-                "record_id": {"type": "string", "minLength": 1},
+                "record_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Stable record ID.",
+                },
+                "collection": {"type": "string", "description": _COLLECTION_DESC},
+                "repo": {"type": "string"},
+                "snapshot_id": {"type": "integer", "minimum": 1},
+                "include_historical": {"type": "boolean"},
+                "include_content": {"type": "boolean"},
+                "include_metadata": {"type": "boolean"},
+                "verbose": {"type": "boolean"},
+            },
+            "required": ["record_id"],
+            "additionalProperties": False,
+        },
+    ),
+    "get_code_intel_records": ToolDefinition(
+        "Fetch records by record_ids. Compact by default; include_content/include_metadata add body/metadata.",
+        {
+            "type": "object",
+            "properties": {
                 "record_ids": {
                     "type": "array",
                     "items": {"type": "string", "minLength": 1},
                     "minItems": 1,
                     "maxItems": 100,
+                    "description": "Stable record IDs.",
                 },
-                "collection": {"type": "string"},
+                "collection": {"type": "string", "description": _COLLECTION_DESC},
                 "repo": {"type": "string"},
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
                 "include_content": {"type": "boolean"},
+                "include_metadata": {"type": "boolean"},
                 "verbose": {"type": "boolean"},
             },
+            "required": ["record_ids"],
             "additionalProperties": False,
         },
     ),
     "related_code_intel": ToolDefinition(
-        "Related edges. record_id includes parent edges; symbol ranks incoming/resolved first.",
+        "Heuristic caller/callee and related-symbol candidates. Verify important edges in source.",
         {
             "type": "object",
             "properties": {
@@ -165,9 +197,13 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 },
                 "edge_type": {"type": "string"},
                 "confidence_kind": {"type": "string", "description": _CONFIDENCE_KIND_DESC},
-                "collection": {"type": "string"},
+                "include_unresolved": {
+                    "type": "boolean",
+                    "description": "Include unresolved heuristic targets; default false.",
+                },
+                "collection": {"type": "string", "description": _COLLECTION_DESC},
                 "repo": {"type": "string"},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": _LIMIT_100_DESC},
                 "snapshot_id": {"type": "integer", "minimum": 1},
                 "include_historical": {"type": "boolean"},
                 "verbose": {"type": "boolean"},
@@ -180,8 +216,8 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         {
             "type": "object",
             "properties": {
-                "limit": {"type": "integer", "minimum": 1, "maximum": 500},
-                "collection": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500, "description": _LIMIT_500_DESC},
+                "collection": {"type": "string", "description": _COLLECTION_DESC},
                 "repo": {"type": "string"},
                 "language": {"type": "string"},
                 "file_role": {"type": "string"},
@@ -209,8 +245,8 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         {
             "type": "object",
             "properties": {
-                "limit": {"type": "integer", "minimum": 1, "maximum": 500},
-                "collection": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500, "description": _LIMIT_500_DESC},
+                "collection": {"type": "string", "description": _COLLECTION_DESC},
                 "repo": {"type": "string"},
                 "language": {"type": "string"},
                 "parser": {"type": "string"},
@@ -227,8 +263,8 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         {
             "type": "object",
             "properties": {
-                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
-                "collection": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": _LIMIT_100_DESC},
+                "collection": {"type": "string", "description": _COLLECTION_DESC},
                 "repo": {"type": "string"},
                 "tool": {"type": "string"},
                 "rule_id": {"type": "string"},
@@ -296,6 +332,8 @@ def _translate_validation_error(exc: ValidationError) -> Exception:
         return McpProtocolError(f"missing required argument: {loc}")
     if err_type in _PRETTY_TYPES:
         return McpProtocolTypeError(f"{loc} must be {_PRETTY_TYPES[err_type]}")
+    if err_type == "value_error" and msg.startswith("Value error, "):
+        return McpProtocolError(msg.removeprefix("Value error, "))
     return McpProtocolError(f"{loc}: {msg}")
 
 

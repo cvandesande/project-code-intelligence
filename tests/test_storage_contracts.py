@@ -29,6 +29,7 @@ from project_code_intelligence.storage import (
     insert_records,
     insert_static_runs,
     parser_failure_metadata,
+    pre_resolvable_edge_count,
     pre_resolve_edge_targets,
     resolve_edge_targets,
     row_int,
@@ -539,6 +540,50 @@ class StorageContractTests(unittest.TestCase):
         self.assertEqual(same_dir.target_record_id, "src/main.py::function::target::000001")
         self.assertEqual(same_dir.target_path, "src/main.py")
         self.assertIsNone(missing.target_record_id)
+
+    def test_pre_resolve_edge_targets_batches_and_reports_progress(self) -> None:
+        fake = FakeRowsConnection([
+            cast(
+                "list[db.DbRow]",
+                [
+                    {"symbol": "alpha", "record_id": "src/a.py::function::alpha::000001", "source_path": "src/a.py"},
+                    {"symbol": "beta", "record_id": "src/b.py::function::beta::000001", "source_path": "src/b.py"},
+                ],
+            ),
+            cast(
+                "list[db.DbRow]",
+                [{"symbol": "gamma", "record_id": "src/c.py::function::gamma::000001", "source_path": "src/c.py"}],
+            ),
+        ])
+        edges = [
+            IntelEdge(
+                source_record_id="src/main.py::function::caller::000010",
+                edge_type="call_candidate",
+                target_symbol="alpha",
+            ),
+            IntelEdge(
+                source_record_id="src/main.py::function::caller::000011",
+                edge_type="call_candidate",
+                target_symbol="beta",
+            ),
+            IntelEdge(
+                source_record_id="src/main.py::function::caller::000012",
+                edge_type="call_candidate",
+                target_symbol="gamma",
+            ),
+        ]
+        progress: list[int] = []
+
+        self.assertEqual(pre_resolvable_edge_count(edges), 3)
+        resolved = pre_resolve_edge_targets(
+            cast("db.DbConnection", fake), 7, edges, batch_size=2, progress_fn=progress.append
+        )
+
+        self.assertEqual(resolved, 3)
+        self.assertEqual(pre_resolvable_edge_count(edges), 0)
+        self.assertEqual(progress, [2, 1])
+        self.assertEqual(fake.params[0], [7, ["alpha", "beta"]])
+        self.assertEqual(fake.params[1], [7, ["gamma"]])
 
     def test_pre_resolve_edge_targets_skips_non_resolvable_member_calls(self) -> None:
         fake = FakeRowsConnection([

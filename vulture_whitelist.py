@@ -25,6 +25,8 @@ class _FrameworkHooks:
     include_queryability = None
     include_breakdowns = None
     include_static_summary = None
+    require_exactly_one_record_selector = None
+    empty_optional_strings_are_omitted = None
 
 
 def _uses_protocol_keywords(*, autocommit: object, row_factory: object) -> tuple[object, object]:
@@ -46,5 +48,7 @@ _WHITELIST = (
     _FrameworkHooks.include_queryability,
     _FrameworkHooks.include_breakdowns,
     _FrameworkHooks.include_static_summary,
+    _FrameworkHooks.require_exactly_one_record_selector,
+    _FrameworkHooks.empty_optional_strings_are_omitted,
     _uses_protocol_keywords,
 )

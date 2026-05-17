@@ -14,6 +14,12 @@ DEFAULT_MCP_STATEMENT_TIMEOUT_MS = 15_000
 DEFAULT_MCP_LOCK_TIMEOUT_MS = 5_000
 DEFAULT_MCP_IDLE_IN_TRANSACTION_TIMEOUT_MS = 30_000
 DEFAULT_MCP_MAX_STATUS_ROWS = 1_000
+MCP_DATABASE_ENV_NAMES = (
+    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL",
+    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER",
+    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD",
+    "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH",
+)
 
 
 def mcp_statement_timeout_ms() -> int:
@@ -67,9 +73,18 @@ def configure_session(conn: db.DbConnection) -> None:
 @contextmanager
 def connect() -> Generator[db.DbConnection]:
     settings = db.inferred_database_role_settings(config.DatabaseSettings.from_env(role="mcp"), "ro")
-    with db.connect(settings=settings, readonly=True) as conn:
-        configure_session(conn)
-        yield conn
+    try:
+        with db.connect(settings=settings, readonly=True) as conn:
+            configure_session(conn)
+            yield conn
+    except db.DatabaseConnectionError as exc:
+        env_list = ", ".join(MCP_DATABASE_ENV_NAMES)
+        raise db.DatabaseConnectionError(
+            f"{exc}\n"
+            "pci-mcp could not open its read-only project database. "
+            f"If you generated project-scoped MCP config, export {env_list} in the MCP client's "
+            "environment and restart the client."
+        ) from exc
 
 
 def code_intel_tables_exist(conn: db.DbConnection) -> bool:

@@ -91,6 +91,7 @@ from project_code_intelligence.storage import (
     insert_snapshot,
     insert_static_runs,
     latest_snapshot_info,
+    pre_resolvable_edge_count,
     pre_resolve_edge_targets,
     previous_file_state_signature,
     previous_file_states,
@@ -115,6 +116,19 @@ MIN_PARALLEL_PARSE_FILES = 64
 PARSE_CHUNKS_PER_WORKER = 8
 _DB_WRITE_BATCH_SIZE = 500
 MCP_CONFIG_FORMATS = ("env", "codex", "claude", "opencode")
+MCP_PROJECT_ENV_NAMES = (
+    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL",
+    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER",
+    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD",
+    "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH",
+)
+MCP_STANDALONE_ENV_NAMES = (
+    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL",
+    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER",
+    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD",
+    "PROJECT_CODE_INTELLIGENCE_COLLECTION",
+    "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH",
+)
 
 
 def _chunks(items: list[_T], size: int) -> list[list[_T]]:
@@ -665,13 +679,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--mcp-config",
         choices=MCP_CONFIG_FORMATS,
         help=(
-            "Emit read-only pci-mcp configuration after a successful run. "
+            "Emit project-scoped read-only pci-mcp configuration and required environment exports "
+            "after a successful run. "
             "Use --init-db-only with this option to initialize the DB and print config without indexing."
         ),
     )
     _ = parser.add_argument(
         "--mcp-server-name",
-        help="Server key/name for generated MCP client config snippets. Defaults to pci-<collection>.",
+        help="Server key/name for generated MCP client config snippets. Defaults to project-code-intelligence.",
     )
     return parser
 
@@ -886,10 +901,8 @@ def database_bootstrap_report(bootstrap: db.DatabaseBootstrapResult | None) -> J
     return report
 
 
-def default_mcp_server_name(collection: str) -> str:
-    normalized = "".join(char.lower() if char.isalnum() else "-" for char in collection)
-    parts = [part for part in normalized.split("-") if part]
-    return "pci-" + ("-".join(parts) if parts else "project")
+def default_mcp_server_name(_collection: str) -> str:
+    return "project-code-intelligence"
 
 
 def mcp_command_path() -> str:
@@ -929,27 +942,22 @@ def mcp_config_context(
     )
 
 
+def _mcp_env_export_block(context: McpConfigContext, *, title: str, env_names: tuple[str, ...]) -> str:
+    env = mcp_config_env(context)
+    return "\n".join((
+        title,
+        *(_shell_export(name, env[name]) for name in env_names),
+    ))
+
+
 def mcp_ro_export_block(context: McpConfigContext | None) -> str | None:
     if context is None:
         return None
-    env = mcp_config_env(context)
-    return "\n".join((
-        "",
-        "Export for pci-mcp (RO)",
-        _shell_export("PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL", env["PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL"]),
-        _shell_export(
-            "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER", env["PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER"]
-        ),
-        _shell_export(
-            "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD",
-            env["PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD"],
-        ),
-        _shell_export("PROJECT_CODE_INTELLIGENCE_COLLECTION", env["PROJECT_CODE_INTELLIGENCE_COLLECTION"]),
-        _shell_export(
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH",
-            env["PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH"],
-        ),
-    ))
+    return "\n" + _mcp_env_export_block(
+        context,
+        title="Export for pci-mcp (RO)",
+        env_names=MCP_STANDALONE_ENV_NAMES,
+    )
 
 
 def _toml_string(value: str) -> str:
@@ -964,18 +972,21 @@ def _toml_key(value: str) -> str:
 
 def codex_mcp_config_block(context: McpConfigContext) -> str:
     key = _toml_key(context.server_name)
-    env = mcp_config_env(context)
     lines = [
         f"[mcp_servers.{key}]",
         f"command = {_toml_string(context.command)}",
         f"cwd = {_toml_string(context.cwd)}",
         "startup_timeout_sec = 20",
         "tool_timeout_sec = 120",
-        "",
-        f"[mcp_servers.{key}.env]",
+        "env_vars = [",
     ]
-    lines.extend(f"{name} = {_toml_string(value)}" for name, value in env.items())
+    lines.extend(f"  {_toml_string(name)}," for name in MCP_PROJECT_ENV_NAMES)
+    lines.append("]")
     return "\n".join(lines)
+
+
+def _claude_env_references() -> dict[str, str]:
+    return {name: "${" + name + "}" for name in MCP_PROJECT_ENV_NAMES}
 
 
 def claude_mcp_config_block(context: McpConfigContext) -> str:
@@ -986,11 +997,15 @@ def claude_mcp_config_block(context: McpConfigContext) -> str:
                 "command": context.command,
                 "args": list[str](),
                 "cwd": context.cwd,
-                "env": mcp_config_env(context),
+                "env": _claude_env_references(),
             }
         }
     }
     return json.dumps(payload, indent=2, sort_keys=False)
+
+
+def _opencode_env_references() -> dict[str, str]:
+    return {name: "{env:" + name + "}" for name in MCP_PROJECT_ENV_NAMES}
 
 
 def opencode_mcp_config_block(context: McpConfigContext) -> str:
@@ -1002,11 +1017,42 @@ def opencode_mcp_config_block(context: McpConfigContext) -> str:
                 "command": [context.command],
                 "enabled": True,
                 "cwd": context.cwd,
-                "environment": mcp_config_env(context),
+                "environment": _opencode_env_references(),
             }
         },
     }
     return json.dumps(payload, indent=2, sort_keys=False)
+
+
+def mcp_project_config_path(context: McpConfigContext, config_format: str) -> str:
+    if config_format == "codex":
+        return str(Path(context.cwd) / ".codex" / "config.toml")
+    if config_format == "claude":
+        return str(Path(context.cwd) / ".mcp.json")
+    if config_format == "opencode":
+        return str(Path(context.cwd) / "opencode.json")
+    raise ValueError(f"unsupported MCP project config format: {config_format}")
+
+
+def mcp_project_config_guidance(context: McpConfigContext, config_format: str, body: str) -> str:
+    client = {"codex": "Codex", "claude": "Claude Code", "opencode": "OpenCode"}[config_format]
+    target = mcp_project_config_path(context, config_format)
+    return "\n".join((
+        "",
+        f"{client} project-scoped MCP config",
+        f"Write this snippet to: {target}",
+        "This snippet is project-scoped and references environment variables for credentials.",
+        "Load the required environment variables below before starting the MCP client.",
+        "Do not paste this into a global MCP config; the server key is intentionally reused per project.",
+        "",
+        body,
+        "",
+        _mcp_env_export_block(
+            context,
+            title="Required environment variables for pci-mcp (RO)",
+            env_names=MCP_PROJECT_ENV_NAMES,
+        ),
+    ))
 
 
 def mcp_config_block(context: McpConfigContext | None, config_format: str) -> str | None:
@@ -1015,11 +1061,11 @@ def mcp_config_block(context: McpConfigContext | None, config_format: str) -> st
     if config_format == "env":
         return mcp_ro_export_block(context)
     if config_format == "codex":
-        return "\n".join(("", "Codex MCP config", codex_mcp_config_block(context)))
+        return mcp_project_config_guidance(context, config_format, codex_mcp_config_block(context))
     if config_format == "claude":
-        return "\n".join(("", "Claude MCP config", claude_mcp_config_block(context)))
+        return mcp_project_config_guidance(context, config_format, claude_mcp_config_block(context))
     if config_format == "opencode":
-        return "\n".join(("", "OpenCode MCP config", opencode_mcp_config_block(context)))
+        return mcp_project_config_guidance(context, config_format, opencode_mcp_config_block(context))
     raise ValueError(f"unsupported MCP config format: {config_format}")
 
 
@@ -1595,13 +1641,18 @@ def upload_repo_ingest(
     summary.inserted_files += len(file_ids)
     copy_unchanged_data(conn, ingest, snapshot_id, summary)
     runtime_state.active_metrics.set("db_write_op", "inserting records")
+
+    def add_record_progress(count: int) -> None:
+        add_progress(count)
+        runtime_state.active_metrics.add("inserted_records", count)
+
     inserted_records, _preembedded, _skipped = insert_repo_records(
-        plan, ingest, insert_context, summary, progress_fn=add_progress
+        plan, ingest, insert_context, summary, progress_fn=add_record_progress
     )
     summary.inserted_records += inserted_records
-    runtime_state.active_metrics.add("inserted_records", inserted_records)
     runtime_state.active_metrics.set("db_write_op", "preparing edge targets")
-    pre_resolved_edges = pre_resolve_edge_targets(conn, snapshot_id, ingest.edges)
+    runtime_state.active_metrics.add_phase_total(pre_resolvable_edge_count(ingest.edges))
+    pre_resolved_edges = pre_resolve_edge_targets(conn, snapshot_id, ingest.edges, progress_fn=add_progress)
     runtime_state.active_metrics.add("pre_resolved_edges", pre_resolved_edges)
     runtime_state.active_metrics.add("resolved_edges", pre_resolved_edges)
     runtime_state.active_metrics.set("db_write_op", "inserting edges")
