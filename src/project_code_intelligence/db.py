@@ -32,6 +32,7 @@ DICT_ROW_FACTORY: RowFactory[DictRow] = dict_row
 DbConnection = Connection[DictRow]
 DbRow = DictRow
 MAX_POSTGRES_IDENTIFIER_CHARS = 63
+_PG_IDENTITY_ARG_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_, [].")
 DEFAULT_MAINTENANCE_DB = "postgres"
 DEFAULT_TEMPLATE_DB = "template1"
 DEFAULT_POSTGRES_INDEX_ADMIN_ROLE = "pci_index_admin"
@@ -274,6 +275,24 @@ def _bootstrap_connection_settings(settings: DatabaseSettings) -> DatabaseSettin
     return settings
 
 
+def _writer_admin_fallback(settings: DatabaseSettings) -> DatabaseSettings:
+    """Promote writer credentials to the effective admin when no admin is configured.
+
+    The bundled local pgvector container ships with `codeintel:codeintel` as a superuser
+    and nothing else, so users who don't set PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_*
+    still expect pci-index to create per-project rw/ro roles. Falling back to the writer
+    creds here makes role passwords deterministic across runs (HMAC keyed on the writer
+    password) and unblocks MCP config emission for the default local DB.
+    """
+    if settings.admin_user or settings.admin_password:
+        return settings
+    user = settings.dsn_user if settings.dsn else settings.user
+    password = settings.dsn_password if settings.dsn else settings.password
+    if not user or not password:
+        return settings
+    return replace(settings, admin_user=user, admin_password=password)
+
+
 def maintenance_database_settings(settings: DatabaseSettings) -> DatabaseSettings:
     """Return settings for checking the PostgreSQL server without creating a project DB."""
     return settings_for_database(_bootstrap_connection_settings(settings), DEFAULT_MAINTENANCE_DB)
@@ -423,17 +442,19 @@ def _terminate_database_connections(conn: DbConnection, dbname: str) -> None:
 
 def bootstrap_inferred_database(settings: DatabaseSettings) -> DatabaseBootstrapResult:
     dbname = _ensure_inferred_database_target(settings, operation="bootstrap")
-    bootstrap_settings = _bootstrap_connection_settings(settings)
-    maintenance_settings = maintenance_database_settings(settings)
     rw_role_name = project_database_role_name(dbname, "rw")
     ro_role_name = project_database_role_name(dbname, "ro")
-    create_project_roles = bool(settings.admin_user and settings.admin_password)
-    if not create_project_roles:
+    has_explicit_admin = bool(settings.admin_user and settings.admin_password)
+    if not has_explicit_admin:
         _reject_other_project_scoped_runtime_role(settings, rw_role_name)
         if configured_database_user(settings) == rw_role_name:
             return _connect_existing_inferred_database_with_scoped_role(
                 settings, dbname=dbname, rw_role_name=rw_role_name
             )
+        settings = _writer_admin_fallback(settings)
+    bootstrap_settings = _bootstrap_connection_settings(settings)
+    maintenance_settings = maintenance_database_settings(settings)
+    create_project_roles = bool(settings.admin_user and settings.admin_password)
     connect_autocommit = cast("AutocommitConnect", Connection[DictRow].connect)
     try:
         with connect_autocommit(conninfo(maintenance_settings), autocommit=True, row_factory=DICT_ROW_FACTORY) as conn:
@@ -463,6 +484,7 @@ def bootstrap_inferred_database(settings: DatabaseSettings) -> DatabaseBootstrap
                 grant_project_database_access_privileges(
                     conn, dbname=dbname, rw_role=rw_role_name, ro_role=ro_role_name
                 )
+                reassign_project_database_objects_to_rw_role(conn, rw_role_name)
             conn.commit()
     except (DatabaseConnectionError, PsycopgError) as exc:
         raise DatabaseConnectionError(
@@ -584,6 +606,54 @@ def grant_project_database_access_privileges(conn: DbConnection, *, dbname: str,
     _ = conn.execute(SQL(cast("LiteralString", f"GRANT CONNECT ON DATABASE {dbname} TO {rw_role}, {ro_role}")))
     _ = conn.execute(SQL(cast("LiteralString", f"GRANT USAGE, CREATE ON SCHEMA public TO {rw_role}")))
     _ = conn.execute(SQL(cast("LiteralString", f"GRANT USAGE ON SCHEMA public TO {ro_role}")))
+
+
+def reassign_project_database_objects_to_rw_role(conn: DbConnection, rw_role: str) -> None:
+    """Transfer ownership of legacy PCI tables, sequences, and functions to the per-project rw role.
+
+    Existing project databases created before per-project roles existed have objects owned by
+    whichever writer ran first (typically the bundled `codeintel` superuser). When we later
+    introduce a scoped rw role and switch the runtime writer to it, ensure_schema's
+    `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` and `CREATE OR REPLACE FUNCTION` fail with
+    "must be owner" even when the object is already up to date. Reassigning ownership here is
+    idempotent and one-shot: on freshly created DBs the rw role already owns everything, so
+    each ALTER is a no-op.
+    """
+    _validate_identifier(rw_role, "role name")
+    table_rows = conn.execute(
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename LIKE 'project_code_intel_%'"
+    ).fetchall()
+    for row in table_rows:
+        name = str(row["tablename"])
+        _validate_identifier(name, "table name")
+        _ = conn.execute(SQL(cast("LiteralString", f"ALTER TABLE public.{name} OWNER TO {rw_role}")))
+    sequence_rows = conn.execute(
+        "SELECT sequencename FROM pg_sequences WHERE schemaname = 'public' AND sequencename LIKE 'project_code_intel_%'"
+    ).fetchall()
+    for row in sequence_rows:
+        name = str(row["sequencename"])
+        _validate_identifier(name, "sequence name")
+        _ = conn.execute(SQL(cast("LiteralString", f"ALTER SEQUENCE public.{name} OWNER TO {rw_role}")))
+    function_rows = conn.execute(
+        """
+        SELECT p.proname AS proname, pg_get_function_identity_arguments(p.oid) AS args
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public' AND p.proname LIKE 'project_code_intel_%'
+        """
+    ).fetchall()
+    for row in function_rows:
+        name = str(row["proname"])
+        args = str(row["args"] or "")
+        _validate_identifier(name, "function name")
+        # pg_get_function_identity_arguments returns type names from a system catalog, but we
+        # still gate interpolation to a conservative charset (identifier chars, commas, spaces,
+        # array brackets, schema-qualifier dot). Empty string is valid for no-arg functions.
+        if any(ch not in _PG_IDENTITY_ARG_CHARS for ch in args):
+            raise DatabaseConnectionError(
+                f"refusing to reassign function with unsafe identity arguments: public.{name}({args!r})"
+            )
+        _ = conn.execute(SQL(cast("LiteralString", f"ALTER FUNCTION public.{name}({args}) OWNER TO {rw_role}")))
 
 
 def grant_project_database_object_privileges(conn: DbConnection, *, dbname: str, rw_role: str, ro_role: str) -> None:
