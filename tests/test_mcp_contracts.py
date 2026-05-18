@@ -11,12 +11,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
-from project_code_intelligence import config
+from project_code_intelligence import config, git_utils
 from project_code_intelligence import db as pci_db
 from project_code_intelligence import server as mcp_server
 from project_code_intelligence.embedding.types import EmbeddingEndpointUnavailableError
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError, McpWritePermissionError
 from project_code_intelligence.mcp import db as mcp_db
+from project_code_intelligence.mcp import search as mcp_search
+from project_code_intelligence.mcp import semantic as mcp_semantic
+from project_code_intelligence.mcp import status as mcp_status
 from project_code_intelligence.mcp import tools as mcp_tools
 from project_code_intelligence.mcp import transport as mcp_transport
 from project_code_intelligence.mcp.filters import (
@@ -128,20 +131,20 @@ def mcp_text_payload(response: object) -> dict[str, object]:
 class McpTextSearchTests(unittest.TestCase):
     def test_text_search_terms_extract_code_identifiers(self) -> None:
         self.assertEqual(
-            mcp_tools.search_terms("CONFIG_SELINUX procd-selinux busybox-selinux setfiles"),
+            mcp_search.search_terms("CONFIG_SELINUX procd-selinux busybox-selinux setfiles"),
             ["CONFIG_SELINUX", "procd-selinux", "busybox-selinux", "setfiles"],
         )
-        self.assertEqual(mcp_tools.search_terms("$ZodLazy defineLazy"), ["$ZodLazy", "defineLazy"])
-        self.assertEqual(mcp_tools.search_terms("alpha AND beta OR gamma"), ["alpha", "beta", "gamma"])
-        self.assertEqual(mcp_tools.like_pattern_for_term("a_b%"), "%a\\_b\\%%")
+        self.assertEqual(mcp_search.search_terms("$ZodLazy defineLazy"), ["$ZodLazy", "defineLazy"])
+        self.assertEqual(mcp_search.search_terms("alpha AND beta OR gamma"), ["alpha", "beta", "gamma"])
+        self.assertEqual(mcp_search.like_pattern_for_term("a_b%"), "%a\\_b\\%%")
 
     def test_text_search_auto_uses_term_matching_for_identifier_like_single_terms(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[{"id": 5, "symbol": "defineLazy"}])])
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({"query": "defineLazy"})
 
@@ -159,8 +162,8 @@ class McpTextSearchTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({"query": "procd-selinux"})
 
@@ -178,8 +181,8 @@ class McpSearchRankingTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({"query": "KERNEL_SECURITY_SELINUX"})
 
@@ -233,8 +236,8 @@ class McpStaticFindingFilterTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "table_regclass_exists", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "table_regclass_exists", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_static_findings({"repo": "kubernetes-ingress"})
 
@@ -254,8 +257,8 @@ class McpTextSearchRankingTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({
                 "query": "NewConfigurator",
@@ -275,8 +278,8 @@ class McpTextSearchRankingTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({
                 "query": r"func \(.*\) AddOrUpdateVirtualServer",
@@ -297,8 +300,8 @@ class McpTextSearchExecutionTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({
                 "query": "Duplicate schema id",
@@ -319,8 +322,8 @@ class McpTextSearchExecutionTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({"query": "parse", "query_mode": "websearch"})
 
@@ -346,8 +349,8 @@ class McpTextSearchExecutionTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({"query": "schema"})
 
@@ -361,8 +364,8 @@ class McpTextSearchExecutionTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({
                 "query": "shell_backtick_execution",
@@ -379,8 +382,8 @@ class McpTextSearchExecutionTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({
                 "query": "cooperative scheduling budget",
@@ -398,8 +401,8 @@ class McpTextSearchExecutionTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({
                 "query": "security vulnerability",
@@ -419,8 +422,8 @@ class McpTextSearchExecutionTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({
                 "query": "CONFIG_SELINUX procd-selinux busybox-selinux setfiles",
@@ -466,8 +469,8 @@ class McpTextSearchExecutionTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({"query": "missing setfiles"})
 
@@ -485,8 +488,8 @@ class McpTextSearchExecutionTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({
                 "query": "CONFIG_SELINUX procd-selinux",
@@ -506,8 +509,8 @@ class McpTextSearchExecutionTests(unittest.TestCase):
         conn = QueuedConnection([FakeCursor(many=[])])
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({"mode": "enumerate", "query": ""})
 
@@ -518,7 +521,7 @@ class McpTextSearchExecutionTests(unittest.TestCase):
     def test_text_search_mode_search_requires_query(self) -> None:
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             self.assertRaises(McpProtocolError) as ctx,
         ):
             _ = mcp_tools.tool_search_code_intel_text({"mode": "search"})
@@ -527,7 +530,7 @@ class McpTextSearchExecutionTests(unittest.TestCase):
     def test_text_search_mode_enumerate_rejects_query(self) -> None:
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             self.assertRaises(McpProtocolError) as ctx,
         ):
             _ = mcp_tools.tool_search_code_intel_text({"mode": "enumerate", "query": "hello"})
@@ -539,8 +542,8 @@ class McpTextSearchExecutionTests(unittest.TestCase):
         conn = QueuedConnection([FakeCursor(one=None), FakeCursor(many=[])])
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_list_code_intel_files({"snapshot_id": 9999})
         payload = mcp_text_payload(response)
@@ -554,8 +557,8 @@ class McpTextSearchExecutionTests(unittest.TestCase):
         conn = QueuedConnection([FakeCursor(many=[])])
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_search_code_intel_text({"is_untracked": False, "is_generated": False})
         query, params = conn.calls[0]
@@ -571,9 +574,9 @@ class McpTextSearchExecutionTests(unittest.TestCase):
         ])
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_search_code_intel_semantic({
                 "query": "MCP transport",
@@ -593,8 +596,8 @@ class McpTextSearchExecutionTests(unittest.TestCase):
         conn = QueuedConnection([FakeCursor(many=[])])
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_list_code_intel_files({"is_untracked": False})
         query, params = conn.calls[0]
@@ -607,8 +610,8 @@ class McpTextSearchExecutionTests(unittest.TestCase):
         conn = QueuedConnection([FakeCursor(many=[{"id": 1, "snippet_raw": snippet_raw}])])
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({"query": "x", "snippet_length": 50})
         payload = mcp_text_payload(response)
@@ -626,8 +629,8 @@ class McpTextSearchExecutionTests(unittest.TestCase):
         conn = QueuedConnection([FakeCursor(many=[])])
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({})
         payload = mcp_text_payload(response)
@@ -636,8 +639,8 @@ class McpTextSearchExecutionTests(unittest.TestCase):
         conn = QueuedConnection([FakeCursor(many=[])])
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({"mode": "enumerate"})
         payload = mcp_text_payload(response)
@@ -647,8 +650,8 @@ class McpTextSearchExecutionTests(unittest.TestCase):
         conn = QueuedConnection([FakeCursor(many=[])])
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_search_code_intel_text({"mode": "enumerate", "limit": 2})
 
@@ -664,8 +667,8 @@ class McpPathFilterTests(unittest.TestCase):
         conn = QueuedConnection([FakeCursor(many=[])])
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_search_code_intel_text({"source_path_prefix": "cmd/"})
         query, params = conn.calls[0]
@@ -748,8 +751,8 @@ class McpPathFilterTests(unittest.TestCase):
         conn = QueuedConnection([FakeCursor(one=None)])
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
             self.assertRaises(McpProtocolError),
         ):
             _ = mcp_tools.tool_search_code_intel_text({
@@ -764,9 +767,9 @@ class McpSemanticSearchTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_semantic({"query": "break circular import"})
 
@@ -796,9 +799,9 @@ class McpSemanticSearchTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_semantic({
                 "query": "what happens when a oneshot receiver is dropped",
@@ -821,9 +824,9 @@ class McpSemanticSearchTests(unittest.TestCase):
         self.assertEqual(params[-7], 0.0)
         self.assertEqual(params[-6], 0.0)
         self.assertEqual(params[-5], 0.0)
-        self.assertEqual(params[-4], mcp_tools.SEMANTIC_SOURCE_ROLE_DISTANCE_BOOST)
-        self.assertEqual(params[-3], mcp_tools.SEMANTIC_NON_SOURCE_DISTANCE_PENALTY)
-        self.assertEqual(params[-2], mcp_tools.SEMANTIC_GENERATED_DISTANCE_PENALTY)
+        self.assertEqual(params[-4], mcp_semantic.SEMANTIC_SOURCE_ROLE_DISTANCE_BOOST)
+        self.assertEqual(params[-3], mcp_semantic.SEMANTIC_NON_SOURCE_DISTANCE_PENALTY)
+        self.assertEqual(params[-2], mcp_semantic.SEMANTIC_GENERATED_DISTANCE_PENALTY)
 
         payload = mcp_text_payload(response)
         result = cast("list[dict[str, object]]", payload["results"])[0]
@@ -859,9 +862,9 @@ class McpSemanticSearchTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_semantic({
                 "query": "socket readiness false positive clear readiness loop",
@@ -879,9 +882,9 @@ class McpSemanticSearchTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_search_code_intel_semantic({"query": "tests for oneshot receiver drop"})
 
@@ -898,27 +901,27 @@ class McpSemanticSearchTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_search_code_intel_semantic({
                 "query": "where does VirtualServer policy generation call generatePolicies",
             })
 
         _query, params = conn.calls[0]
-        self.assertEqual(params[-7], mcp_tools.SEMANTIC_EXECUTABLE_SYMBOL_DISTANCE_BOOST)
-        self.assertEqual(params[-6], mcp_tools.SEMANTIC_STRUCTURAL_SYMBOL_DISTANCE_PENALTY)
-        self.assertEqual(params[-5], mcp_tools.SEMANTIC_VALIDATION_DISTANCE_PENALTY)
+        self.assertEqual(params[-7], mcp_semantic.SEMANTIC_EXECUTABLE_SYMBOL_DISTANCE_BOOST)
+        self.assertEqual(params[-6], mcp_semantic.SEMANTIC_STRUCTURAL_SYMBOL_DISTANCE_PENALTY)
+        self.assertEqual(params[-5], mcp_semantic.SEMANTIC_VALIDATION_DISTANCE_PENALTY)
 
     def test_semantic_search_expands_translation_queries_toward_implementation_terms(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[])])
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_search_code_intel_semantic({
                 "query": "how are VirtualServer policies translated into nginx configuration",
@@ -935,18 +938,18 @@ class McpSemanticSearchTests(unittest.TestCase):
         self.assertNotIn("are", rank_terms)
         for supplemental_term in ("generate", "render", "build", "add", "config", "template"):
             self.assertIn(supplemental_term, rank_terms)
-        self.assertEqual(params[-7], mcp_tools.SEMANTIC_EXECUTABLE_SYMBOL_DISTANCE_BOOST)
-        self.assertEqual(params[-6], mcp_tools.SEMANTIC_STRUCTURAL_SYMBOL_DISTANCE_PENALTY)
-        self.assertEqual(params[-5], mcp_tools.SEMANTIC_VALIDATION_DISTANCE_PENALTY)
+        self.assertEqual(params[-7], mcp_semantic.SEMANTIC_EXECUTABLE_SYMBOL_DISTANCE_BOOST)
+        self.assertEqual(params[-6], mcp_semantic.SEMANTIC_STRUCTURAL_SYMBOL_DISTANCE_PENALTY)
+        self.assertEqual(params[-5], mcp_semantic.SEMANTIC_VALIDATION_DISTANCE_PENALTY)
 
     def test_semantic_search_treats_emitted_generated_config_queries_as_implementation_intent(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[])])
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_search_code_intel_semantic({
                 "query": "how are VirtualServer policies emitted in generated nginx configuration",
@@ -959,18 +962,18 @@ class McpSemanticSearchTests(unittest.TestCase):
         self.assertIn("configuration", rank_terms)
         self.assertIn("generate", rank_terms)
         self.assertIn("template", rank_terms)
-        self.assertEqual(params[-7], mcp_tools.SEMANTIC_EXECUTABLE_SYMBOL_DISTANCE_BOOST)
-        self.assertEqual(params[-6], mcp_tools.SEMANTIC_STRUCTURAL_SYMBOL_DISTANCE_PENALTY)
-        self.assertEqual(params[-5], mcp_tools.SEMANTIC_VALIDATION_DISTANCE_PENALTY)
+        self.assertEqual(params[-7], mcp_semantic.SEMANTIC_EXECUTABLE_SYMBOL_DISTANCE_BOOST)
+        self.assertEqual(params[-6], mcp_semantic.SEMANTIC_STRUCTURAL_SYMBOL_DISTANCE_PENALTY)
+        self.assertEqual(params[-5], mcp_semantic.SEMANTIC_VALIDATION_DISTANCE_PENALTY)
 
     def test_semantic_search_disables_executable_boost_for_structural_queries(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[])])
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_search_code_intel_semantic({"query": "generate policy struct fields"})
 
@@ -984,9 +987,9 @@ class McpSemanticSearchTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_search_code_intel_semantic({
                 "query": "VirtualServer policy validation schema fields",
@@ -1011,9 +1014,9 @@ class McpSemanticSearchTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_semantic({
                 "query": "shell command execution",
@@ -1030,9 +1033,9 @@ class McpSemanticSearchTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)) as query_embedding,
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_semantic({
                 "query": "defineLazy",
@@ -1054,9 +1057,9 @@ class McpSemanticSearchTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_semantic({
                 "query": "cooperative scheduling budget",
@@ -1073,8 +1076,8 @@ class McpSemanticSearchTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({
                 "query": "budget",
@@ -1093,8 +1096,8 @@ class McpSemanticSearchTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({
                 "query": "budget",
@@ -1111,8 +1114,8 @@ class McpSemanticSearchTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {"PCI_COLLECTION": "tokio"}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({
                 "query": "runtime",
@@ -1139,8 +1142,8 @@ class McpRelatedCodeIntelTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_related_code_intel({"symbol": "parse", "direction": "outgoing"})
 
@@ -1155,8 +1158,8 @@ class McpRelatedCodeIntelTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_related_code_intel({"symbol": "parse", "include_unresolved": True})
 
@@ -1185,8 +1188,8 @@ class McpRelatedCodeIntelTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_related_code_intel({"record_id": chunk_id})
 
@@ -1208,8 +1211,8 @@ class McpRelatedCodeIntelTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_related_code_intel({"record_id": record_id})
 
@@ -1248,8 +1251,8 @@ class McpRelatedCodeIntelTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_related_code_intel({"symbol": "defineLazy"})
 
@@ -1292,8 +1295,8 @@ class McpRelatedCodeIntelTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_related_code_intel({"symbol": "bootstrap", "direction": "outgoing"})
 
@@ -1323,8 +1326,8 @@ class McpRelatedCodeIntelTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_related_code_intel({"symbol": "parse", "direction": "outgoing"})
 
@@ -1369,8 +1372,8 @@ class McpRelatedCodeIntelTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_related_code_intel({"symbol": "bootstrap", "direction": "outgoing"})
 
@@ -1425,8 +1428,8 @@ class McpRelatedCodeIntelTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_related_code_intel({"symbol": "$BaseLazy"})
 
@@ -1588,8 +1591,8 @@ class McpContractTests(unittest.TestCase):
                 {"PCI_COLLECTION": "project-code-intelligence"},
                 clear=True,
             ),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_get_code_intel_record({"record_id": "README.md::doc::000001"})
 
@@ -1608,8 +1611,8 @@ class McpContractTests(unittest.TestCase):
                 {"PCI_COLLECTION": "project-code-intelligence"},
                 clear=True,
             ),
-            patch.object(mcp_tools, "table_regclass_exists", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "table_regclass_exists", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_get_static_finding({"id": 1})
 
@@ -1629,8 +1632,8 @@ class McpContractTests(unittest.TestCase):
                 {"PCI_COLLECTION": "project-code-intelligence"},
                 clear=True,
             ),
-            patch.object(mcp_tools, "table_regclass_exists", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "table_regclass_exists", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_get_static_code_flow({"finding_id": 1})
 
@@ -1664,8 +1667,8 @@ class McpContractTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "table_regclass_exists", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "table_regclass_exists", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_get_static_finding({"id": 7})
 
@@ -1699,8 +1702,8 @@ class McpContractTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "table_regclass_exists", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "table_regclass_exists", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_get_static_finding({
                 "id": 7,
@@ -1723,16 +1726,16 @@ class McpContractTests(unittest.TestCase):
         endpoint = "http://127.0.0.1:18081/v1/embeddings"
 
         with (
-            patch.object(mcp_tools.config, "default_embedding_endpoint", return_value=endpoint),
-            patch.object(mcp_tools.embeddings, "resolve_embedding_endpoint_model", return_value="local"),
+            patch.object(mcp_semantic.config, "default_embedding_endpoint", return_value=endpoint),
+            patch.object(mcp_semantic.embeddings, "resolve_embedding_endpoint_model", return_value="local"),
             patch.object(
-                mcp_tools.embeddings,
+                mcp_semantic.embeddings,
                 "embed_with_endpoint",
                 side_effect=EmbeddingEndpointUnavailableError("connection refused"),
             ),
             self.assertRaises(McpProtocolError) as raised,
         ):
-            _ = mcp_tools.query_embedding("find request handler")
+            _ = mcp_semantic.query_embedding("find request handler")
 
         message = str(raised.exception)
         self.assertIn("semantic search requires an embedding endpoint", message)
@@ -1743,10 +1746,10 @@ class McpContractTests(unittest.TestCase):
         endpoint = "http://127.0.0.1:18081/v1/embeddings"
 
         with (
-            patch.object(mcp_tools.config, "default_embedding_endpoint", return_value=endpoint),
-            patch.object(mcp_tools.embeddings, "resolve_embedding_endpoint_model", return_value="local"),
+            patch.object(mcp_semantic.config, "default_embedding_endpoint", return_value=endpoint),
+            patch.object(mcp_semantic.embeddings, "resolve_embedding_endpoint_model", return_value="local"),
             patch.object(
-                mcp_tools.embeddings,
+                mcp_semantic.embeddings,
                 "embed_with_endpoint",
                 side_effect=EmbeddingEndpointUnavailableError("connection refused"),
             ),
@@ -1890,8 +1893,8 @@ class McpArgumentNormalizationTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = handle_tool_call(
                 {
@@ -1957,11 +1960,11 @@ class McpStatusWarningTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools, "table_regclass_exists", return_value=False),
-            patch.object(mcp_tools, "schema_migration_versions", return_value=[]),
-            patch.object(mcp_tools.git_utils, "run_git", return_value="head456"),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "table_regclass_exists", return_value=False),
+            patch.object(mcp_status, "schema_migration_versions", return_value=[]),
+            patch.object(git_utils, "run_git", return_value="head456"),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_code_intel_status({})
 
@@ -2010,11 +2013,11 @@ class McpStatusWarningTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools, "table_regclass_exists", return_value=False),
-            patch.object(mcp_tools, "schema_migration_versions", return_value=[]),
-            patch.object(mcp_tools.git_utils, "run_git", return_value="abc123"),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "table_regclass_exists", return_value=False),
+            patch.object(mcp_status, "schema_migration_versions", return_value=[]),
+            patch.object(git_utils, "run_git", return_value="abc123"),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_code_intel_status({})
 
@@ -2043,11 +2046,11 @@ class McpStatusWarningTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools, "table_regclass_exists", return_value=False),
-            patch.object(mcp_tools, "schema_migration_versions", return_value=[]),
-            patch.object(mcp_tools.git_utils, "run_git", return_value="abc123"),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "table_regclass_exists", return_value=False),
+            patch.object(mcp_status, "schema_migration_versions", return_value=[]),
+            patch.object(git_utils, "run_git", return_value="abc123"),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_code_intel_status({"repo": "missing-repo"})
 
@@ -2063,8 +2066,8 @@ class McpEnumScopeWarningTests(unittest.TestCase):
         conn = QueuedConnection([FakeCursor(many=[]), FakeCursor(one={"exists": 1})])
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_search_code_intel_text({"query": "needle", "language": "cobol"})
         warnings = cast("list[dict[str, object]]", mcp_text_payload(response).get("warnings", []))
@@ -2077,8 +2080,8 @@ class McpEnumScopeWarningTests(unittest.TestCase):
         conn = QueuedConnection([FakeCursor(many=[]), FakeCursor(one={"exists": 1})])
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_list_code_intel_files({"file_role": "no_such_role"})
         warnings = cast("list[dict[str, object]]", mcp_text_payload(response).get("warnings", []))
@@ -2088,8 +2091,8 @@ class McpEnumScopeWarningTests(unittest.TestCase):
         conn = QueuedConnection([FakeCursor(many=[]), FakeCursor(one={"exists": 1})])
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             # No query, no explicit mode → silently falls through to enumerate; warning surfaces it.
             response = mcp_tools.tool_search_code_intel_text({})
@@ -2112,8 +2115,8 @@ class McpParserFailureToolTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "table_regclass_exists", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "table_regclass_exists", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_list_code_intel_parser_failures({"repo": "tokio"})
 
@@ -2164,8 +2167,8 @@ class McpListFilesRecordBackedTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_list_code_intel_files({
                 "repo": "kubernetes-ingress",
@@ -2191,8 +2194,8 @@ class McpListFilesRecordBackedTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_list_code_intel_files({
                 "repo": "kubernetes-ingress",
@@ -2227,10 +2230,10 @@ class McpStatusRuntimeIdentityTests(unittest.TestCase):
                 },
                 clear=True,
             ),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools, "table_regclass_exists", return_value=False),
-            patch.object(mcp_tools.git_utils, "run_git", return_value="abc123"),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "table_regclass_exists", return_value=False),
+            patch.object(git_utils, "run_git", return_value="abc123"),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_code_intel_status({"include_runtime": True})
 
@@ -2242,7 +2245,10 @@ class McpStatusRuntimeIdentityTests(unittest.TestCase):
         config_section = cast("dict[str, object]", runtime["config"])
 
         self.assertEqual(package["name"], "project-code-intelligence")
-        self.assertIn("mcp/tools.py", cast("str", package["module_path"]))
+        # Checks that server_runtime_identity reports a real package file, not a
+        # specific implementation file (status helpers were extracted to a
+        # submodule, so the path may resolve to _status.py instead of tools.py).
+        self.assertIn("project_code_intelligence/mcp", cast("str", package["module_path"]))
         self.assertEqual(package["source_git_commit"], "abc123")
         self.assertIsInstance(process["pid"], int)
         self.assertIn("python", cast("str", process["executable"]))
@@ -2264,8 +2270,8 @@ class McpListFilesBooleanFilterTests(unittest.TestCase):
         conn = QueuedConnection([FakeCursor(many=[])])
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_list_code_intel_files({"source_path": "pkg/client/file.go"})
 
@@ -2278,8 +2284,8 @@ class McpListFilesBooleanFilterTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_list_code_intel_files({
                 "source_path": "pkg/client/applyconfiguration/configuration/v1/accesscontrol.go",
@@ -2301,8 +2307,8 @@ class McpListFilesBooleanFilterTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_list_code_intel_files({"is_generated": False})
 
@@ -2317,8 +2323,8 @@ class McpToolShapeTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_list_code_intel_files({})
 
@@ -2336,8 +2342,8 @@ class McpToolShapeTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_list_code_intel_files({"verbose": True})
 
@@ -2379,8 +2385,8 @@ class McpToolShapeTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_get_code_intel_record({"record_id": "README.md::doc::000001"})
 
@@ -2418,8 +2424,8 @@ class McpToolShapeTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(default_conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(default_conn)),
         ):
             response = mcp_tools.tool_get_code_intel_record({"record_id": "README.md::doc::000001"})
 
@@ -2446,8 +2452,8 @@ class McpToolShapeTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(metadata_conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(metadata_conn)),
         ):
             response = mcp_tools.tool_get_code_intel_record({
                 "record_id": "README.md::doc::000001",
@@ -2466,8 +2472,8 @@ class McpToolShapeTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             _ = mcp_tools.tool_list_code_intel_files({"source_path_prefix": "cmd/"})
 
@@ -2483,7 +2489,7 @@ class McpToolShapeTests(unittest.TestCase):
     def test_list_files_rejects_both_source_path_and_prefix(self) -> None:
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             self.assertRaises(McpProtocolError),
         ):
             _ = mcp_tools.tool_list_code_intel_files({
@@ -2522,11 +2528,11 @@ class McpToolShapeTests(unittest.TestCase):
 
                 with (
                     patch.dict(os.environ, {}, clear=True),
-                    patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-                    patch.object(mcp_tools, "table_regclass_exists", return_value=False),
-                    patch.object(mcp_tools, "schema_migration_versions", return_value=[]),
-                    patch.object(mcp_tools.git_utils, "run_git", return_value="abc123"),
-                    patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+                    patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+                    patch.object(mcp_db, "table_regclass_exists", return_value=False),
+                    patch.object(mcp_status, "schema_migration_versions", return_value=[]),
+                    patch.object(git_utils, "run_git", return_value="abc123"),
+                    patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
                 ):
                     response = mcp_tools.tool_code_intel_status(args)
 
@@ -2558,11 +2564,11 @@ class McpToolShapeTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {"PCI_COLLECTION": "zod"}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools, "table_regclass_exists", return_value=False),
-            patch.object(mcp_tools, "schema_migration_versions", return_value=[]),
-            patch.object(mcp_tools.git_utils, "run_git", return_value="abc123"),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "table_regclass_exists", return_value=False),
+            patch.object(mcp_status, "schema_migration_versions", return_value=[]),
+            patch.object(git_utils, "run_git", return_value="abc123"),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_code_intel_status({"repo": "zod"})
 
@@ -2595,11 +2601,11 @@ class McpToolShapeTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {"PCI_COLLECTION": "zod"}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools, "table_regclass_exists", return_value=False),
-            patch.object(mcp_tools, "schema_migration_versions", return_value=[]),
-            patch.object(mcp_tools.git_utils, "run_git", return_value="abc123"),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "table_regclass_exists", return_value=False),
+            patch.object(mcp_status, "schema_migration_versions", return_value=[]),
+            patch.object(git_utils, "run_git", return_value="abc123"),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_code_intel_status({"verbose": True})
 
@@ -2620,11 +2626,11 @@ class McpToolShapeTests(unittest.TestCase):
         conn = QueuedConnection([FakeCursor(many=[]) for _ in range(10)])
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools, "table_regclass_exists", return_value=False),
-            patch.object(mcp_tools, "schema_migration_versions", return_value=[]),
-            patch.object(mcp_tools.git_utils, "run_git", return_value="abc123"),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "table_regclass_exists", return_value=False),
+            patch.object(mcp_status, "schema_migration_versions", return_value=[]),
+            patch.object(git_utils, "run_git", return_value="abc123"),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_code_intel_status({"include_breakdowns": True})
 
@@ -2671,11 +2677,11 @@ class McpToolShapeTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools, "table_regclass_exists", return_value=False),
-            patch.object(mcp_tools, "schema_migration_versions", return_value=[]),
-            patch.object(mcp_tools.git_utils, "run_git", return_value="abc123"),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "table_regclass_exists", return_value=False),
+            patch.object(mcp_status, "schema_migration_versions", return_value=[]),
+            patch.object(git_utils, "run_git", return_value="abc123"),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_code_intel_status({})
 
@@ -2728,11 +2734,11 @@ class McpToolShapeTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools, "table_regclass_exists", return_value=False),
-            patch.object(mcp_tools, "schema_migration_versions", return_value=[]),
-            patch.object(mcp_tools.git_utils, "run_git", return_value="abc123"),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "table_regclass_exists", return_value=False),
+            patch.object(mcp_status, "schema_migration_versions", return_value=[]),
+            patch.object(git_utils, "run_git", return_value="abc123"),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_code_intel_status({"include_queryability": True})
 
@@ -2788,11 +2794,11 @@ class McpToolShapeTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools, "table_regclass_exists", return_value=False),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
-            patch.object(mcp_tools.Path, "cwd", return_value=Path("/work/project-code-intelligence")),
-            patch.object(mcp_tools.git_utils, "run_git", return_value=None) as run_git,
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "table_regclass_exists", return_value=False),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(Path, "cwd", return_value=Path("/work/project-code-intelligence")),
+            patch.object(git_utils, "run_git", return_value=None) as run_git,
         ):
             response = mcp_tools.tool_code_intel_status({"collection": "zod", "repo": "zod"})
 
@@ -2843,11 +2849,11 @@ class McpToolShapeTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools, "table_regclass_exists", return_value=False),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
-            patch.object(mcp_tools.Path, "cwd", return_value=Path("/work/project-code-intelligence")),
-            patch.object(mcp_tools.git_utils, "run_git", side_effect=[None, "b6071fc0"]) as run_git,
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "table_regclass_exists", return_value=False),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(Path, "cwd", return_value=Path("/work/project-code-intelligence")),
+            patch.object(git_utils, "run_git", side_effect=[None, "b6071fc0"]) as run_git,
         ):
             response = mcp_tools.tool_code_intel_status({"collection": "zod", "repo": "zod"})
 
@@ -2874,8 +2880,8 @@ class McpToolShapeTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_get_code_intel_record({
                 "record_id": "src/lib.rs::function::handler::000001",
@@ -2905,8 +2911,8 @@ class McpToolShapeTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_get_code_intel_record({
                 "record_id": "src/lib.rs::function::handler::000001",
@@ -2931,8 +2937,8 @@ class McpToolShapeTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_get_code_intel_record({
                 "record_ids": ["a::doc::000001", "b::doc::000001", "missing::doc::000001"],
@@ -2964,8 +2970,8 @@ class McpToolShapeTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_get_code_intel_record({
                 "record_id": "README.md::doc::000001",
@@ -3047,6 +3053,36 @@ class McpServerEntryPointTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         stdio_main.assert_called_once_with()
+
+
+class ToolRegistryConsistencyTests(unittest.TestCase):
+    """Catch drift between the three name-keyed tool registries.
+
+    Tools live in three places keyed by name: TOOL_DEFINITIONS (JSON Schema),
+    TOOL_INPUT_MODELS (Pydantic validation), and TOOLS (runtime dispatch).
+    Adding a tool requires editing all three; missing one is a silent failure.
+    """
+
+    def test_tool_definitions_match_input_models(self) -> None:
+        self.assertEqual(TOOL_DEFINITIONS.keys(), TOOL_INPUT_MODELS.keys())
+
+    def test_tools_registry_matches_definitions(self) -> None:
+        self.assertEqual(mcp_tools.TOOLS.keys(), TOOL_DEFINITIONS.keys())
+        for name, (definition, handler) in mcp_tools.TOOLS.items():
+            self.assertIs(
+                definition,
+                TOOL_DEFINITIONS[name],
+                msg=f"{name}: TOOLS definition is not the same object as TOOL_DEFINITIONS[{name!r}]",
+            )
+            self.assertTrue(callable(handler), msg=f"{name}: handler is not callable")
+
+    def test_get_code_intel_records_intentionally_shares_handler(self) -> None:
+        # tool_get_code_intel_record handles both singular and plural argument
+        # shapes (record_id vs record_ids). If this assertion ever needs to
+        # change, either rename to make the sharing explicit or split into two
+        # handlers with distinct argument-shape dispatch.
+        self.assertIs(mcp_tools.TOOLS["get_code_intel_record"][1], mcp_tools.tool_get_code_intel_record)
+        self.assertIs(mcp_tools.TOOLS["get_code_intel_records"][1], mcp_tools.tool_get_code_intel_record)
 
 
 if __name__ == "__main__":

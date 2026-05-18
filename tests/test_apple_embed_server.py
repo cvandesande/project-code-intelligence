@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 import unittest
+from email.message import Message
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
@@ -50,9 +51,14 @@ class _TestHandler(AppleEmbedHandler):
         self._wfile = io.BytesIO()
         self.wfile = self._wfile
         self.rfile = io.BytesIO(body)
-        self.headers = (  # type: ignore[assignment]
-            {"Content-Length": str(len(body))} if body else {}
-        )
+        # `BaseHTTPRequestHandler.headers` is `email.message.Message` (HTTP
+        # headers reuse the stdlib email-RFC parser). Build a real Message
+        # so the test stub matches the production type — `parse_json_body`
+        # only reads `.get("Content-Length")`, which Message implements.
+        headers = Message()
+        if body:
+            headers["Content-Length"] = str(len(body))
+        self.headers = headers
         self._mock_model_name = model_name
         self._captured_status = 0
 
@@ -84,9 +90,14 @@ class _TestHandler(AppleEmbedHandler):
         return self._captured_status
 
     @property
-    def response_body(self) -> object:
+    def response_body(self) -> dict[str, object] | None:
         data = self._wfile.getvalue()
-        return cast("object", json.loads(data)) if data else None
+        if not data:
+            return None
+        parsed = cast("object", json.loads(data))
+        if not isinstance(parsed, dict):
+            raise TypeError("response body is not a JSON object")
+        return cast("dict[str, object]", parsed)
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +310,7 @@ class AppleEmbedHandlerPostTests(unittest.TestCase):
 
     def test_missing_content_length_returns_400(self) -> None:
         handler = _TestHandler("/v1/embeddings", b'{"input":"x"}')
-        handler.headers = {}  # type: ignore[assignment]
+        handler.headers = Message()
         handler.do_POST()
         self.assertEqual(handler.captured_status, 400)
 
@@ -325,7 +336,10 @@ class AppleEmbedHandlerPostTests(unittest.TestCase):
             handler.do_POST()
         self.assertEqual(handler.captured_status, 400)
         body_obj = handler.response_body
-        self.assertIn("bad vectors", body_obj["error"]["message"])  # type: ignore[index]
+        if body_obj is None:
+            self.fail("expected response body, got None")
+        error = cast("dict[str, str]", body_obj["error"])
+        self.assertIn("bad vectors", error["message"])
 
     def test_embed_runtime_error_returns_400(self) -> None:
         body = json.dumps({"input": "hello"}).encode()
@@ -337,7 +351,10 @@ class AppleEmbedHandlerPostTests(unittest.TestCase):
             handler.do_POST()
         self.assertEqual(handler.captured_status, 400)
         body_obj = handler.response_body
-        self.assertIn("MLX OOM", body_obj["error"]["message"])  # type: ignore[index]
+        if body_obj is None:
+            self.fail("expected response body, got None")
+        error = cast("dict[str, str]", body_obj["error"])
+        self.assertIn("MLX OOM", error["message"])
 
     def test_success_returns_200_with_embedding_payload(self) -> None:
         body = json.dumps({"input": ["hello", "world"]}).encode()
@@ -349,9 +366,11 @@ class AppleEmbedHandlerPostTests(unittest.TestCase):
             handler.do_POST()
         self.assertEqual(handler.captured_status, 200)
         payload = handler.response_body
-        self.assertEqual(payload["object"], "list")  # type: ignore[index]
-        self.assertEqual(payload["model"], "qwen3")  # type: ignore[index]
-        self.assertEqual(len(payload["data"]), 2)  # type: ignore[index]
+        if payload is None:
+            self.fail("expected response body, got None")
+        self.assertEqual(payload["object"], "list")
+        self.assertEqual(payload["model"], "qwen3")
+        self.assertEqual(len(cast("list[object]", payload["data"])), 2)
 
 
 if __name__ == "__main__":

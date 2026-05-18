@@ -62,11 +62,10 @@ from project_code_intelligence.models import (
 )
 from project_code_intelligence.parsers import parse_file
 from project_code_intelligence.profile_context import set_active_profile
+from project_code_intelligence.progress import progress_event, runtime_heartbeat
 from project_code_intelligence.reporting import report_ingests
 from project_code_intelligence.runtime import (
     format_duration,
-    progress_event,
-    runtime_heartbeat,
     runtime_heartbeat_seconds,
 )
 from project_code_intelligence.sarif import (

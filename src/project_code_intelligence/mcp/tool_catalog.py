@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, cast
 from pydantic import ValidationError
 
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError
+from project_code_intelligence.mcp.taxonomies import CONFIDENCE_KIND_VALUES
 from project_code_intelligence.mcp.tool_inputs import TOOL_INPUT_MODELS
 
 if TYPE_CHECKING:
@@ -24,7 +25,10 @@ class ToolDefinition:
 # Shared property-description text.
 _SOURCE_PATH_DESC = "Exact path; repo-relative accepted."
 _SOURCE_PATH_PREFIX_DESC = "Subtree prefix; repo-relative accepted. Mutex with source_path."
-_CONFIDENCE_KIND_DESC = "confirmed or heuristic_candidate."
+# Generated from CONFIDENCE_KIND_VALUES so the description stays in lockstep with
+# the canonical ConfidenceKind alias in `_taxonomies.py`. Previously hard-coded
+# to "confirmed or heuristic_candidate." which no producer ever emits.
+_CONFIDENCE_KIND_DESC = ", ".join(CONFIDENCE_KIND_VALUES[:-1]) + ", or " + CONFIDENCE_KIND_VALUES[-1] + "."
 _COLLECTION_DESC = "Collection scope; omit when repo alone is enough."
 _LIMIT_50_DESC = "Max results, 1-50."
 _LIMIT_100_DESC = "Max results, 1-100."

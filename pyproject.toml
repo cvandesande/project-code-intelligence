@@ -195,6 +195,14 @@ ignore = [
   "TRY003",
 ]
 
+[tool.ruff.lint.flake8-type-checking]
+# pydantic BaseModel subclasses use `get_type_hints` at class-creation time
+# to build validators, so annotations referencing project Literal aliases
+# (e.g. ConfidenceKind in mcp.taxonomies) must resolve at runtime — moving
+# those imports under TYPE_CHECKING would break pydantic. Declaring our
+# BaseModel base here tells ruff to leave those imports at module scope.
+runtime-evaluated-base-classes = ["pydantic.BaseModel"]
+
 [tool.ruff.lint.per-file-ignores]
 # Profile methods are extension hooks. They intentionally keep instance method
 # shape even when default/example implementations do not need instance state.

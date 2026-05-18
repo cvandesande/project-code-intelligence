@@ -14,7 +14,7 @@ from project_code_intelligence.embedding.types import (
     EmbeddingRunConfig,
 )
 from project_code_intelligence.embedding.utils import llama_batch_embeddings
-from project_code_intelligence.runtime import progress_event
+from project_code_intelligence.progress import progress_event
 
 if TYPE_CHECKING:
     from collections.abc import Callable

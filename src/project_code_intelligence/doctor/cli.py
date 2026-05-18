@@ -8,12 +8,6 @@ import json
 import os
 import signal
 import sys
-
-# Suppress "PyTorch was not found" advisory from transformers; the doctor only
-# needs coremltools which may transitively import transformers for tokenizer
-# support.  Must be set before any transitive import.
-os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")  # pyright: ignore[reportUnusedCallResult]
-
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 

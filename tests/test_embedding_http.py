@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import unittest
+from email.message import Message
 from http.server import BaseHTTPRequestHandler
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
@@ -66,10 +67,15 @@ class ParseJsonBodyTests(unittest.TestCase):
     def _make_handler(body: bytes, content_length: str | None = None) -> BaseHTTPRequestHandler:
         handler = cast("BaseHTTPRequestHandler", MagicMock(spec=BaseHTTPRequestHandler))
         handler.rfile = io.BytesIO(body)
+        # `BaseHTTPRequestHandler.headers` is `email.message.Message` (HTTP
+        # headers reuse email-RFC parsing in the stdlib). Build a real
+        # Message — `parse_json_body` only calls `.get(...)`, so this is
+        # functionally identical to the old dict-cast but is honest about
+        # the production type.
+        headers = Message()
         if content_length is not None:
-            handler.headers = {"Content-Length": content_length}  # type: ignore[assignment]  # test double
-        else:
-            handler.headers = {}  # type: ignore[assignment]  # test double
+            headers["Content-Length"] = content_length
+        handler.headers = headers
         return handler
 
     def test_parses_valid_json(self) -> None:

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
-from typing_extensions import override
+from typing_extensions import TypedDict, Unpack, override
 
 from project_code_intelligence import db, profile_context
 from project_code_intelligence.code_profiles import load_profile
@@ -129,8 +129,45 @@ def require_list(value: JsonValue) -> list[JsonValue]:
     return value
 
 
-def cli_args(**overrides: object) -> CliArgs:
-    values: dict[str, object] = {
+class CliArgOverrides(TypedDict, total=False):
+    root: Path
+    collection: str | None
+    profile: str
+    repos: str | None
+    max_file_bytes: int
+    scan_workers: int
+    chunk_chars: int
+    overlap_lines: int
+    limit_files: int | None
+    progress_every: int
+    dry_run: bool
+    reset_code_intel: bool
+    i_know_this_deletes_code_intel_db: bool
+    reset_only: bool
+    init_db_only: bool
+    sarif: list[str]
+    no_profile_sarif: bool
+    sarif_max_bytes: int
+    embed_only: bool
+    mode: str
+    full: bool
+    no_replace: bool
+    embed: bool
+    embed_record_types: str
+    embedding_batch_size: int
+    embedding_max_chars: int
+    embedding_endpoint: str | None
+    embedding_endpoint_model: str
+    llama_embed: bool
+    no_preembed: bool
+    prune_snapshots: bool
+    prune_keep: int
+    mcp_config: str | None
+    mcp_server_name: str | None
+
+
+def cli_args(**overrides: Unpack[CliArgOverrides]) -> CliArgs:
+    values: CliArgOverrides = {
         "root": Path(),
         "collection": None,
         "profile": "generic",
@@ -167,7 +204,7 @@ def cli_args(**overrides: object) -> CliArgs:
         "mcp_server_name": None,
     }
     values.update(overrides)
-    return CliArgs(**values)  # type: ignore[arg-type]
+    return CliArgs(**values)
 
 
 def snapshot_for_repo(repo: str) -> Snapshot:
@@ -878,10 +915,10 @@ class CodeIntelParserTests(unittest.TestCase):
                 },
             ),
             patch(
-                "project_code_intelligence.mcp.tools.embeddings.embed_with_endpoint",
+                "project_code_intelligence.mcp.semantic.embeddings.embed_with_endpoint",
                 return_value=["[0.1,0.2,0.3]"],
             ) as embed_with_endpoint,
-            patch("project_code_intelligence.mcp.tools.llama.embed_text") as llama_embed_text,
+            patch("project_code_intelligence.mcp.semantic.llama.embed_text") as llama_embed_text,
         ):
             vector, dimensions = query_embedding("hello")
 

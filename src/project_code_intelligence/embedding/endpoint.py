@@ -12,7 +12,7 @@ from urllib.parse import urlsplit, urlunsplit
 from project_code_intelligence import config, db, http_client, process
 from project_code_intelligence import runtime as runtime_state
 from project_code_intelligence.embedding.types import EmbeddingEndpointUnavailableError
-from project_code_intelligence.runtime import progress_event
+from project_code_intelligence.progress import progress_event
 
 if TYPE_CHECKING:
     from project_code_intelligence.models import JsonObject

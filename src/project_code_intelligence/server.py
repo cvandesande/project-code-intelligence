@@ -7,13 +7,9 @@ import sys
 from typing import TYPE_CHECKING
 
 from project_code_intelligence.mcp.db import code_intel_tables_exist, table_regclass_exists
-from project_code_intelligence.mcp.tools import (
-    TOOLS,
-    advertised_tools,
-    query_embedding,
-    static_status_rows,
-    vector_literal_dimensions,
-)
+from project_code_intelligence.mcp.semantic import query_embedding, vector_literal_dimensions
+from project_code_intelligence.mcp.status import static_status_rows
+from project_code_intelligence.mcp.tools import TOOLS, advertised_tools
 from project_code_intelligence.mcp.transport import (
     PROTOCOL_VERSION,
     control_response,

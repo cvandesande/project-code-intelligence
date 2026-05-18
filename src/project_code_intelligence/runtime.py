@@ -16,7 +16,12 @@ from project_code_intelligence import config
 if TYPE_CHECKING:
     import queue
 
-    from project_code_intelligence.models import IntelRecord, JsonObject, JsonValue
+    from project_code_intelligence.models import IntelRecord, JsonObject
+
+    # Forward declaration for type-checkers: `runtime.active_metrics` is the
+    # current RuntimeMetrics singleton. At runtime, attribute access resolves
+    # through __getattr__ below.
+    active_metrics: RuntimeMetrics
 
 
 def embedding_token_estimate_chars_per_token() -> float:
@@ -324,19 +329,17 @@ class RuntimeMetrics:
         return out
 
 
-active_metrics = RuntimeMetrics()
+class _MetricsState:
+    # Class-attribute storage for the per-run metrics singleton. Holding the
+    # instance on a class lets `reset_active_metrics` rebind it without the
+    # `global` keyword; read access is preserved via the module __getattr__
+    # below so existing `runtime.active_metrics` call sites keep working.
+    instance: RuntimeMetrics = RuntimeMetrics()
 
 
 def reset_active_metrics() -> RuntimeMetrics:
-    global active_metrics  # noqa: PLW0603 - this resets per-run ingestion metrics.
-    active_metrics = RuntimeMetrics()
-    return active_metrics
-
-
-def progress_event(event: str, **values: JsonValue) -> None:
-    from project_code_intelligence import progress  # noqa: PLC0415 - lazy import avoids a cycle.
-
-    progress.get_emitter().emit(event, dict(values))
+    _MetricsState.instance = RuntimeMetrics()
+    return _MetricsState.instance
 
 
 def format_duration(seconds: float) -> str:
@@ -354,12 +357,8 @@ def runtime_heartbeat_seconds() -> int:
     return config.env_int("PCI_RUNTIME_HEARTBEAT_SECONDS", 300, minimum=0)
 
 
-def runtime_heartbeat(started: float, stop_event: threading.Event, interval: int, metrics: RuntimeMetrics) -> None:
-    while not stop_event.wait(interval):
-        elapsed = time.monotonic() - started
-        progress_event(
-            "code_intel_runtime_heartbeat",
-            seconds=round(elapsed, 3),
-            duration=format_duration(elapsed),
-            metrics=metrics.snapshot(),
-        )
+def __getattr__(name: str) -> RuntimeMetrics:
+    """Preserve legacy `runtime.active_metrics` reads after the class-attribute migration."""
+    if name == "active_metrics":
+        return _MetricsState.instance
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
