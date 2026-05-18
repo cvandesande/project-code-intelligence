@@ -16,7 +16,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from project_code_intelligence import console_ui, process
+from project_code_intelligence import config, console_ui, process
 from project_code_intelligence.embedding.framework import (
     active_embedding_profile as select_active_embedding_profile,
 )
@@ -414,6 +414,26 @@ _PROFILE_FRIENDLY_DESCRIPTIONS = {
 }
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _target_is_local_postgres() -> bool | None:
+    """Return True if Postgres is configured for the bundled loopback container,
+    False if explicitly pointed at a remote host, and None if config can't be parsed.
+
+    The bundled `docker compose pgvector` container ships with the pci-index role
+    and pgvector pre-seeded, so --init-postgres is unnecessary in that case.
+    """
+    try:
+        settings = config.DatabaseSettings.from_env()
+    except ValueError:
+        return None
+    host = urlsplit(settings.dsn).hostname if settings.dsn else settings.host
+    if host is None:
+        return None
+    return host.lower() in _LOOPBACK_HOSTS
+
+
 def _next_steps(
     by_name: Mapping[str, CheckResult],
     issues: Sequence[CheckResult],
@@ -425,12 +445,25 @@ def _next_steps(
     issue_names = {item.name for item in issues}
     steps: list[tuple[str, str]] = []
     if issue_names & server_db_names:
-        steps.extend((
-            ("Start a local database", f"{engine} compose up -d pgvector"),
-            ("Prepare Postgres roles", "pci-doctor --init-postgres"),
-            ("Index a repo and bootstrap its inferred database", "pci-index ."),
-            ("Use an existing Postgres", "set PROJECT_CODE_INTELLIGENCE_DATABASE_URL"),
-        ))
+        is_local = _target_is_local_postgres()
+        if is_local is True:
+            steps.extend((
+                ("Start a local database", f"{engine} compose up -d pgvector"),
+                ("Index a repo and bootstrap its inferred database", "pci-index ."),
+                ("Use a remote Postgres instead", "set PROJECT_CODE_INTELLIGENCE_DATABASE_URL"),
+            ))
+        elif is_local is False:
+            steps.extend((
+                ("Bootstrap a remote Postgres", "pci-doctor --init-postgres"),
+                ("Index a repo and bootstrap its inferred database", "pci-index ."),
+            ))
+        else:
+            steps.extend((
+                ("Start a local database", f"{engine} compose up -d pgvector"),
+                ("Bootstrap a remote Postgres", "pci-doctor --init-postgres"),
+                ("Index a repo and bootstrap its inferred database", "pci-index ."),
+                ("Use a remote Postgres instead", "set PROJECT_CODE_INTELLIGENCE_DATABASE_URL"),
+            ))
     elif issue_names & project_db_names:
         steps.append(("Index a repo and bootstrap its inferred database", "pci-index ."))
     if issue_names & embedding_names:
