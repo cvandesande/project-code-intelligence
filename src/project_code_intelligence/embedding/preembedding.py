@@ -22,11 +22,11 @@ if TYPE_CHECKING:
 
 
 def code_preembedding_enabled() -> bool:
-    return config.env_bool("PROJECT_CODE_INTELLIGENCE_PREEMBED", default=True)
+    return config.env_bool("PCI_PREEMBED", default=True)
 
 
 def preembedding_ahead_batches() -> int:
-    return config.env_int("PROJECT_CODE_INTELLIGENCE_PREEMBED_AHEAD_BATCHES", 16, minimum=1)
+    return config.env_int("PCI_PREEMBED_AHEAD_BATCHES", 16, minimum=1)
 
 
 def mark_record_embedding_skipped(record: IntelRecord, reason: BaseException, max_chars: int) -> None:

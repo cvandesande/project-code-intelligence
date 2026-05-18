@@ -41,38 +41,38 @@ def ok(value: object) -> Json:
 
 def mcp_max_request_bytes() -> int:
     return config.env_int(
-        "PROJECT_CODE_INTELLIGENCE_MCP_MAX_REQUEST_BYTES",
+        "PCI_MCP_MAX_REQUEST_BYTES",
         DEFAULT_MAX_REQUEST_BYTES,
         minimum=1024,
     )
 
 
 def mcp_max_text_chars() -> int:
-    return config.env_int("PROJECT_CODE_INTELLIGENCE_MCP_MAX_TEXT_CHARS", DEFAULT_MAX_TEXT_CHARS, minimum=1)
+    return config.env_int("PCI_MCP_MAX_TEXT_CHARS", DEFAULT_MAX_TEXT_CHARS, minimum=1)
 
 
 def mcp_max_metadata_bytes() -> int:
     return config.env_int(
-        "PROJECT_CODE_INTELLIGENCE_MCP_MAX_METADATA_BYTES",
+        "PCI_MCP_MAX_METADATA_BYTES",
         DEFAULT_MAX_METADATA_BYTES,
         minimum=1024,
     )
 
 
 def mcp_max_batch_items() -> int:
-    return config.env_int("PROJECT_CODE_INTELLIGENCE_MCP_MAX_BATCH_ITEMS", DEFAULT_MAX_BATCH_ITEMS, minimum=1)
+    return config.env_int("PCI_MCP_MAX_BATCH_ITEMS", DEFAULT_MAX_BATCH_ITEMS, minimum=1)
 
 
 def mcp_max_record_content_chars() -> int:
     return config.env_int(
-        "PROJECT_CODE_INTELLIGENCE_MCP_MAX_RECORD_CONTENT_CHARS",
+        "PCI_MCP_MAX_RECORD_CONTENT_CHARS",
         DEFAULT_MAX_RECORD_CONTENT_CHARS,
         minimum=1024,
     )
 
 
 def mcp_debug_errors() -> bool:
-    return config.env_bool("PROJECT_CODE_INTELLIGENCE_MCP_DEBUG_ERRORS", default=False)
+    return config.env_bool("PCI_MCP_DEBUG_ERRORS", default=False)
 
 
 def scoped_collection(args: Json) -> str | None:
@@ -92,9 +92,9 @@ def scoped_collection(args: Json) -> str | None:
                 "the inferred scope"
             )
         raise McpWritePermissionError(
-            "collection does not match PROJECT_CODE_INTELLIGENCE_COLLECTION; "
+            "collection does not match PCI_COLLECTION; "
             "omit collection to use the configured scope, or set "
-            "PROJECT_CODE_INTELLIGENCE_ALLOW_COLLECTION_OVERRIDE=1 for trusted multi-collection access"
+            "PCI_ALLOW_COLLECTION_OVERRIDE=1 for trusted multi-collection access"
         )
     if not requested and optional_text(args, "repo") and config.configured_collection_defaulted():
         return None
@@ -135,5 +135,5 @@ def optional_text(args: Json, name: str) -> str | None:
     if not isinstance(value, str):
         raise McpProtocolTypeError(f"{name} must be a string")
     if len(value) > mcp_max_text_chars():
-        raise McpProtocolError(f"{name} exceeds PROJECT_CODE_INTELLIGENCE_MCP_MAX_TEXT_CHARS")
+        raise McpProtocolError(f"{name} exceeds PCI_MCP_MAX_TEXT_CHARS")
     return value

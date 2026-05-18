@@ -92,13 +92,13 @@ def connection_hint(settings: DatabaseSettings | None = None) -> str:
 def postgres_bootstrap_connection_hint(settings: DatabaseSettings) -> str:
     extras: list[str] = []
     if settings.admin_user:
-        extras.append("PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER=<set>")
+        extras.append("PCI_POSTGRES_ADMIN_USER=<set>")
     if settings.admin_password:
-        extras.append("PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD=<set>")
+        extras.append("PCI_POSTGRES_ADMIN_PASSWORD=<set>")
     suffix = " " + " ".join(extras) if extras else ""
     if settings.dsn:
         return f"{settings.dsn_source}=<hidden>{suffix}"
-    return f"PGVECTOR_HOST={settings.host} PGVECTOR_PORT={settings.port}{suffix}"
+    return f"PCI_PG_HOST={settings.host} PCI_PG_PORT={settings.port}{suffix}"
 
 
 def conninfo(settings: DatabaseSettings | None = None) -> str:
@@ -122,8 +122,8 @@ def conninfo(settings: DatabaseSettings | None = None) -> str:
         raise DatabaseConnectionError(
             "Missing PostgreSQL connection settings for pgvector: "
             + ", ".join(missing)
-            + ". Set PROJECT_CODE_INTELLIGENCE_DATABASE_URL, or set PGVECTOR_HOST/PGVECTOR_PORT/"
-            "PGVECTOR_DB/PGVECTOR_USER/PGVECTOR_PASS."
+            + ". Set PCI_DATABASE_URL, or set PCI_PG_HOST/PCI_PG_PORT/"
+            "PCI_PG_DB/PCI_PG_USER/PCI_PG_PASS."
         )
 
     return make_conninfo(
@@ -164,8 +164,7 @@ def inferred_database_role_settings(settings: DatabaseSettings, access: str) -> 
         return settings
     if bool(settings.admin_user) != bool(settings.admin_password):
         raise DatabaseConnectionError(
-            "Set both PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER and "
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD, or set neither."
+            "Set both PCI_DATABASE_ADMIN_USER and PCI_DATABASE_ADMIN_PASSWORD, or set neither."
         )
     if settings.dsn_user or settings.dsn_password:
         return settings
@@ -267,8 +266,7 @@ def postgres_bootstrap_role_password(role_name: str, admin_password: str) -> str
 def _bootstrap_connection_settings(settings: DatabaseSettings) -> DatabaseSettings:
     if bool(settings.admin_user) != bool(settings.admin_password):
         raise DatabaseConnectionError(
-            "Set both PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER and "
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD, or set neither."
+            "Set both PCI_DATABASE_ADMIN_USER and PCI_DATABASE_ADMIN_PASSWORD, or set neither."
         )
     if settings.admin_user and settings.admin_password:
         return settings_with_credentials(settings, settings.admin_user, settings.admin_password)
@@ -279,7 +277,7 @@ def _writer_admin_fallback(settings: DatabaseSettings) -> DatabaseSettings:
     """Promote writer credentials to the effective admin when no admin is configured.
 
     The bundled local pgvector container ships with `codeintel:codeintel` as a superuser
-    and nothing else, so users who don't set PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_*
+    and nothing else, so users who don't set PCI_DATABASE_ADMIN_*
     still expect pci-index to create per-project rw/ro roles. Falling back to the writer
     creds here makes role passwords deterministic across runs (HMAC keyed on the writer
     password) and unblocks MCP config emission for the default local DB.
@@ -302,7 +300,7 @@ def _ensure_inferred_database_target(settings: DatabaseSettings, *, operation: s
     if not settings.database_inferred or not settings.dbname:
         raise DatabaseConnectionError(
             f"Refusing to {operation} an explicit PostgreSQL database. "
-            "Omit the database path from PROJECT_CODE_INTELLIGENCE_DATABASE_URL, or leave PGVECTOR_DB unset, "
+            "Omit the database path from PCI_DATABASE_URL, or leave PCI_PG_DB unset, "
             "so project-code-intelligence can infer and manage a PCI-owned database."
         )
     _validate_identifier(settings.dbname, "database name")
@@ -393,8 +391,8 @@ def _reject_other_project_scoped_runtime_role(settings: DatabaseSettings, expect
         raise DatabaseConnectionError(
             f"Configured database user {runtime_user!r} looks scoped to a different inferred project database. "
             f"For {settings.dbname!r}, use {expected_rw_role!r}'s credentials after initialization, or unset "
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_USER/PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD and provide "
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER/PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD "
+            "PCI_DATABASE_USER/PCI_DATABASE_PASSWORD and provide "
+            "PCI_DATABASE_ADMIN_USER/PCI_DATABASE_ADMIN_PASSWORD "
             "so pci-index can initialize this project database."
         )
 
@@ -409,7 +407,7 @@ def _connect_existing_inferred_database_with_scoped_role(
         raise DatabaseConnectionError(
             f"Configured database user {rw_role_name!r} matches the inferred project RW role for {dbname!r}, "
             "but it could not connect to that project database. Run pci-index --init-db with "
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER/PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD, "
+            "PCI_DATABASE_ADMIN_USER/PCI_DATABASE_ADMIN_PASSWORD, "
             "or use credentials with CREATEDB/CREATEROLE to initialize the database first.\n" + str(exc)
         ) from exc
     return DatabaseBootstrapResult(
@@ -470,9 +468,9 @@ def bootstrap_inferred_database(settings: DatabaseSettings) -> DatabaseBootstrap
             + repr(dbname)
             + " using "
             + connection_hint(maintenance_settings)
-            + ". Set PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER/"
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD, use credentials with CREATEDB/CREATEROLE and "
-            "permission to create the vector extension, or set PROJECT_CODE_INTELLIGENCE_DATABASE_URL/PGVECTOR_DB "
+            + ". Set PCI_DATABASE_ADMIN_USER/"
+            "PCI_DATABASE_ADMIN_PASSWORD, use credentials with CREATEDB/CREATEROLE and "
+            "permission to create the vector extension, or set PCI_DATABASE_URL/PCI_PG_DB "
             "to an existing database.\n" + str(exc)
         ) from exc
 
@@ -511,12 +509,11 @@ def bootstrap_postgres_roles(
 ) -> PostgresBootstrapResult:
     if not settings.admin_user or not settings.admin_password:
         raise DatabaseConnectionError(
-            "Set PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER and "
-            "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD to bootstrap PostgreSQL roles."
+            "Set PCI_POSTGRES_ADMIN_USER and PCI_POSTGRES_ADMIN_PASSWORD to bootstrap PostgreSQL roles."
         )
     if settings.admin_user == role_name:
         raise DatabaseConnectionError(
-            f"PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER must be a PostgreSQL admin role, not {role_name!r}. "
+            f"PCI_POSTGRES_ADMIN_USER must be a PostgreSQL admin role, not {role_name!r}. "
             "Use a real PostgreSQL admin role such as 'postgres' so pci-doctor can create or reset "
             f"{role_name!r}, set CREATEDB/CREATEROLE, and install pgvector into template1."
         )
@@ -532,8 +529,8 @@ def bootstrap_postgres_roles(
         raise DatabaseConnectionError(
             "Could not bootstrap PostgreSQL roles using "
             + postgres_bootstrap_connection_hint(settings)
-            + ". Run pci-doctor --init-postgres with PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER/"
-            "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD credentials that have CREATEROLE and can run "
+            + ". Run pci-doctor --init-postgres with PCI_POSTGRES_ADMIN_USER/"
+            "PCI_POSTGRES_ADMIN_PASSWORD credentials that have CREATEROLE and can run "
             "CREATE EXTENSION vector in template1.\n" + str(exc)
         ) from exc
     return PostgresBootstrapResult(
@@ -560,9 +557,8 @@ def drop_inferred_database(settings: DatabaseSettings) -> DatabaseBootstrapResul
             + repr(dbname)
             + " using "
             + connection_hint(maintenance_settings)
-            + ". Set PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER/"
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD or use credentials with DROP DATABASE privilege.\n"
-            + str(exc)
+            + ". Set PCI_DATABASE_ADMIN_USER/"
+            "PCI_DATABASE_ADMIN_PASSWORD or use credentials with DROP DATABASE privilege.\n" + str(exc)
         ) from exc
     return DatabaseBootstrapResult(dbname=dbname, database_dropped=database_dropped)
 
@@ -577,23 +573,20 @@ def writable_settings_for_bootstrap(settings: DatabaseSettings, bootstrap: Datab
         return settings
     raise DatabaseConnectionError(
         "The inferred PostgreSQL RW role already exists, but its password is not available to this process. "
-        "Set PROJECT_CODE_INTELLIGENCE_DATABASE_USER/PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD to "
+        "Set PCI_DATABASE_USER/PCI_DATABASE_PASSWORD to "
         f"{rw_role.name!r}'s credentials, or drop the PCI-managed database roles and run pci-index again."
     )
 
 
 def connection_configuration_guidance(settings: DatabaseSettings) -> str:
-    if settings.dsn_source == "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL":
+    if settings.dsn_source == "PCI_MCP_DATABASE_URL":
         return (
-            "Set PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL, "
-            "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER, "
-            "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD, and "
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH for pci-mcp, or configure generic database credentials."
+            "Set PCI_MCP_DATABASE_URL, "
+            "PCI_MCP_DATABASE_USER, "
+            "PCI_MCP_DATABASE_PASSWORD, and "
+            "PCI_DATABASE_SCOPE_PATH for pci-mcp, or configure generic database credentials."
         )
-    return (
-        "Set PROJECT_CODE_INTELLIGENCE_DATABASE_URL, or set "
-        "PGVECTOR_HOST/PGVECTOR_PORT/PGVECTOR_DB/PGVECTOR_USER/PGVECTOR_PASS for your database."
-    )
+    return "Set PCI_DATABASE_URL, or set PCI_PG_HOST/PCI_PG_PORT/PCI_PG_DB/PCI_PG_USER/PCI_PG_PASS for your database."
 
 
 def _validate_project_database_privilege_inputs(*, dbname: str, rw_role: str, ro_role: str) -> None:

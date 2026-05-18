@@ -204,14 +204,14 @@ def parse_index_args(argv: list[str] | None = None) -> tuple[IndexNamespace, lis
 
 
 def set_index_environment_defaults() -> None:
-    _ = os.environ.setdefault("PROJECT_CODE_INTELLIGENCE_PROFILE", "generic")
-    _ = os.environ.setdefault("PROJECT_CODE_INTELLIGENCE_MODE", "incremental")
-    _ = os.environ.setdefault("PROJECT_CODE_INTELLIGENCE_EMBED", "1")
-    _ = os.environ.setdefault("PROJECT_CODE_INTELLIGENCE_EMBED_ONLY", "0")
-    _ = os.environ.setdefault("PROJECT_CODE_INTELLIGENCE_PREEMBED", "1")
-    _ = os.environ.setdefault("PROJECT_CODE_INTELLIGENCE_EMBEDDING_BATCH_SIZE", "32")
-    _ = os.environ.setdefault("PROJECT_CODE_INTELLIGENCE_EMBEDDING_MAX_CHARS", "3000")
-    _ = os.environ.setdefault("PROJECT_CODE_INTELLIGENCE_EMBED_RECORD_TYPES", DEFAULT_EMBED_RECORD_TYPES)
+    _ = os.environ.setdefault("PCI_PROFILE", "generic")
+    _ = os.environ.setdefault("PCI_MODE", "incremental")
+    _ = os.environ.setdefault("PCI_EMBED", "1")
+    _ = os.environ.setdefault("PCI_EMBED_ONLY", "0")
+    _ = os.environ.setdefault("PCI_PREEMBED", "1")
+    _ = os.environ.setdefault("PCI_EMBEDDING_BATCH_SIZE", "32")
+    _ = os.environ.setdefault("PCI_EMBEDDING_MAX_CHARS", "3000")
+    _ = os.environ.setdefault("PCI_EMBED_RECORD_TYPES", DEFAULT_EMBED_RECORD_TYPES)
 
 
 def set_index_database_scope_default(parsed: IndexNamespace) -> None:
@@ -224,9 +224,9 @@ def set_index_database_scope_default(parsed: IndexNamespace) -> None:
 
 def apply_index_embed_override(parsed: IndexNamespace) -> None:
     if parsed.embed is not None:
-        os.environ["PROJECT_CODE_INTELLIGENCE_EMBED"] = "1" if parsed.embed else "0"
+        os.environ["PCI_EMBED"] = "1" if parsed.embed else "0"
         if not parsed.embed:
-            os.environ["PROJECT_CODE_INTELLIGENCE_EMBED_ONLY"] = "0"
+            os.environ["PCI_EMBED_ONLY"] = "0"
 
 
 def forwarded_mcp_config_args(parsed: IndexNamespace) -> list[str]:
@@ -256,7 +256,7 @@ def forwarded_index_args(parsed: IndexNamespace, passthrough: list[str]) -> list
     if parsed.dry_run:
         forwarded = [*forwarded, "--dry-run"]
     else:
-        os.environ["PROJECT_CODE_INTELLIGENCE_ALLOW_WRITES"] = "1"
+        os.environ["PCI_ALLOW_WRITES"] = "1"
     if parsed.prune_snapshots:
         forwarded = [*forwarded, "--prune-snapshots", "--prune-keep", str(parsed.prune_keep)]
     return forwarded
@@ -277,11 +277,11 @@ def _resolve_index_embedding() -> tuple[str | None, str | None]:
 def index_embedding_args(*, embed_only: bool, endpoint: str | None, model: str | None) -> list[str]:
     embedding_args = [
         "--embedding-batch-size",
-        os.environ["PROJECT_CODE_INTELLIGENCE_EMBEDDING_BATCH_SIZE"],
+        os.environ["PCI_EMBEDDING_BATCH_SIZE"],
         "--embedding-max-chars",
-        os.environ["PROJECT_CODE_INTELLIGENCE_EMBEDDING_MAX_CHARS"],
+        os.environ["PCI_EMBEDDING_MAX_CHARS"],
         "--embed-record-types",
-        os.environ["PROJECT_CODE_INTELLIGENCE_EMBED_RECORD_TYPES"],
+        os.environ["PCI_EMBED_RECORD_TYPES"],
     ]
     if endpoint:
         embedding_args.extend(["--embedding-endpoint", endpoint, "--embedding-endpoint-model", model or ""])
@@ -291,7 +291,7 @@ def index_embedding_args(*, embed_only: bool, endpoint: str | None, model: str |
         embedding_args.append("--embed-only")
     else:
         embedding_args.append("--embed")
-        if os.environ["PROJECT_CODE_INTELLIGENCE_PREEMBED"] == "0":
+        if os.environ["PCI_PREEMBED"] == "0":
             embedding_args.append("--no-preembed")
     return embedding_args
 
@@ -339,8 +339,8 @@ def index_main(argv: list[str] | None = None) -> int:
     set_index_database_scope_default(parsed)
     apply_index_embed_override(parsed)
     forwarded = forwarded_index_args(parsed, passthrough)
-    embed = config.env_bool("PROJECT_CODE_INTELLIGENCE_EMBED")
-    embed_only = config.env_bool("PROJECT_CODE_INTELLIGENCE_EMBED_ONLY")
+    embed = config.env_bool("PCI_EMBED")
+    embed_only = config.env_bool("PCI_EMBED_ONLY")
 
     embedding_endpoint: str | None = None
     embedding_model: str | None = None
@@ -364,7 +364,7 @@ def index_main(argv: list[str] | None = None) -> int:
         return 1
 
     if parsed.json:
-        os.environ["PROJECT_CODE_INTELLIGENCE_OUTPUT"] = "json"
+        os.environ["PCI_OUTPUT"] = "json"
     _ = progress.set_emitter(progress.detect_progress_mode(requested="json" if parsed.json else None))
     return ingest_code_intel.cli_main(forwarded)
 

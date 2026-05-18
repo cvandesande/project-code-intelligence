@@ -4,7 +4,7 @@ Profiles are the extension point for project vocabulary that should not live in
 the generic indexer. Copy this file into your own module, rename the class, and
 select it with a fully qualified profile name such as:
 
-    PROJECT_CODE_INTELLIGENCE_PROFILE=my_project.code_profile:MyProjectProfile
+    PCI_PROFILE=my_project.code_profile:MyProjectProfile
 
 Keep private profiles out of the public registry unless they are intended to be
 part of the distributed package.

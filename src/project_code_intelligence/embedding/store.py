@@ -22,7 +22,7 @@ EMBEDDING_CONTRACT_METADATA_KEY = "embedding_contract"
 
 
 def database_retries() -> int:
-    return config.env_int("PROJECT_CODE_INTELLIGENCE_DB_RETRIES", 3, minimum=0)
+    return config.env_int("PCI_DB_RETRIES", 3, minimum=0)
 
 
 def vector_literal_dimensions(value: str) -> int:

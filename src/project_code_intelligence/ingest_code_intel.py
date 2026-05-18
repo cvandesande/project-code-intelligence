@@ -117,16 +117,16 @@ PARSE_CHUNKS_PER_WORKER = 8
 _DB_WRITE_BATCH_SIZE = 500
 MCP_CONFIG_FORMATS = ("env", "codex", "claude", "opencode", "vscode", "copilot", "cline", "zed")
 MCP_PROJECT_ENV_NAMES = (
-    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL",
-    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER",
-    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD",
+    "PCI_MCP_DATABASE_URL",
+    "PCI_MCP_DATABASE_USER",
+    "PCI_MCP_DATABASE_PASSWORD",
 )
 MCP_STANDALONE_ENV_NAMES = (
-    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL",
-    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER",
-    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD",
-    "PROJECT_CODE_INTELLIGENCE_COLLECTION",
-    "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH",
+    "PCI_MCP_DATABASE_URL",
+    "PCI_MCP_DATABASE_USER",
+    "PCI_MCP_DATABASE_PASSWORD",
+    "PCI_COLLECTION",
+    "PCI_DATABASE_SCOPE_PATH",
 )
 
 
@@ -572,16 +572,14 @@ def ingest_repo(config: RepoIngestConfig) -> RepoIngest:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     _ = parser.add_argument("--root", type=Path, default=workspace_root())
-    _ = parser.add_argument("--collection", default=config.env_text("PROJECT_CODE_INTELLIGENCE_COLLECTION"))
-    _ = parser.add_argument(
-        "--profile", default=config.env_text("PROJECT_CODE_INTELLIGENCE_PROFILE", "generic") or "generic"
-    )
-    _ = parser.add_argument("--repos", default=config.env_text("PROJECT_CODE_INTELLIGENCE_REPOS"))
+    _ = parser.add_argument("--collection", default=config.env_text("PCI_COLLECTION"))
+    _ = parser.add_argument("--profile", default=config.env_text("PCI_PROFILE", "generic") or "generic")
+    _ = parser.add_argument("--repos", default=config.env_text("PCI_REPOS"))
     _ = parser.add_argument("--max-file-bytes", type=int, default=512 * 1024)
     _ = parser.add_argument(
         "--scan-workers",
         type=int,
-        default=config.env_int("PROJECT_CODE_INTELLIGENCE_SCAN_WORKERS", AUTO_SCAN_WORKERS, minimum=0),
+        default=config.env_int("PCI_SCAN_WORKERS", AUTO_SCAN_WORKERS, minimum=0),
         help="Parser worker processes. 0 chooses a conservative auto value; 1 disables process-pool parsing.",
     )
     _ = parser.add_argument("--chunk-chars", type=int, default=2400)
@@ -623,7 +621,7 @@ def build_parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "--sarif-max-bytes",
         type=int,
-        default=config.env_int("PROJECT_CODE_INTELLIGENCE_SARIF_MAX_BYTES", 50 * 1024 * 1024, minimum=0),
+        default=config.env_int("PCI_SARIF_MAX_BYTES", 50 * 1024 * 1024, minimum=0),
         help="Maximum SARIF file size to parse.",
     )
     _ = parser.add_argument(
@@ -634,7 +632,7 @@ def build_parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "--mode",
         choices=("incremental", "full"),
-        default=config.env_text("PROJECT_CODE_INTELLIGENCE_MODE", "incremental") or "incremental",
+        default=config.env_text("PCI_MODE", "incremental") or "incremental",
         help="incremental reuses unchanged records from the previous snapshot; full reparses all files.",
     )
     _ = parser.add_argument("--full", action="store_true", help="Alias for --mode full.")
@@ -645,7 +643,7 @@ def build_parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "--embedding-max-chars",
         type=int,
-        default=config.env_int("PROJECT_CODE_INTELLIGENCE_EMBEDDING_MAX_CHARS", 3000, minimum=1),
+        default=config.env_int("PCI_EMBEDDING_MAX_CHARS", 3000, minimum=1),
         help="Maximum characters sent to the embedding model per record; stored embedding_text is unchanged.",
     )
     embedding_endpoint_default = config.default_embedding_endpoint()
@@ -695,7 +693,7 @@ def parse_cli_args(argv: list[str] | None = None) -> CliArgs:
     embedding_endpoint_model = parsed.embedding_endpoint_model
     if (
         embedding_endpoint_model == config.DEFAULT_EMBEDDING_ENDPOINT_MODEL
-        and config.env_text("PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL") is None
+        and config.env_text("PCI_EMBEDDING_ENDPOINT_MODEL") is None
     ):
         embedding_endpoint_model = config.default_embedding_endpoint_model(endpoint=parsed.embedding_endpoint)
     return CliArgs(
@@ -785,7 +783,7 @@ def build_ingest_plan(args: CliArgs) -> IngestPlan:
     preembedding_requested = args.embed and not args.no_preembed and code_preembedding_enabled()
     mode = "full" if args.full else args.mode
     if mode not in {"incremental", "full"}:
-        raise ValueError("PROJECT_CODE_INTELLIGENCE_MODE must be 'incremental' or 'full'")
+        raise ValueError("PCI_MODE must be 'incremental' or 'full'")
     validate_args(args, embedding_requested=embedding_requested)
     return IngestPlan(
         args=args,
@@ -878,11 +876,11 @@ def apply_bootstrap_writer_credentials(
     rw_role = bootstrap.rw_role
     if rw_role is not None and rw_role.password:
         if settings.dsn:
-            os.environ["PROJECT_CODE_INTELLIGENCE_DATABASE_USER"] = rw_role.name
-            os.environ["PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD"] = rw_role.password
+            os.environ["PCI_DATABASE_USER"] = rw_role.name
+            os.environ["PCI_DATABASE_PASSWORD"] = rw_role.password
         else:
-            os.environ["PGVECTOR_USER"] = rw_role.name
-            os.environ["PGVECTOR_PASS"] = rw_role.password
+            os.environ["PCI_PG_USER"] = rw_role.name
+            os.environ["PCI_PG_PASS"] = rw_role.password
     return writer_settings
 
 
@@ -910,11 +908,11 @@ def mcp_command_path() -> str:
 
 def mcp_config_env(context: McpConfigContext) -> dict[str, str]:
     return {
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": context.database_url,
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": context.database_user,
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": context.database_password,
-        "PROJECT_CODE_INTELLIGENCE_COLLECTION": context.collection,
-        "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": context.database_scope_path,
+        "PCI_MCP_DATABASE_URL": context.database_url,
+        "PCI_MCP_DATABASE_USER": context.database_user,
+        "PCI_MCP_DATABASE_PASSWORD": context.database_password,
+        "PCI_COLLECTION": context.collection,
+        "PCI_DATABASE_SCOPE_PATH": context.database_scope_path,
     }
 
 
@@ -1207,8 +1205,8 @@ def emit_mcp_config(plan: IngestPlan, bootstrap: db.DatabaseBootstrapResult | No
                 return
             raise db.DatabaseConnectionError(
                 "Could not emit MCP configuration because the project RO password is not available. "
-                "Run pci-index --init-db with PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER/"
-                "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD set, then rerun the MCP config command."
+                "Run pci-index --init-db with PCI_DATABASE_ADMIN_USER/"
+                "PCI_DATABASE_ADMIN_PASSWORD set, then rerun the MCP config command."
             )
         return
     write_stdout(block)
@@ -1219,7 +1217,7 @@ def prepare_writable_database(args: CliArgs, *, embedding_requested: bool) -> db
         return None
     settings = config.DatabaseSettings.from_env()
     if not db.allow_writes(settings):
-        raise PermissionError("set PROJECT_CODE_INTELLIGENCE_ALLOW_WRITES=1 to ingest")
+        raise PermissionError("set PCI_ALLOW_WRITES=1 to ingest")
     if embedding_requested and not args.embedding_endpoint and not args.llama_embed:
         raise ValueError("set --embedding-endpoint or --llama-embed when --embed is used")
     if embedding_requested and args.embedding_endpoint:
@@ -1280,7 +1278,7 @@ def run_reset_only(args: CliArgs) -> int:
     if not settings.database_inferred:
         raise db.DatabaseConnectionError(
             "Refusing to drop an explicit PostgreSQL database. "
-            "Remove the database path from PROJECT_CODE_INTELLIGENCE_DATABASE_URL, or leave PGVECTOR_DB unset, "
+            "Remove the database path from PCI_DATABASE_URL, or leave PCI_PG_DB unset, "
             "so pci-index --reset can target a PCI-managed inferred database."
         )
     confirm_reset_code_intel(args, settings, collection, repos)

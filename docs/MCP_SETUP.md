@@ -29,7 +29,7 @@ pci-index repo-a repo-b repo-c
 ```
 
 The MCP server also infers its collection from its configured working directory
-when `PROJECT_CODE_INTELLIGENCE_COLLECTION` is unset. Set the MCP `cwd` to the
+when `PCI_COLLECTION` is unset. Set the MCP `cwd` to the
 same repo or workspace directory you used when indexing. Agents then use repo
 keys such as `repo-a` or `repo-b` in tool calls. Do not use absolute filesystem
 paths as repo filters. Run `code_intel_status` without a repo filter to see
@@ -79,14 +79,14 @@ For an external database, prefer one database URL. If the URL contains a
 database path, that database is used exactly:
 
 ```sh
-PROJECT_CODE_INTELLIGENCE_DATABASE_URL=postgresql://user:password@host:5432/database?sslmode=prefer
+PCI_DATABASE_URL=postgresql://user:password@host:5432/database?sslmode=prefer
 ```
 
 If the URL omits the database path, host, port, credentials, and query options
 come from the URL, but the database name is inferred from the repo/workspace:
 
 ```sh
-PROJECT_CODE_INTELLIGENCE_DATABASE_URL=postgresql://user:password@host:5432?sslmode=prefer
+PCI_DATABASE_URL=postgresql://user:password@host:5432?sslmode=prefer
 ```
 
 For first-use bootstrap, use PostgreSQL admin credentials once with
@@ -95,16 +95,16 @@ For first-use bootstrap, use PostgreSQL admin credentials once with
 non-superuser `pci-index` credentials to
 `${XDG_CONFIG_HOME:-~/.config}/project-code-intelligence/pci-index.env` with
 `0600` permissions, and prints the same
-`PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_*` exports for copy/paste or secret
+`PCI_DATABASE_ADMIN_*` exports for copy/paste or secret
 manager use. It does not create a project database. Then `pci-index` loads the
 user config when those variables are unset and creates the inferred project
 database and schema before indexing. Use `pci-index --init-db` when you want to
 initialize the database/schema and exit without scanning:
 
 ```sh
-PROJECT_CODE_INTELLIGENCE_DATABASE_URL=postgresql://host:5432?sslmode=prefer
-PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER=postgres
-PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD=admin-password
+PCI_DATABASE_URL=postgresql://host:5432?sslmode=prefer
+PCI_POSTGRES_ADMIN_USER=postgres
+PCI_POSTGRES_ADMIN_PASSWORD=admin-password
 pci-doctor --init-postgres
 
 pci-index --init-db .
@@ -115,9 +115,9 @@ Use `pci-doctor --init-postgres --no-write-config` when you want only printed
 exports and no user config file.
 
 When admin variables are set for an inferred database, generated scoped roles
-override credentials embedded in `PROJECT_CODE_INTELLIGENCE_DATABASE_URL`.
-Set `PROJECT_CODE_INTELLIGENCE_DATABASE_USER` and
-`PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD` only when you intentionally want
+override credentials embedded in `PCI_DATABASE_URL`.
+Set `PCI_DATABASE_USER` and
+`PCI_DATABASE_PASSWORD` only when you intentionally want
 to force explicit runtime credentials.
 
 For generic MCP clients or custom launchers that cannot set the server working
@@ -125,14 +125,14 @@ directory, set the same base URL and scope path so `pci-mcp` infers the same
 project database as `pci-index`:
 
 ```sh
-PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL=postgresql://host:5432?sslmode=prefer
-PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH=/path/to/repo-or-workspace
-PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER=project_ro
-PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD=password
+PCI_MCP_DATABASE_URL=postgresql://host:5432?sslmode=prefer
+PCI_DATABASE_SCOPE_PATH=/path/to/repo-or-workspace
+PCI_MCP_DATABASE_USER=project_ro
+PCI_MCP_DATABASE_PASSWORD=password
 ```
 
-When `PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER` and
-`PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD` are available, `pci-index`
+When `PCI_DATABASE_ADMIN_USER` and
+`PCI_DATABASE_ADMIN_PASSWORD` are available, `pci-index`
 prints the project-specific `Export for pci-mcp (RO)` block after
 `pci-index --init-db` and ordinary index runs.
 
@@ -158,17 +158,17 @@ contains the read-only database values directly because Zed does not document
 environment-variable interpolation for MCP `env` values; keep it local and do
 not commit it. Codex, Claude Code, and OpenCode configs set the server `cwd`,
 so they do not need
-`PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH` in their generated environment
+`PCI_DATABASE_SCOPE_PATH` in their generated environment
 blocks. Cline's VS Code extension MCP settings are user-scoped, so the
 generated Cline snippet also contains the read-only database values directly
 and must stay local. The collection is inferred from the project `cwd` for
 clients that support it; VS Code Copilot, Cline, and Zed pass the collection
 explicitly because their documented config shapes do not include a server
-working directory. Use `PROJECT_CODE_INTELLIGENCE_COLLECTION` only as an
+working directory. Use `PCI_COLLECTION` only as an
 explicit MCP runtime scope. For index runs, prefer
 `pci-index --collection NAME`; an inherited collection environment variable is
 ignored unless
-`PROJECT_CODE_INTELLIGENCE_ALLOW_COLLECTION_OVERRIDE=1` is also set. Use
+`PCI_ALLOW_COLLECTION_OVERRIDE=1` is also set. Use
 `--mcp-server-name NAME` only when you are deliberately creating a
 non-project-scoped setup.
 
@@ -193,12 +193,12 @@ If your MCP client or secret manager separates credentials, leave them out of
 the URL and pass them separately:
 
 ```sh
-PROJECT_CODE_INTELLIGENCE_DATABASE_URL=postgresql://host:5432?sslmode=prefer
-PROJECT_CODE_INTELLIGENCE_DATABASE_USER=user
-PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD=password
+PCI_DATABASE_URL=postgresql://host:5432?sslmode=prefer
+PCI_DATABASE_USER=user
+PCI_DATABASE_PASSWORD=password
 ```
 
-Set `PGVECTOR_DB` only when you want to disable database-name inference and use
+Set `PCI_PG_DB` only when you want to disable database-name inference and use
 a fixed database name.
 
 `pci-index --reset .` drops only the inferred PCI-managed database for that
@@ -242,16 +242,16 @@ cwd = "/home/you/src/project-code-intelligence"
 startup_timeout_sec = 20
 tool_timeout_sec = 120
 env_vars = [
-  "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL",
-  "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER",
-  "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD",
+  "PCI_MCP_DATABASE_URL",
+  "PCI_MCP_DATABASE_USER",
+  "PCI_MCP_DATABASE_PASSWORD",
 ]
 ```
 
 ```sh
-export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL='postgresql://host:5432?sslmode=prefer'
-export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER=project_ro
-export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD=password
+export PCI_MCP_DATABASE_URL='postgresql://host:5432?sslmode=prefer'
+export PCI_MCP_DATABASE_USER=project_ro
+export PCI_MCP_DATABASE_PASSWORD=password
 ```
 
 For a single-repo local setup using the Compose database, you can omit the
@@ -283,9 +283,9 @@ your secret manager.
       "args": [],
       "cwd": "/home/you/src/project-code-intelligence",
       "env": {
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "${PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL}",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "${PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER}",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "${PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD}"
+        "PCI_MCP_DATABASE_URL": "${PCI_MCP_DATABASE_URL}",
+        "PCI_MCP_DATABASE_USER": "${PCI_MCP_DATABASE_USER}",
+        "PCI_MCP_DATABASE_PASSWORD": "${PCI_MCP_DATABASE_PASSWORD}"
       }
     }
   }
@@ -319,9 +319,9 @@ credentials stay in the accompanying export block or your secret manager.
       "enabled": true,
       "cwd": "/home/you/src/project-code-intelligence",
       "environment": {
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "{env:PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL}",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "{env:PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER}",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "{env:PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD}"
+        "PCI_MCP_DATABASE_URL": "{env:PCI_MCP_DATABASE_URL}",
+        "PCI_MCP_DATABASE_USER": "{env:PCI_MCP_DATABASE_USER}",
+        "PCI_MCP_DATABASE_PASSWORD": "{env:PCI_MCP_DATABASE_PASSWORD}"
       }
     }
   }
@@ -353,11 +353,11 @@ stay in the accompanying export block or your secret manager.
       "command": "/home/you/.local/bin/pci-mcp",
       "args": [],
       "env": {
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "${env:PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL}",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "${env:PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER}",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "${env:PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD}",
-        "PROJECT_CODE_INTELLIGENCE_COLLECTION": "${env:PROJECT_CODE_INTELLIGENCE_COLLECTION}",
-        "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "${env:PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH}"
+        "PCI_MCP_DATABASE_URL": "${env:PCI_MCP_DATABASE_URL}",
+        "PCI_MCP_DATABASE_USER": "${env:PCI_MCP_DATABASE_USER}",
+        "PCI_MCP_DATABASE_PASSWORD": "${env:PCI_MCP_DATABASE_PASSWORD}",
+        "PCI_COLLECTION": "${env:PCI_COLLECTION}",
+        "PCI_DATABASE_SCOPE_PATH": "${env:PCI_DATABASE_SCOPE_PATH}"
       }
     }
   }
@@ -365,7 +365,7 @@ stay in the accompanying export block or your secret manager.
 ```
 
 Use the export block printed after the JSON before launching VS Code. It
-includes `PROJECT_CODE_INTELLIGENCE_COLLECTION` because VS Code's documented
+includes `PCI_COLLECTION` because VS Code's documented
 stdio MCP config does not define a server `cwd` field.
 
 ## Zed
@@ -395,11 +395,11 @@ Write or merge this into `.zed/settings.json`:
       "command": "/home/you/.local/bin/pci-mcp",
       "args": [],
       "env": {
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://host:5432/project_db?sslmode=prefer",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "project_ro",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "password",
-        "PROJECT_CODE_INTELLIGENCE_COLLECTION": "project-code-intelligence",
-        "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/home/you/src/project-code-intelligence"
+        "PCI_MCP_DATABASE_URL": "postgresql://host:5432/project_db?sslmode=prefer",
+        "PCI_MCP_DATABASE_USER": "project_ro",
+        "PCI_MCP_DATABASE_PASSWORD": "password",
+        "PCI_COLLECTION": "project-code-intelligence",
+        "PCI_DATABASE_SCOPE_PATH": "/home/you/src/project-code-intelligence"
       }
     }
   }
@@ -436,11 +436,11 @@ projects.
       "command": "/home/you/.local/bin/pci-mcp",
       "args": [],
       "env": {
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://host:5432/project_db?sslmode=prefer",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "project_ro",
-        "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "password",
-        "PROJECT_CODE_INTELLIGENCE_COLLECTION": "project-code-intelligence",
-        "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/home/you/src/project-code-intelligence"
+        "PCI_MCP_DATABASE_URL": "postgresql://host:5432/project_db?sslmode=prefer",
+        "PCI_MCP_DATABASE_USER": "project_ro",
+        "PCI_MCP_DATABASE_PASSWORD": "password",
+        "PCI_COLLECTION": "project-code-intelligence",
+        "PCI_DATABASE_SCOPE_PATH": "/home/you/src/project-code-intelligence"
       },
       "autoApprove": [],
       "disabled": false

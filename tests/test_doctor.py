@@ -249,8 +249,8 @@ class DoctorTests(unittest.TestCase):
         self.assertNotIn("Switch embedding runtime", output)
         self.assertNotIn("cpu: docker compose --profile cpu up -d --build fastembed", output)
         self.assertNotIn("npu: docker compose --profile npu up -d lemonade-npu", output)
-        self.assertNotIn("PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT=", output)
-        self.assertNotIn("PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL=", output)
+        self.assertNotIn("PCI_EMBEDDING_ENDPOINT=", output)
+        self.assertNotIn("PCI_EMBEDDING_ENDPOINT_MODEL=", output)
         self.assertNotIn("amdgpu: docker compose --profile amdgpu up -d --build llama-rocm", output)
         self.assertNotIn("nvidia: docker compose --profile nvidia", output)
         self.assertNotIn("card=card0", output)
@@ -282,7 +282,7 @@ class DoctorTests(unittest.TestCase):
         with (
             patch.dict(
                 os.environ,
-                {"PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://db.example.invalid:5432/codeintel"},
+                {"PCI_DATABASE_URL": "postgresql://db.example.invalid:5432/codeintel"},
                 clear=True,
             ),
             patch("project_code_intelligence.process.container_engine_name", return_value="docker"),
@@ -449,9 +449,9 @@ class DoctorDatabaseTests(unittest.TestCase):
             patch.dict(
                 os.environ,
                 {
-                    "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://db.example.invalid:5432?sslmode=prefer",
-                    "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER": "postgres",
-                    "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD": postgres_credential,
+                    "PCI_DATABASE_URL": "postgresql://db.example.invalid:5432?sslmode=prefer",
+                    "PCI_POSTGRES_ADMIN_USER": "postgres",
+                    "PCI_POSTGRES_ADMIN_PASSWORD": postgres_credential,
                 },
                 clear=True,
             ),
@@ -496,11 +496,11 @@ class DoctorDatabaseTests(unittest.TestCase):
         self.assertIn("pgvector", output)
         self.assertIn("created in template1", output)
         self.assertIn(
-            "export PROJECT_CODE_INTELLIGENCE_DATABASE_URL='postgresql://db.example.invalid:5432?sslmode=prefer'",
+            "export PCI_DATABASE_URL='postgresql://db.example.invalid:5432?sslmode=prefer'",
             output,
         )
-        self.assertIn("export PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER=pci_index_admin", output)
-        self.assertIn("export PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD='secret value'", output)
+        self.assertIn("export PCI_DATABASE_ADMIN_USER=pci_index_admin", output)
+        self.assertIn("export PCI_DATABASE_ADMIN_PASSWORD='secret value'", output)
         self.assertNotIn("Project DB", output)
         self.assertNotIn("pci-doctor --init-db", output)
 
@@ -550,11 +550,11 @@ class DoctorDatabaseTests(unittest.TestCase):
                     os.environ,
                     {
                         "XDG_CONFIG_HOME": directory,
-                        "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://db.example.invalid:5432?sslmode=prefer",
-                        "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER": "postgres",
-                        "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD": postgres_credential,
-                        "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER": "pci_index_admin",
-                        "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD": index_credential,
+                        "PCI_DATABASE_URL": "postgresql://db.example.invalid:5432?sslmode=prefer",
+                        "PCI_POSTGRES_ADMIN_USER": "postgres",
+                        "PCI_POSTGRES_ADMIN_PASSWORD": postgres_credential,
+                        "PCI_DATABASE_ADMIN_USER": "pci_index_admin",
+                        "PCI_DATABASE_ADMIN_PASSWORD": index_credential,
                     },
                     clear=True,
                 ),
@@ -569,7 +569,7 @@ class DoctorDatabaseTests(unittest.TestCase):
             self.assertTrue(expected_config.exists())
             self.assertEqual(stat.S_IMODE(expected_config.stat().st_mode), 0o600)
             self.assertIn(
-                "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD=index-fixture",
+                "PCI_DATABASE_ADMIN_PASSWORD=index-fixture",
                 expected_config.read_text(encoding="utf-8"),
             )
             output = cast("str", write_stdout.call_args.args[0])
@@ -600,7 +600,7 @@ class DoctorEndpointTests(unittest.TestCase):
             config.embedding_api_key(
                 "https://api.openai.com/v1/embeddings",
                 env={
-                    "PROJECT_CODE_INTELLIGENCE_EMBEDDING_API_KEY": "generic-key",
+                    "PCI_EMBEDDING_API_KEY": "generic-key",
                     "OPENAI_API_KEY": "openai-key",
                 },
             ),
@@ -634,9 +634,9 @@ class DoctorEndpointTests(unittest.TestCase):
     def test_configured_remote_endpoint_can_pass_preflight(self) -> None:
         results = check_embedding_endpoint(
             env={
-                "PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT": "https://api.openai.com/v1/embeddings",
-                "PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL": "text-embedding-3-small",
-                "PROJECT_CODE_INTELLIGENCE_ALLOW_REMOTE_EMBEDDING": "1",
+                "PCI_EMBEDDING_ENDPOINT": "https://api.openai.com/v1/embeddings",
+                "PCI_EMBEDDING_ENDPOINT_MODEL": "text-embedding-3-small",
+                "PCI_ALLOW_REMOTE_EMBEDDING": "1",
                 "OPENAI_API_KEY": "openai-key",
             },
             mode="auto",

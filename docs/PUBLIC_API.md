@@ -39,31 +39,31 @@ Stable configuration groups:
 
 | Group | Public variables |
 | --- | --- |
-| Database | `PROJECT_CODE_INTELLIGENCE_DATABASE_URL`, `PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH`, `PROJECT_CODE_INTELLIGENCE_DATABASE_USER`, `PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD`, `PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL`, `PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER`, `PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD`, `PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER`, `PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD`, `PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER`, `PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD`, `PGVECTOR_*`, `PROJECT_CODE_INTELLIGENCE_DB_*` |
-| Ingest | `PROJECT_CODE_INTELLIGENCE_COLLECTION`, `PROJECT_CODE_INTELLIGENCE_PROFILE`, `PROJECT_CODE_INTELLIGENCE_REPOS`, `PROJECT_CODE_INTELLIGENCE_MODE` |
-| Embeddings | `PROJECT_CODE_INTELLIGENCE_EMBEDDING_*`, `PROJECT_CODE_INTELLIGENCE_ALLOW_REMOTE_EMBEDDING`, `PROJECT_CODE_INTELLIGENCE_PREEMBED` |
-| MCP safety | `PROJECT_CODE_INTELLIGENCE_MCP_*` |
+| Database | `PCI_DATABASE_URL`, `PCI_DATABASE_SCOPE_PATH`, `PCI_DATABASE_USER`, `PCI_DATABASE_PASSWORD`, `PCI_MCP_DATABASE_URL`, `PCI_MCP_DATABASE_USER`, `PCI_MCP_DATABASE_PASSWORD`, `PCI_POSTGRES_ADMIN_USER`, `PCI_POSTGRES_ADMIN_PASSWORD`, `PCI_DATABASE_ADMIN_USER`, `PCI_DATABASE_ADMIN_PASSWORD`, `PCI_PG_*`, `PCI_DB_*` |
+| Ingest | `PCI_COLLECTION`, `PCI_PROFILE`, `PCI_REPOS`, `PCI_MODE` |
+| Embeddings | `PCI_EMBEDDING_*`, `PCI_ALLOW_REMOTE_EMBEDDING`, `PCI_PREEMBED` |
+| MCP safety | `PCI_MCP_*` |
 | Docker Compose | variables documented in `.env.example` |
 
-`PROJECT_CODE_INTELLIGENCE_DATABASE_URL` is preferred for host tools.
+`PCI_DATABASE_URL` is preferred for host tools.
 Credentials may be embedded in the URL or supplied with
-`PROJECT_CODE_INTELLIGENCE_DATABASE_USER` and
-`PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD`. If the URL contains a database
+`PCI_DATABASE_USER` and
+`PCI_DATABASE_PASSWORD`. If the URL contains a database
 path, that database is used exactly. If the URL omits the database path, the
 connection endpoint and credentials come from the URL while the database name is
-inferred from the repository or workspace path. The split `PGVECTOR_*`
+inferred from the repository or workspace path. The split `PCI_PG_*`
 variables remain supported for Docker Compose and compatibility; set
-`PGVECTOR_DB` only when a fixed database should override inference. `pci-index`
+`PCI_PG_DB` only when a fixed database should override inference. `pci-index`
 owns inferred project database initialization: `pci-index .` initializes before
 indexing, and `pci-index --init-db .` initializes the database/schema and exits.
 `pci-doctor --init-postgres` stays out of project database creation; it only
-uses `PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER` and
-`PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD` to create/update the
+uses `PCI_POSTGRES_ADMIN_USER` and
+`PCI_POSTGRES_ADMIN_PASSWORD` to create/update the
 cluster-level Postgres role that `pci-index` can use through the database admin
 variables below, and prepares `template1` with pgvector. When an inferred
 database is missing, `pci-index` may use
-`PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER` and
-`PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD` to create the inferred
+`PCI_DATABASE_ADMIN_USER` and
+`PCI_DATABASE_ADMIN_PASSWORD` to create the inferred
 database and project-scoped RW/RO roles, then uses the scoped RW role for
 schema and ingest work. When `pci-index` can derive the scoped RO password, it
 prints an `Export for pci-mcp (RO)` block after `pci-index --init-db` and
@@ -75,11 +75,11 @@ values those snippets need. `--mcp-config zed` prints a project-scoped
 Zed does not document environment-variable interpolation for MCP `env` values.
 `--mcp-config cline` prints a user-scoped GUI snippet with read-only database
 values embedded, matching Cline's local MCP settings shape. `pci-mcp` prefers
-`PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL`,
-`PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER`, and
-`PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD` when set, and otherwise falls
+`PCI_MCP_DATABASE_URL`,
+`PCI_MCP_DATABASE_USER`, and
+`PCI_MCP_DATABASE_PASSWORD` when set, and otherwise falls
 back to the generic database variables. Set
-`PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH` for MCP clients or custom
+`PCI_DATABASE_SCOPE_PATH` for MCP clients or custom
 launchers that run outside the indexed repo/workspace but still need the same
 inferred database name. Scoped role passwords are stable for the same admin
 password and inferred database name. When database admin variables are set for an
@@ -102,10 +102,10 @@ bundled local pgvector container ships with a writer that has CREATEROLE, so
 this works out of the box; for a remote Postgres whose writer lacks CREATEROLE
 the role-creation SQL fails with guidance to run `pci-doctor --init-postgres`.
 
-`PROJECT_CODE_INTELLIGENCE_COLLECTION` remains a supported override, but normal
+`PCI_COLLECTION` remains a supported override, but normal
 CLI/MCP use should not need it. Prefer `pci-index --collection NAME` for index
 runs; an inherited collection environment variable is ignored by `pci-index`
-unless `PROJECT_CODE_INTELLIGENCE_ALLOW_COLLECTION_OVERRIDE=1` is also set.
+unless `PCI_ALLOW_COLLECTION_OVERRIDE=1` is also set.
 `pci-index` infers the collection from the repo path or workspace path, and
 `pci-mcp` infers it from the process working directory when the variable is
 unset. In the same default path, `pci-index` and `pci-mcp` infer a project
@@ -149,7 +149,7 @@ from project_code_intelligence.models import IntelEdge, IntelFile, IntelRecord, 
 ```
 
 Profile authors should subclass `CodeIntelProfile` and select their profile with
-`PROJECT_CODE_INTELLIGENCE_PROFILE=package.module:ProfileClass`.
+`PCI_PROFILE=package.module:ProfileClass`.
 
 The following modules are compatibility facades. They are importable, but they
 mostly exist so tests, profile code, and future callers have stable boundaries:

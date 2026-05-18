@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 
 def embedding_token_estimate_chars_per_token() -> float:
-    return config.env_float("PROJECT_CODE_INTELLIGENCE_TOKEN_CHARS_PER_TOKEN", 4.0, minimum=1.0)
+    return config.env_float("PCI_TOKEN_CHARS_PER_TOKEN", 4.0, minimum=1.0)
 
 
 def estimate_embedding_tokens(text: str) -> int:
@@ -351,7 +351,7 @@ def format_duration(seconds: float) -> str:
 
 
 def runtime_heartbeat_seconds() -> int:
-    return config.env_int("PROJECT_CODE_INTELLIGENCE_RUNTIME_HEARTBEAT_SECONDS", 300, minimum=0)
+    return config.env_int("PCI_RUNTIME_HEARTBEAT_SECONDS", 300, minimum=0)
 
 
 def runtime_heartbeat(started: float, stop_event: threading.Event, interval: int, metrics: RuntimeMetrics) -> None:

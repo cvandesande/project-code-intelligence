@@ -37,7 +37,7 @@ def embedding_input_text(text: str, max_chars: int) -> str:
 
 
 def embedding_retry_min_chars() -> int:
-    return config.env_int("PROJECT_CODE_INTELLIGENCE_EMBEDDING_MIN_CHARS", 800, minimum=200)
+    return config.env_int("PCI_EMBEDDING_MIN_CHARS", 800, minimum=200)
 
 
 def smaller_embedding_max_chars(max_chars: int) -> int | None:

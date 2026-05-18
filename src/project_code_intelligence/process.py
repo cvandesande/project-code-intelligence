@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 # drop-in replacement. Operators can pin via the env var below to skip the
 # search entirely.
 _CONTAINER_ENGINE_CANDIDATES = ("docker", "podman")
-_CONTAINER_ENGINE_ENV_VAR = "PROJECT_CODE_INTELLIGENCE_CONTAINER_ENGINE"
+_CONTAINER_ENGINE_ENV_VAR = "PCI_CONTAINER_ENGINE"
 
 PIPE = subprocess.PIPE
 STDOUT = subprocess.STDOUT
@@ -186,14 +186,14 @@ def _audit_docker_args(args: Sequence[str]) -> None:
         saw_volume_flag = arg in {"-v", "--volume"}
 
 
-_COMPOSE_FILE_ENV_VAR = "PROJECT_CODE_INTELLIGENCE_COMPOSE_FILE"
+_COMPOSE_FILE_ENV_VAR = "PCI_COMPOSE_FILE"
 
 
 def compose_file_args() -> list[str]:
     """Return ["-f", "/path/to/docker-compose.yml"] for use in compose subcommands.
 
     Resolution order:
-    1. PROJECT_CODE_INTELLIGENCE_COMPOSE_FILE environment variable — use this to
+    1. PCI_COMPOSE_FILE environment variable — use this to
        point at a customised compose file without modifying the installed package.
     2. Bundled docker-compose.yml from installed package data.
     3. Empty list — callers degrade to CWD-based discovery.

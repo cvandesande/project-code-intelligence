@@ -71,9 +71,9 @@ def set_mcp_environment_defaults() -> None:
     cwd = Path.cwd().resolve()
     if config.DATABASE_SCOPE_PATH_ENV not in os.environ:
         os.environ[config.DATABASE_SCOPE_PATH_ENV] = str(cwd)
-    if "PROJECT_CODE_INTELLIGENCE_COLLECTION" not in os.environ:
-        os.environ["PROJECT_CODE_INTELLIGENCE_COLLECTION"] = default_collection(cwd)
-        os.environ["PROJECT_CODE_INTELLIGENCE_COLLECTION_DEFAULTED"] = "1"
+    if "PCI_COLLECTION" not in os.environ:
+        os.environ["PCI_COLLECTION"] = default_collection(cwd)
+        os.environ["PCI_COLLECTION_DEFAULTED"] = "1"
 
 
 def result_response(request_id: JsonValue, result: Json) -> Json:
@@ -173,7 +173,7 @@ def jsonrpc_input_lines() -> Iterator[str | None]:
 
 def handle_batch_request(batch: list[object]) -> list[Json] | None:
     if len(batch) > mcp_max_batch_items():
-        raise McpProtocolError("batch exceeds PROJECT_CODE_INTELLIGENCE_MCP_MAX_BATCH_ITEMS")
+        raise McpProtocolError("batch exceeds PCI_MCP_MAX_BATCH_ITEMS")
     responses: list[Json] = []
     for item in batch:
         if not isinstance(item, dict):
@@ -220,9 +220,7 @@ def main() -> int:
     _ = progress.set_emitter("json")
     for line_value in jsonrpc_input_lines():
         if line_value is None:
-            write_response(
-                error_response(None, -32000, "request exceeds PROJECT_CODE_INTELLIGENCE_MCP_MAX_REQUEST_BYTES")
-            )
+            write_response(error_response(None, -32000, "request exceeds PCI_MCP_MAX_REQUEST_BYTES"))
             continue
         line = line_value
         line = line.strip()

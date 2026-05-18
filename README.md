@@ -171,7 +171,7 @@ Run only one local embedding service at a time. `pci-doctor --start` picks the
 best available local path, and default models download on first run.
 
 Remote embedding endpoints receive source-derived text. Set
-`PROJECT_CODE_INTELLIGENCE_ALLOW_REMOTE_EMBEDDING=1` only when that is
+`PCI_ALLOW_REMOTE_EMBEDDING=1` only when that is
 intentional.
 
 Do not publish database dumps, restore artifacts, SARIF output, embedding

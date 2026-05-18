@@ -68,11 +68,11 @@ def _resolve_mode(stream: object, *, requested: OutputMode | None, env_var: str)
 
 
 def detect_progress_mode(*, requested: OutputMode | None = None) -> OutputMode:
-    return _resolve_mode(sys.stderr, requested=requested, env_var="PROJECT_CODE_INTELLIGENCE_OUTPUT")
+    return _resolve_mode(sys.stderr, requested=requested, env_var="PCI_OUTPUT")
 
 
 def detect_summary_mode(*, requested: OutputMode | None = None) -> OutputMode:
-    return _resolve_mode(sys.stdout, requested=requested, env_var="PROJECT_CODE_INTELLIGENCE_OUTPUT")
+    return _resolve_mode(sys.stdout, requested=requested, env_var="PCI_OUTPUT")
 
 
 def _format_seconds(value: float) -> str:

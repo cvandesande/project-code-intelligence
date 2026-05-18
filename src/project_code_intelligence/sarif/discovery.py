@@ -110,7 +110,7 @@ def explicit_sarif_patterns(values: list[str] | None) -> list[str]:
     patterns: list[str] = []
     for value in values or []:
         patterns.extend(item.strip() for item in value.split(",") if item.strip())
-    env_value = config.env_text("PROJECT_CODE_INTELLIGENCE_SARIF")
+    env_value = config.env_text("PCI_SARIF")
     if env_value:
         patterns.extend(item.strip() for item in env_value.split(",") if item.strip())
     return patterns

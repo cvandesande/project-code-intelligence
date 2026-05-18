@@ -80,7 +80,7 @@ def query_with_where(prefix: str, clauses: list[str], suffix: str) -> str:
 def json_argument(value: object, name: str) -> str:
     text = json.dumps(value, sort_keys=True, separators=(",", ":"))
     if len(text.encode("utf-8")) > mcp_max_metadata_bytes():
-        raise McpProtocolError(f"{name} exceeds PROJECT_CODE_INTELLIGENCE_MCP_MAX_METADATA_BYTES")
+        raise McpProtocolError(f"{name} exceeds PCI_MCP_MAX_METADATA_BYTES")
     return text
 
 

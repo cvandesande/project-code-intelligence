@@ -37,8 +37,8 @@ _DESCRIPTION = (
     "pci-mcp is a stdio JSON-RPC MCP server. It is launched by an MCP client "
     "(VS Code, Claude Code, Codex, Cline, Zed, etc.); when you run it in a terminal it will "
     "block waiting for JSON-RPC requests on stdin. Configure it through environment variables "
-    "(PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL/USER/PASSWORD, "
-    "PROJECT_CODE_INTELLIGENCE_COLLECTION, PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH). "
+    "(PCI_MCP_DATABASE_URL/USER/PASSWORD, "
+    "PCI_COLLECTION, PCI_DATABASE_SCOPE_PATH). "
     "Run `pci-index --mcp-config <client>` to generate a ready-to-paste client config."
 )
 

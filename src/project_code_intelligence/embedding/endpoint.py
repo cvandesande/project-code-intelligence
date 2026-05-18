@@ -22,15 +22,15 @@ _RESOLVED_FRAMEWORK_CACHE: dict[str, str | None] = {}
 
 
 def embedding_request_timeout_seconds() -> float:
-    return config.env_float("PROJECT_CODE_INTELLIGENCE_EMBEDDING_REQUEST_TIMEOUT_SECONDS", 300.0, minimum=1.0)
+    return config.env_float("PCI_EMBEDDING_REQUEST_TIMEOUT_SECONDS", 300.0, minimum=1.0)
 
 
 def embedding_model_resolve_timeout_seconds() -> float:
-    return config.env_float("PROJECT_CODE_INTELLIGENCE_EMBEDDING_MODEL_RESOLVE_TIMEOUT_SECONDS", 30.0, minimum=1.0)
+    return config.env_float("PCI_EMBEDDING_MODEL_RESOLVE_TIMEOUT_SECONDS", 30.0, minimum=1.0)
 
 
 def embedding_request_retries() -> int:
-    return config.env_int("PROJECT_CODE_INTELLIGENCE_EMBEDDING_REQUEST_RETRIES", 3, minimum=0)
+    return config.env_int("PCI_EMBEDDING_REQUEST_RETRIES", 3, minimum=0)
 
 
 def retry_sleep_seconds(attempt: int) -> float:
@@ -75,21 +75,21 @@ def validate_embedding_endpoint(endpoint: str, *, env: config.Env | None = None)
         raise ValueError("embedding endpoint must include a host")
     if endpoint_host_is_loopback(parsed.hostname):
         return
-    if config.env_bool("PROJECT_CODE_INTELLIGENCE_ALLOW_REMOTE_EMBEDDING", default=False, env=env):
+    if config.env_bool("PCI_ALLOW_REMOTE_EMBEDDING", default=False, env=env):
         return
     raise ValueError(
         "remote embedding endpoints are disabled by default because code-derived "
-        "text is sent to the endpoint; set PROJECT_CODE_INTELLIGENCE_ALLOW_REMOTE_EMBEDDING=1 "
+        "text is sent to the endpoint; set PCI_ALLOW_REMOTE_EMBEDDING=1 "
         "to allow a trusted remote endpoint"
     )
 
 
 def local_embedding_model_candidates(env: config.Env | None = None) -> tuple[str, ...]:
     values = [
-        config.env_text("PROJECT_CODE_INTELLIGENCE_FASTEMBED_MODEL", config.DEFAULT_FASTEMBED_MODEL, env=env)
+        config.env_text("PCI_FASTEMBED_MODEL", config.DEFAULT_FASTEMBED_MODEL, env=env)
         or config.DEFAULT_FASTEMBED_MODEL,
         config.DEFAULT_LEMONADE_EMBEDDING_MODEL,
-        config.env_text("PROJECT_CODE_INTELLIGENCE_HF_MODEL_FILE", config.DEFAULT_GPU_EMBEDDING_MODEL, env=env)
+        config.env_text("PCI_HF_MODEL_FILE", config.DEFAULT_GPU_EMBEDDING_MODEL, env=env)
         or config.DEFAULT_GPU_EMBEDDING_MODEL,
     ]
     deduplicated: list[str] = []
@@ -211,7 +211,7 @@ def resolve_embedding_endpoint_model(
     resolved = model
     should_resolve = (
         endpoint is not None
-        and config.env_text("PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL", env=env) is None
+        and config.env_text("PCI_EMBEDDING_ENDPOINT_MODEL", env=env) is None
         and model == config.DEFAULT_EMBEDDING_ENDPOINT_MODEL
         and endpoint_is_local(endpoint)
     )
@@ -354,7 +354,7 @@ def embedding_endpoint_hint(endpoint: str, exc: BaseException) -> str:
         "The FastEmbed service listens on:\n"
         "  http://127.0.0.1:18081/v1/embeddings\n"
         "\n"
-        "Or point PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT at another trusted OpenAI-compatible "
+        "Or point PCI_EMBEDDING_ENDPOINT at another trusted OpenAI-compatible "
         "embeddings provider.\n"
         f"Connection detail: {exc}"
     )

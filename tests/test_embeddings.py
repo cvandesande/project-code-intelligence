@@ -115,19 +115,19 @@ class LlamaEmbeddingUtilsTests(unittest.TestCase):
         with (
             patch.dict(
                 os.environ,
-                {"PROJECT_CODE_INTELLIGENCE_LLAMA_EMBEDDING_BIN": "/opt/llama/bin/embed"},
+                {"PCI_LLAMA_EMBEDDING_BIN": "/opt/llama/bin/embed"},
                 clear=True,
             ),
-            self.assertRaisesRegex(RuntimeError, "PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL"),
+            self.assertRaisesRegex(RuntimeError, "PCI_LLAMA_MODEL"),
         ):
             _ = _embedding_utils.llama.build_command(prompt)
 
         with patch.dict(
             os.environ,
             {
-                "PROJECT_CODE_INTELLIGENCE_LLAMA_EMBEDDING_BIN": "/opt/llama/bin/embed",
-                "PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL": "/models/embed.gguf",
-                "PROJECT_CODE_INTELLIGENCE_LLAMA_EXTRA_ARGS": "--threads 4 --ctx-size 8192",
+                "PCI_LLAMA_EMBEDDING_BIN": "/opt/llama/bin/embed",
+                "PCI_LLAMA_MODEL": "/models/embed.gguf",
+                "PCI_LLAMA_EXTRA_ARGS": "--threads 4 --ctx-size 8192",
             },
             clear=True,
         ):
@@ -153,8 +153,8 @@ class LlamaEmbeddingUtilsTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "PROJECT_CODE_INTELLIGENCE_LLAMA_CPP_DIR": "/opt/llama",
-                "PROJECT_CODE_INTELLIGENCE_LLAMA_EMBD_GEMMA_DEFAULT": "1",
+                "PCI_LLAMA_CPP_DIR": "/opt/llama",
+                "PCI_LLAMA_EMBD_GEMMA_DEFAULT": "1",
             },
             clear=True,
         ):
@@ -325,7 +325,7 @@ class EmbeddingContractTests(unittest.TestCase):
             _ = validate_embedding_endpoint("https://embedding.example.invalid/v1/embeddings", env={})
         _ = validate_embedding_endpoint(
             "https://embedding.example.invalid/v1/embeddings",
-            env={"PROJECT_CODE_INTELLIGENCE_ALLOW_REMOTE_EMBEDDING": "1"},
+            env={"PCI_ALLOW_REMOTE_EMBEDDING": "1"},
         )
 
     def test_resolve_embedding_endpoint_model_uses_local_health_model(self) -> None:
@@ -400,7 +400,7 @@ class EmbeddingContractTests(unittest.TestCase):
             model = resolve_embedding_endpoint_model(
                 "http://127.0.0.1:18083/v1/embeddings",
                 "local",
-                env={"PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL": "local"},
+                env={"PCI_EMBEDDING_ENDPOINT_MODEL": "local"},
             )
 
         self.assertEqual(model, "local")
