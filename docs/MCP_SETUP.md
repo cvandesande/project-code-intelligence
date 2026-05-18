@@ -458,8 +458,10 @@ with that client's project/workspace configuration if it has one.
 
 ## Agent Guidance
 
-For repositories that use this MCP server heavily, copy
-[`docs/examples/AGENTS.md`](examples/AGENTS.md) into the indexed repository.
+For repositories that use this MCP server heavily, drop
+[`docs/SYSTEM_PROMPT.md`](SYSTEM_PROMPT.md) into the connected agent's
+system-prompt slot. The design notes behind it are in
+[`docs/SYSTEM_PROMPT_RATIONALE.md`](SYSTEM_PROMPT_RATIONALE.md).
 
 The important behavior for assistants is:
 

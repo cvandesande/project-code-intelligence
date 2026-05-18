@@ -12,6 +12,8 @@ it doesn't. On a large codebase, that speculative loading burns tokens fast.
 agents query to decide what's worth reading. The index stores source files, code
 records, SARIF static-analysis findings, semantic embeddings, and candidate
 relationships in Postgres/pgvector, then exposes them through an MCP server.
+It does not replace reading code. It replaces the part where you are not sure
+what to read yet.
 
 The default setup is local: Postgres/pgvector and embeddings can run on your
 machine, so source-derived text does not need to leave it. Remote databases and
@@ -40,15 +42,22 @@ records with paths, line ranges, and snippets across the indexed codebase.
 so agents can search findings and fetch code-flow details without opening report
 artifacts directly.
 
-## How To Use Results
+## How Agents Use This
 
-Search snippets are not the answer. They are evidence for deciding whether a
-record is worth reading. "Is this probably the function I need?" can often be
-answered from a snippet. "Does this handle the edge case correctly?" still
-requires fetching the record or reading the source.
+An agent connected to `project-code-intelligence` handles discovery questions
+differently. "Where is `Foo` used?", "what calls `Bar`?", "find code that
+handles X" become one-hop queries that return file paths, line ranges, and
+snippets — not the answer, but enough to decide which files are worth reading.
 
-The index does not replace reading code. It replaces the part where you are not
-sure what to read yet.
+The agent still reads files. The change is in the *find* step: on a large or
+unfamiliar codebase, that step is where speculative-read tokens add up. The
+index cuts them down.
+
+How much it actually saves depends on the codebase and the work. The included
+[session-retrospective prompt](docs/SESSION_RETROSPECTIVE_PROMPT.md)
+helps you tell, and [docs/EVALUATING_VALUE.md](docs/EVALUATING_VALUE.md) walks
+through how to interpret the answer. The system prompt is shaped so an agent
+doesn't over-apply MCP on questions where `Read` is cheaper.
 
 ## Limits
 
@@ -60,6 +69,11 @@ sure what to read yet.
   try semantic search; it uses a different mechanism.
 - Text-only indexing (`--no-embed`) works for lexical search, but semantic
   search requires an embedding endpoint.
+
+For small or familiar codebases the overhead may not pay back at all. See
+[docs/EVALUATING_VALUE.md](docs/EVALUATING_VALUE.md) for a session
+retrospective workflow you can run against your own usage to decide
+whether the install is earning its keep.
 
 ## Quick Start
 
@@ -75,9 +89,7 @@ When `pci-doctor` reports `Status: ok ready`, index a repository:
 
 ```sh
 cd /path/to/repo
-pci-index . --dry-run
 pci-index .
-pci-mcp-smoke .
 ```
 
 Then point your MCP client at `pci-mcp`. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md)
@@ -137,6 +149,14 @@ pci-index --init-db --mcp-config codex .
 and `zed`. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md) for setup examples,
 database configuration, and collection/repo filter guidance.
 
+A ready-to-paste system prompt for the connected agent lives at
+[docs/SYSTEM_PROMPT.md](docs/SYSTEM_PROMPT.md). The design
+notes in [docs/SYSTEM_PROMPT_RATIONALE.md](docs/SYSTEM_PROMPT_RATIONALE.md)
+cover the prompt-engineering choices behind it (e.g., asking the agent for
+negative-only self-reports instead of token-savings estimates it can't compute
+honestly) — useful reading if you're tuning agent prompts for any MCP server,
+not just this one.
+
 ## Indexing
 
 `pci-index .` indexes the current Git repository. Pass multiple repo paths to
@@ -187,8 +207,10 @@ stronger isolation. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md#security-model).
 
 - [docs/MCP_SETUP.md](docs/MCP_SETUP.md) — MCP client configuration, collections, repo filters, security model
 - [docs/PUBLIC_API.md](docs/PUBLIC_API.md) — installed CLI commands, environment variables, MCP tool surface, Python imports
+- [docs/EVALUATING_VALUE.md](docs/EVALUATING_VALUE.md) — how to tell whether the install is earning its keep on your codebase
 - [.env.example](.env.example) — available environment variables
-- [docs/examples/AGENTS.md](docs/examples/AGENTS.md) — example guidance for coding agents using the MCP server
+- [docs/SYSTEM_PROMPT.md](docs/SYSTEM_PROMPT.md) — ready-to-paste system prompt for an agent connected to the MCP server (rationale in [SYSTEM_PROMPT_RATIONALE.md](docs/SYSTEM_PROMPT_RATIONALE.md))
+- [docs/SESSION_RETROSPECTIVE_PROMPT.md](docs/SESSION_RETROSPECTIVE_PROMPT.md) — pasteable end-of-session retrospective for evaluating MCP usage
 - [AGENTS.md](AGENTS.md) — instructions for assistants working on this repo
 - [CONTRIBUTING.md](CONTRIBUTING.md) — contributor workflow, local checks, and guardrails
 
