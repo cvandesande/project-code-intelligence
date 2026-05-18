@@ -19,6 +19,7 @@ Installed console scripts are public:
 | `pci-mcp` | stdio MCP server entry point. |
 | `pci-mcp-smoke` | Basic MCP status and tool smoke check. Requires one or more repo paths, such as `pci-mcp-smoke .`. |
 | `pci-fastembed-server` | Small OpenAI-compatible FastEmbed server for local CPU embeddings. |
+| `pci-apple-embed-server` | OpenAI-compatible embedding server backed by Apple MLX (Apple Silicon only). Writes a PID file so `pci-doctor --stop` can terminate it. |
 | `pci-llama-embed` | llama.cpp embedding CLI helper. |
 | `pci-embedding-bench` | Embedding endpoint benchmark helper. |
 
@@ -39,7 +40,7 @@ Stable configuration groups:
 
 | Group | Public variables |
 | --- | --- |
-| Database | `PCI_DATABASE_URL`, `PCI_DATABASE_SCOPE_PATH`, `PCI_DATABASE_USER`, `PCI_DATABASE_PASSWORD`, `PCI_MCP_DATABASE_URL`, `PCI_MCP_DATABASE_USER`, `PCI_MCP_DATABASE_PASSWORD`, `PCI_POSTGRES_ADMIN_USER`, `PCI_POSTGRES_ADMIN_PASSWORD`, `PCI_DATABASE_ADMIN_USER`, `PCI_DATABASE_ADMIN_PASSWORD`, `PCI_PG_*`, `PCI_DB_*` |
+| Database | `PCI_DATABASE_URL`, `PCI_DATABASE_SCOPE_PATH`, `PCI_DATABASE_USER`, `PCI_DATABASE_PASSWORD`, `PCI_MCP_DATABASE_URL`, `PCI_MCP_DATABASE_USER`, `PCI_MCP_DATABASE_PASSWORD`, `PCI_POSTGRES_ADMIN_USER`, `PCI_POSTGRES_ADMIN_PASSWORD`, `PCI_DATABASE_ADMIN_USER`, `PCI_DATABASE_ADMIN_PASSWORD`, `PCI_PG_*`, `PCI_MCP_PG_*`, `PCI_DB_*` |
 | Ingest | `PCI_COLLECTION`, `PCI_PROFILE`, `PCI_REPOS`, `PCI_MODE` |
 | Embeddings | `PCI_EMBEDDING_*`, `PCI_ALLOW_REMOTE_EMBEDDING`, `PCI_PREEMBED` |
 | MCP safety | `PCI_MCP_*` |
@@ -78,7 +79,10 @@ values embedded, matching Cline's local MCP settings shape. `pci-mcp` prefers
 `PCI_MCP_DATABASE_URL`,
 `PCI_MCP_DATABASE_USER`, and
 `PCI_MCP_DATABASE_PASSWORD` when set, and otherwise falls
-back to the generic database variables. Set
+back to the generic database variables. `PCI_MCP_PG_USER` and `PCI_MCP_PG_PASS`
+are compatibility aliases that override the split `PCI_PG_USER` /
+`PCI_PG_PASS` values for the MCP connection; prefer the
+`PCI_MCP_DATABASE_*` names in new setups. Set
 `PCI_DATABASE_SCOPE_PATH` for MCP clients or custom
 launchers that run outside the indexed repo/workspace but still need the same
 inferred database name. Scoped role passwords are stable for the same admin

@@ -37,11 +37,13 @@ def _as_object(value: object) -> JsonObject:
 
 
 if TYPE_CHECKING:
+    import threading
+
     from rich.console import Console, RenderableType
     from rich.panel import Panel
     from rich.table import Table
 
-    from project_code_intelligence.models import JsonObject
+    from project_code_intelligence.models import JsonObject, JsonValue
 
 OutputMode = Literal["pretty", "json"]
 LIVE_REFRESH_PER_SECOND = 8
@@ -551,27 +553,60 @@ def _bar(done: int, total: int, *, width: int = 24) -> str:
 
 # === Module-level emitter wiring ===========================================
 
-_emitter: ProgressEmitter | None = None
+
+class _EmitterState:
+    # Class-attribute storage so the setters below don't need `global`. The
+    # state is fully encapsulated within this module; external callers go
+    # through set_emitter / get_emitter / close_emitter.
+    instance: ProgressEmitter | None = None
 
 
 def set_emitter(mode: OutputMode) -> ProgressEmitter:
-    global _emitter  # noqa: PLW0603 - module-level singleton for the process.
-    _emitter = RichEmitter() if mode == "pretty" else JsonEmitter()
-    return _emitter
+    _EmitterState.instance = RichEmitter() if mode == "pretty" else JsonEmitter()
+    return _EmitterState.instance
 
 
 def get_emitter() -> ProgressEmitter:
-    global _emitter  # noqa: PLW0603 - module-level singleton for the process.
-    if _emitter is None:
-        _emitter = JsonEmitter() if detect_progress_mode() == "json" else RichEmitter()
-    return _emitter
+    if _EmitterState.instance is None:
+        _EmitterState.instance = JsonEmitter() if detect_progress_mode() == "json" else RichEmitter()
+    return _EmitterState.instance
 
 
 def close_emitter() -> None:
-    global _emitter  # noqa: PLW0603 - module-level singleton for the process.
-    if _emitter is not None:
-        _emitter.close()
-    _emitter = NullEmitter()
+    if _EmitterState.instance is not None:
+        _EmitterState.instance.close()
+    _EmitterState.instance = NullEmitter()
+
+
+def progress_event(event: str, **values: JsonValue) -> None:
+    """Emit a structured progress event through the active emitter.
+
+    Lives here (not in `runtime`) so the call site can do a normal
+    module-level import; placing it in `runtime` would create a cycle since
+    this module already imports `runtime`.
+    """
+    get_emitter().emit(event, dict(values))
+
+
+def runtime_heartbeat(
+    started: float,
+    stop_event: threading.Event,
+    interval: int,
+    metrics: runtime_state.RuntimeMetrics,
+) -> None:
+    """Periodically emit a `code_intel_runtime_heartbeat` progress event.
+
+    Lives here (not in `runtime`) for the same reason as `progress_event`:
+    it's a progress-emission helper, and `runtime` would create a cycle.
+    """
+    while not stop_event.wait(interval):
+        elapsed = time.monotonic() - started
+        progress_event(
+            "code_intel_runtime_heartbeat",
+            seconds=round(elapsed, 3),
+            duration=runtime_state.format_duration(elapsed),
+            metrics=metrics.snapshot(),
+        )
 
 
 # === Final summary panel for stdout ========================================

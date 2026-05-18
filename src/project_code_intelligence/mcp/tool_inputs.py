@@ -16,6 +16,8 @@ from typing import Literal, Union, cast, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from project_code_intelligence.mcp.taxonomies import ConfidenceKind
+
 
 def _is_optional_string_like_annotation(annotation: object) -> bool:
     origin = get_origin(annotation)
@@ -88,7 +90,7 @@ class _SearchFilterArgs(StrictArgs):
     language: str | None = None
     file_role: str | None = None
     content_class: str | None = None
-    confidence_kind: str | None = None
+    confidence_kind: ConfidenceKind | None = None
     source_path: str | None = None
     source_path_prefix: str | None = None
     symbol: str | None = None
@@ -145,7 +147,7 @@ class RelatedCodeIntelArgs(StrictArgs):
     symbol: str | None = None
     direction: Literal["any", "incoming", "outgoing"] | None = None
     edge_type: str | None = None
-    confidence_kind: str | None = None
+    confidence_kind: ConfidenceKind | None = None
     include_unresolved: bool | None = None
     collection: str | None = None
     repo: str | None = None

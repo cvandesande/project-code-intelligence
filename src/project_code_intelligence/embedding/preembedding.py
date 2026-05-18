@@ -11,7 +11,8 @@ from project_code_intelligence import config
 from project_code_intelligence import runtime as runtime_state
 from project_code_intelligence.embedding.core import embed_items_with_retry
 from project_code_intelligence.embedding.store import embedding_metadata
-from project_code_intelligence.runtime import PreEmbeddingResult, PreEmbeddingState, progress_event
+from project_code_intelligence.progress import progress_event
+from project_code_intelligence.runtime import PreEmbeddingResult, PreEmbeddingState
 from project_code_intelligence.storage import RecordInsertContext, insert_records
 
 if TYPE_CHECKING:

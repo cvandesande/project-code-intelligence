@@ -573,7 +573,7 @@ class DatabaseBootstrapTests(unittest.TestCase):
             database_inferred=True,
         )
 
-        result = db._writer_admin_fallback(settings)
+        result = db.writer_admin_fallback(settings)
 
         self.assertIs(result, settings)
 
@@ -627,7 +627,7 @@ class DatabaseBootstrapTests(unittest.TestCase):
             database_inferred=True,
         )
 
-        result = db._writer_admin_fallback(settings)
+        result = db.writer_admin_fallback(settings)
 
         self.assertIs(result, settings)
 

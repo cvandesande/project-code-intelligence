@@ -22,6 +22,7 @@ from psycopg.sql import SQL
 
 from project_code_intelligence.common import sha256_text
 from project_code_intelligence.config import DatabaseSettings, database_url_with_dbname
+from project_code_intelligence.exceptions import DatabaseConnectionError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -41,10 +42,6 @@ VECTOR_EXTENSION = "vector"
 
 class AutocommitConnect(Protocol):
     def __call__(self, conninfo: str, *, autocommit: bool, row_factory: RowFactory[DictRow]) -> DbConnection: ...
-
-
-class DatabaseConnectionError(RuntimeError):
-    """Raised when the configured PostgreSQL connection is unavailable."""
 
 
 @dataclass(frozen=True)
@@ -273,7 +270,7 @@ def _bootstrap_connection_settings(settings: DatabaseSettings) -> DatabaseSettin
     return settings
 
 
-def _writer_admin_fallback(settings: DatabaseSettings) -> DatabaseSettings:
+def writer_admin_fallback(settings: DatabaseSettings) -> DatabaseSettings:
     """Promote writer credentials to the effective admin when no admin is configured.
 
     The bundled local pgvector container ships with `codeintel:codeintel` as a superuser
@@ -449,7 +446,7 @@ def bootstrap_inferred_database(settings: DatabaseSettings) -> DatabaseBootstrap
             return _connect_existing_inferred_database_with_scoped_role(
                 settings, dbname=dbname, rw_role_name=rw_role_name
             )
-        settings = _writer_admin_fallback(settings)
+        settings = writer_admin_fallback(settings)
     bootstrap_settings = _bootstrap_connection_settings(settings)
     maintenance_settings = maintenance_database_settings(settings)
     create_project_roles = bool(settings.admin_user and settings.admin_password)

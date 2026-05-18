@@ -12,7 +12,7 @@ from project_code_intelligence import runtime as runtime_state
 from project_code_intelligence.embedding.core import embed_items_with_retry
 from project_code_intelligence.embedding.endpoint import retry_sleep_seconds
 from project_code_intelligence.embedding.types import EmbeddingRow, EmbeddingRunConfig, SkippedEmbeddingRow
-from project_code_intelligence.runtime import progress_event
+from project_code_intelligence.progress import progress_event
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping

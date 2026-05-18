@@ -38,7 +38,7 @@ SHELL_FILES := \
 help: ## Show this help and exit
 	@awk 'BEGIN {FS = ":[^#]*## "; print "Targets (default: check):"} /^[a-zA-Z][a-zA-Z0-9_-]+:[^=]*## / {printf "  %-22s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-check: format-check shell-format-check lint shellcheck test dead-code dependency-check architecture-check semgrep-check coverage typecheck security deps-audit compose-check ## Run the full local quality gate
+check: format-check shell-format-check lint shellcheck dead-code dependency-check architecture-check semgrep-check coverage typecheck security deps-audit compose-check ## Run the full local quality gate
 
 lint: ## Lint Python with ruff
 	$(RUFF) check $(RUFF_TARGETS)

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence import profile_context
 from project_code_intelligence.common import sha256_bytes
+from project_code_intelligence.exceptions import SarifFileTooLargeError, SarifLoadError
 from project_code_intelligence.models import SarifIngest, StaticRun
 from project_code_intelligence.sarif.discovery import discover_sarif_files, explicit_sarif_patterns, repo_for_sarif_file
 from project_code_intelligence.sarif.parse import (
@@ -52,7 +53,7 @@ __all__ = [
 def sarif_file_bytes(context: SarifIngestContext, sarif_path: Path) -> bytes:
     size = sarif_path.stat().st_size
     if size > context.max_bytes:
-        raise ValueError("sarif_file_too_large")
+        raise SarifFileTooLargeError(path=str(sarif_path), size_bytes=size, limit_bytes=context.max_bytes)
     return sarif_path.read_bytes()
 
 
@@ -60,12 +61,12 @@ def load_sarif_file(context: SarifIngestContext, sarif_path: Path) -> LoadedSari
     try:
         data = sarif_file_bytes(context, sarif_path)
         sarif_value = cast("object", json.loads(data.decode("utf-8")))
+    except SarifFileTooLargeError as exc:
+        context_error = {"source_path": str(sarif_path), "parser": "sarif", "error": "sarif_file_too_large"}
+        raise SarifLoadError(context=context_error) from exc
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        error = str(exc)
-        if isinstance(exc, ValueError) and error == "sarif_file_too_large":
-            error = "sarif_file_too_large"
-        context_error = {"source_path": str(sarif_path), "parser": "sarif", "error": error}
-        raise RuntimeError(json.dumps(context_error, sort_keys=True)) from exc
+        context_error = {"source_path": str(sarif_path), "parser": "sarif", "error": str(exc)}
+        raise SarifLoadError(context=context_error) from exc
     if not isinstance(sarif_value, dict):
         context_error = {"source_path": str(sarif_path), "parser": "sarif", "error": "SARIF root is not an object"}
         raise TypeError(json.dumps(context_error, sort_keys=True))

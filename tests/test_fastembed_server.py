@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import unittest
+from email.message import Message
 from typing import cast
 from unittest.mock import MagicMock
 
@@ -28,7 +29,10 @@ class _TestHandler(FastEmbedHandler):
         self._wfile = io.BytesIO()
         self.wfile = self._wfile
         self.rfile = io.BytesIO(b"")
-        self.headers = {}  # type: ignore[assignment]
+        # `BaseHTTPRequestHandler.headers` is `email.message.Message` (HTTP
+        # headers reuse the stdlib email-RFC parser). Use a real Message so
+        # the stub matches production; the server only calls `.get(...)`.
+        self.headers = Message()
         self._mock_model_name = model_name
         self._captured_status = 0
 
