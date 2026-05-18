@@ -77,6 +77,8 @@ BUILD_FILE_NAMES = frozenset({
     "tsconfig.json",
 })
 DOCKERFILE_NAMES = frozenset({"Dockerfile", "Containerfile"})
+DOCKERFILE_VARIANT_PREFIXES: tuple[str, ...] = ("dockerfile.", "dockerfile-", "containerfile.", "containerfile-")
+DOCKERFILE_SYNTAX_DIRECTIVE_PREFIX = b"# syntax=docker/dockerfile"
 CMAKE_NAMES = frozenset({"CMakeLists.txt"})
 MESON_NAMES = frozenset({"meson.build", "meson_options.txt"})
 BAZEL_NAMES = frozenset({"BUILD", "BUILD.bazel", "WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel"})
@@ -273,6 +275,8 @@ def language_for_read_file(path: str, data: bytes, *, read_ok: bool) -> str:
         if b"@interface" in header or b"@protocol" in header or b"@implementation" in header or b"#import" in header:
             return "objective_c"
     if read_ok and language == "text":
+        if data[: len(DOCKERFILE_SYNTAX_DIRECTIVE_PREFIX)].lower() == DOCKERFILE_SYNTAX_DIRECTIVE_PREFIX:
+            return "dockerfile"
         return shebang_language(data) or language
     return language
 
@@ -289,7 +293,11 @@ def special_name_language(path: str, name: str) -> str | None:
     path_lower = path.lower()
     name_lower = name.lower()
     language: str | None = None
-    if name in DOCKERFILE_NAMES or name_lower.endswith(".dockerfile"):
+    if (
+        name in DOCKERFILE_NAMES
+        or name_lower.endswith(".dockerfile")
+        or name_lower.startswith(DOCKERFILE_VARIANT_PREFIXES)
+    ):
         language = "dockerfile"
     elif name in CMAKE_NAMES:
         language = "cmake"

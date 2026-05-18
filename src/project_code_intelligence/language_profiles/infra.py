@@ -99,10 +99,23 @@ def hcl_metadata(text: str, *, packer: bool) -> JsonObject:
     })
 
 
+_DOCKERFILE_VARIANT_PREFIXES: tuple[str, ...] = (
+    "dockerfile.",
+    "dockerfile-",
+    "containerfile.",
+    "containerfile-",
+)
+
+
 def infra_metadata(path: str, text: str) -> JsonObject:
     file_name = Path(path).name.lower()
     normalized_path = path.lower()
-    if file_name in {"dockerfile", "containerfile"} or file_name.endswith(".dockerfile"):
+    if (
+        file_name in {"dockerfile", "containerfile"}
+        or file_name.endswith(".dockerfile")
+        or file_name.startswith(_DOCKERFILE_VARIANT_PREFIXES)
+        or text.lstrip().lower().startswith("# syntax=docker/dockerfile")
+    ):
         return dockerfile_metadata(text)
     return hcl_metadata(text, packer=normalized_path.endswith((".pkr.hcl", ".pkrvars.hcl")))
 
