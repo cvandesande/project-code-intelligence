@@ -1110,7 +1110,7 @@ class McpSemanticSearchTests(unittest.TestCase):
         conn = QueuedConnection([FakeCursor(many=[{"source_path": "tokio/src/lib.rs"}])])
 
         with (
-            patch.dict(os.environ, {"PROJECT_CODE_INTELLIGENCE_COLLECTION": "tokio"}, clear=True),
+            patch.dict(os.environ, {"PCI_COLLECTION": "tokio"}, clear=True),
             patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
@@ -1446,20 +1446,20 @@ class McpContractTests(unittest.TestCase):
                 with patch.dict(os.environ, {}, clear=True):
                     set_mcp_environment_defaults()
                     self.assertEqual(
-                        os.environ["PROJECT_CODE_INTELLIGENCE_COLLECTION"],
+                        os.environ["PCI_COLLECTION"],
                         "project-code-intelligence",
                     )
                     self.assertEqual(os.environ[config.DATABASE_SCOPE_PATH_ENV], str(workspace.resolve()))
-                    self.assertEqual(os.environ["PROJECT_CODE_INTELLIGENCE_COLLECTION_DEFAULTED"], "1")
+                    self.assertEqual(os.environ["PCI_COLLECTION_DEFAULTED"], "1")
             finally:
                 os.chdir(old_cwd)
 
     def test_mcp_keeps_explicit_collection_override(self) -> None:
-        with patch.dict(os.environ, {"PROJECT_CODE_INTELLIGENCE_COLLECTION": "configured"}, clear=True):
+        with patch.dict(os.environ, {"PCI_COLLECTION": "configured"}, clear=True):
             set_mcp_environment_defaults()
-            self.assertEqual(os.environ["PROJECT_CODE_INTELLIGENCE_COLLECTION"], "configured")
+            self.assertEqual(os.environ["PCI_COLLECTION"], "configured")
             self.assertEqual(os.environ[config.DATABASE_SCOPE_PATH_ENV], str(Path.cwd().resolve()))
-            self.assertNotIn("PROJECT_CODE_INTELLIGENCE_COLLECTION_DEFAULTED", os.environ)
+            self.assertNotIn("PCI_COLLECTION_DEFAULTED", os.environ)
 
         with patch.dict(os.environ, {config.DATABASE_SCOPE_PATH_ENV: "configured-scope"}, clear=True):
             set_mcp_environment_defaults()
@@ -1469,8 +1469,8 @@ class McpContractTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "PROJECT_CODE_INTELLIGENCE_COLLECTION": "project-code-intelligence",
-                "PROJECT_CODE_INTELLIGENCE_COLLECTION_DEFAULTED": "1",
+                "PCI_COLLECTION": "project-code-intelligence",
+                "PCI_COLLECTION_DEFAULTED": "1",
             },
             clear=True,
         ):
@@ -1483,8 +1483,8 @@ class McpContractTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "PROJECT_CODE_INTELLIGENCE_COLLECTION": "project-code-intelligence",
-                "PROJECT_CODE_INTELLIGENCE_COLLECTION_DEFAULTED": "1",
+                "PCI_COLLECTION": "project-code-intelligence",
+                "PCI_COLLECTION_DEFAULTED": "1",
             },
             clear=True,
         ):
@@ -1505,14 +1505,14 @@ class McpContractTests(unittest.TestCase):
         }
 
         with (
-            patch.dict(os.environ, {"PROJECT_CODE_INTELLIGENCE_COLLECTION": "configured"}, clear=True),
+            patch.dict(os.environ, {"PCI_COLLECTION": "configured"}, clear=True),
             self.assertRaises(McpWritePermissionError) as ctx,
         ):
             _ = handle_jsonrpc_value(request)
 
         self.assertEqual(request_id_from_jsonrpc_value(request), 42)
         message = str(ctx.exception)
-        self.assertIn("does not match PROJECT_CODE_INTELLIGENCE_COLLECTION", message)
+        self.assertIn("does not match PCI_COLLECTION", message)
         self.assertIn("omit collection", message)
 
     def test_result_text_wraps_json_as_mcp_text_content(self) -> None:
@@ -1550,7 +1550,7 @@ class McpContractTests(unittest.TestCase):
         with self.assertRaises(McpProtocolTypeError):
             _ = optional_bool({"include_historical": "yes"}, "include_historical")
         with (
-            patch.dict(os.environ, {"PROJECT_CODE_INTELLIGENCE_MCP_MAX_TEXT_CHARS": "5"}, clear=True),
+            patch.dict(os.environ, {"PCI_MCP_MAX_TEXT_CHARS": "5"}, clear=True),
             self.assertRaises(McpProtocolError),
         ):
             _ = optional_text({"query": "too long"}, "query")
@@ -1563,7 +1563,7 @@ class McpContractTests(unittest.TestCase):
         self.assertEqual(params[-1], '{"symbol":"main"}')
         self.assertEqual(json_argument({"a": 1}, "metadata"), '{"a":1}')
         with (
-            patch.dict(os.environ, {"PROJECT_CODE_INTELLIGENCE_MCP_MAX_METADATA_BYTES": "1024"}, clear=True),
+            patch.dict(os.environ, {"PCI_MCP_MAX_METADATA_BYTES": "1024"}, clear=True),
             self.assertRaises(McpProtocolError),
         ):
             _ = json_argument({"large": "x" * 2000}, "metadata")
@@ -1585,7 +1585,7 @@ class McpContractTests(unittest.TestCase):
         with (
             patch.dict(
                 os.environ,
-                {"PROJECT_CODE_INTELLIGENCE_COLLECTION": "project-code-intelligence"},
+                {"PCI_COLLECTION": "project-code-intelligence"},
                 clear=True,
             ),
             patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
@@ -1605,7 +1605,7 @@ class McpContractTests(unittest.TestCase):
         with (
             patch.dict(
                 os.environ,
-                {"PROJECT_CODE_INTELLIGENCE_COLLECTION": "project-code-intelligence"},
+                {"PCI_COLLECTION": "project-code-intelligence"},
                 clear=True,
             ),
             patch.object(mcp_tools, "table_regclass_exists", return_value=True),
@@ -1626,7 +1626,7 @@ class McpContractTests(unittest.TestCase):
         with (
             patch.dict(
                 os.environ,
-                {"PROJECT_CODE_INTELLIGENCE_COLLECTION": "project-code-intelligence"},
+                {"PCI_COLLECTION": "project-code-intelligence"},
                 clear=True,
             ),
             patch.object(mcp_tools, "table_regclass_exists", return_value=True),
@@ -1737,7 +1737,7 @@ class McpContractTests(unittest.TestCase):
         message = str(raised.exception)
         self.assertIn("semantic search requires an embedding endpoint", message)
         self.assertIn(endpoint, message)
-        self.assertIn("PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT", message)
+        self.assertIn("PCI_EMBEDDING_ENDPOINT", message)
 
     def test_semantic_search_endpoint_failure_is_user_visible_mcp_error(self) -> None:
         endpoint = "http://127.0.0.1:18081/v1/embeddings"
@@ -1849,12 +1849,12 @@ class McpContractTests(unittest.TestCase):
 class McpErrorVisibilityTests(unittest.TestCase):
     def test_database_connection_failure_is_user_visible_mcp_error(self) -> None:
         exc = pci_db.DatabaseConnectionError(
-            "Could not connect to PostgreSQL/pgvector using PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL=<hidden>"
+            "Could not connect to PostgreSQL/pgvector using PCI_MCP_DATABASE_URL=<hidden>"
         )
 
         message = error_message(exc)
 
-        self.assertIn("PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL", message)
+        self.assertIn("PCI_MCP_DATABASE_URL", message)
         self.assertNotEqual(message, "internal server error")
 
     def test_mcp_database_connection_failure_mentions_project_env_exports(self) -> None:
@@ -1862,7 +1862,7 @@ class McpErrorVisibilityTests(unittest.TestCase):
             patch.dict(
                 os.environ,
                 {
-                    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://db.example.invalid/pci_demo?sslmode=prefer",
+                    "PCI_MCP_DATABASE_URL": "postgresql://db.example.invalid/pci_demo?sslmode=prefer",
                     config.DATABASE_SCOPE_PATH_ENV: "/work/demo",
                 },
                 clear=True,
@@ -1877,10 +1877,10 @@ class McpErrorVisibilityTests(unittest.TestCase):
             pass
 
         message = str(raised.exception)
-        self.assertIn("PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL", message)
-        self.assertIn("PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER", message)
-        self.assertIn("PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD", message)
-        self.assertIn("PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH", message)
+        self.assertIn("PCI_MCP_DATABASE_URL", message)
+        self.assertIn("PCI_MCP_DATABASE_USER", message)
+        self.assertIn("PCI_MCP_DATABASE_PASSWORD", message)
+        self.assertIn("PCI_DATABASE_SCOPE_PATH", message)
         self.assertIn("restart the client", message)
 
 
@@ -2219,11 +2219,11 @@ class McpStatusRuntimeIdentityTests(unittest.TestCase):
                 os.environ,
                 {
                     "HOME": "/home/tester",
-                    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://db.example/pci?sslmode=prefer",
-                    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "pci_ro",
-                    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": credential_value,
-                    "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/work/kubernetes-ingress",
-                    "PROJECT_CODE_INTELLIGENCE_COLLECTION": "kubernetes-ingress",
+                    "PCI_MCP_DATABASE_URL": "postgresql://db.example/pci?sslmode=prefer",
+                    "PCI_MCP_DATABASE_USER": "pci_ro",
+                    "PCI_MCP_DATABASE_PASSWORD": credential_value,
+                    "PCI_DATABASE_SCOPE_PATH": "/work/kubernetes-ingress",
+                    "PCI_COLLECTION": "kubernetes-ingress",
                 },
                 clear=True,
             ),
@@ -2246,9 +2246,9 @@ class McpStatusRuntimeIdentityTests(unittest.TestCase):
         self.assertEqual(package["source_git_commit"], "abc123")
         self.assertIsInstance(process["pid"], int)
         self.assertIn("python", cast("str", process["executable"]))
-        self.assertEqual(database["dsn_source"], "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL")
-        self.assertEqual(database["user_source"], "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER")
-        self.assertEqual(database["password_source"], "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD")
+        self.assertEqual(database["dsn_source"], "PCI_MCP_DATABASE_URL")
+        self.assertEqual(database["user_source"], "PCI_MCP_DATABASE_USER")
+        self.assertEqual(database["password_source"], "PCI_MCP_DATABASE_PASSWORD")
         self.assertTrue(database["password_set"])
         self.assertEqual(database["scope_path"], "/work/kubernetes-ingress")
         self.assertIn("pci_ro", cast("str", database["target"]))
@@ -2557,7 +2557,7 @@ class McpToolShapeTests(unittest.TestCase):
         ])
 
         with (
-            patch.dict(os.environ, {"PROJECT_CODE_INTELLIGENCE_COLLECTION": "zod"}, clear=True),
+            patch.dict(os.environ, {"PCI_COLLECTION": "zod"}, clear=True),
             patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools, "table_regclass_exists", return_value=False),
             patch.object(mcp_tools, "schema_migration_versions", return_value=[]),
@@ -2594,7 +2594,7 @@ class McpToolShapeTests(unittest.TestCase):
         ])
 
         with (
-            patch.dict(os.environ, {"PROJECT_CODE_INTELLIGENCE_COLLECTION": "zod"}, clear=True),
+            patch.dict(os.environ, {"PCI_COLLECTION": "zod"}, clear=True),
             patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools, "table_regclass_exists", return_value=False),
             patch.object(mcp_tools, "schema_migration_versions", return_value=[]),

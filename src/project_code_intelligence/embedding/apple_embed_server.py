@@ -82,8 +82,7 @@ def apple_embed_server_is_running() -> bool:
 
 def apple_embed_model_name() -> str:
     return (
-        config.env_text("PROJECT_CODE_INTELLIGENCE_APPLE_EMBED_MODEL", config.DEFAULT_APPLE_EMBED_MODEL)
-        or config.DEFAULT_APPLE_EMBED_MODEL
+        config.env_text("PCI_APPLE_EMBED_MODEL", config.DEFAULT_APPLE_EMBED_MODEL) or config.DEFAULT_APPLE_EMBED_MODEL
     )
 
 
@@ -189,7 +188,7 @@ def _embed(model: _MlxLmModel, tokenizer: object, texts: list[str]) -> list[list
 
 
 def _request_max_bytes() -> int:
-    return config.env_int("PROJECT_CODE_INTELLIGENCE_APPLE_EMBED_MAX_REQUEST_BYTES", 4 * 1024 * 1024, minimum=1024)
+    return config.env_int("PCI_APPLE_EMBED_MAX_REQUEST_BYTES", 4 * 1024 * 1024, minimum=1024)
 
 
 class AppleEmbedHTTPServer(HTTPServer):
@@ -273,8 +272,8 @@ class AppleEmbedHandler(BaseHTTPRequestHandler):
 
 def _serve() -> None:
     model_name = apple_embed_model_name()
-    host = config.env_text("PROJECT_CODE_INTELLIGENCE_EMBEDDING_HOST", "127.0.0.1") or "127.0.0.1"
-    port = config.env_int("PROJECT_CODE_INTELLIGENCE_EMBEDDING_PORT", 18081, minimum=1)
+    host = config.env_text("PCI_EMBEDDING_HOST", "127.0.0.1") or "127.0.0.1"
+    port = config.env_int("PCI_EMBEDDING_PORT", 18081, minimum=1)
 
     _err(f"Loading Apple embed model: {model_name}")
     model, tokenizer = _load_model(model_name)

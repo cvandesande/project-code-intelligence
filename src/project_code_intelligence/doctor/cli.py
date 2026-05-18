@@ -179,7 +179,7 @@ def parser() -> argparse.ArgumentParser:
         help=(
             "Bootstrap a remote PostgreSQL: create/update the role pci-index uses to initialize "
             "project databases and install pgvector into template1. Not needed for the bundled local "
-            "container at 127.0.0.1. Requires PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_* credentials."
+            "container at 127.0.0.1. Requires PCI_POSTGRES_ADMIN_* credentials."
         ),
     )
     _ = argument_parser.add_argument(

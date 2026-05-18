@@ -88,7 +88,7 @@ Private profiles do not need to be registered in this package. Put them on
 `PYTHONPATH` and select them with a fully qualified profile path:
 
 ```sh
-PROJECT_CODE_INTELLIGENCE_PROFILE=my_project.code_profile:MyProjectProfile pci-index .
+PCI_PROFILE=my_project.code_profile:MyProjectProfile pci-index .
 ```
 
 Profiles are ordinary Python code, so load them only from trusted local modules.

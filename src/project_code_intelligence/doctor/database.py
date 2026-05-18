@@ -22,10 +22,7 @@ def _dsn_has_credentials(settings: config.DatabaseSettings) -> bool:
 def _postgres_admin_check_settings() -> config.DatabaseSettings | None:
     settings = config.DatabaseSettings.from_env(admin_scope="postgres")
     if bool(settings.admin_user) != bool(settings.admin_password):
-        raise ValueError(
-            "Set both PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER and "
-            "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD, or set neither."
-        )
+        raise ValueError("Set both PCI_POSTGRES_ADMIN_USER and PCI_POSTGRES_ADMIN_PASSWORD, or set neither.")
     if not settings.admin_user or not settings.admin_password:
         return None
     return db.settings_for_database(
@@ -57,8 +54,7 @@ def check_database() -> list[CheckResult]:
                 "database-config",
                 "fail",
                 "Missing PostgreSQL connection settings: " + ", ".join(missing),
-                "Set PROJECT_CODE_INTELLIGENCE_DATABASE_URL, or set "
-                "PGVECTOR_HOST/PGVECTOR_PORT/PGVECTOR_DB/PGVECTOR_USER/PGVECTOR_PASS.",
+                "Set PCI_DATABASE_URL, or set PCI_PG_HOST/PCI_PG_PORT/PCI_PG_DB/PCI_PG_USER/PCI_PG_PASS.",
             )
         ]
 

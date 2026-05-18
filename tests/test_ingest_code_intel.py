@@ -186,7 +186,7 @@ def snapshot_for_repo(repo: str) -> Snapshot:
 class DatabaseSettingsTests(unittest.TestCase):
     def test_default_to_inferred_local_project_database(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            settings = DatabaseSettings.from_env({"PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": directory})
+            settings = DatabaseSettings.from_env({"PCI_DATABASE_SCOPE_PATH": directory})
             expected_dbname = default_database_name(Path(directory))
 
         self.assertEqual(settings.missing_connection_names(), [])
@@ -196,28 +196,28 @@ class DatabaseSettingsTests(unittest.TestCase):
         self.assertEqual(settings.user, "codeintel")
         self.assertEqual(settings.password, "codeintel")
         self.assertTrue(settings.database_inferred)
-        self.assertIn(f"PGVECTOR_DB={expected_dbname} (inferred)", settings.connection_hint())
-        self.assertIn("PGVECTOR_PASS=<set>", settings.connection_hint())
+        self.assertIn(f"PCI_PG_DB={expected_dbname} (inferred)", settings.connection_hint())
+        self.assertIn("PCI_PG_PASS=<set>", settings.connection_hint())
 
     def test_database_url_without_database_uses_inferred_dbname(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             settings = DatabaseSettings.from_env({
-                "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://example.invalid:5432?sslmode=prefer",
-                "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": directory,
+                "PCI_DATABASE_URL": "postgresql://example.invalid:5432?sslmode=prefer",
+                "PCI_DATABASE_SCOPE_PATH": directory,
             })
             expected_dbname = default_database_name(Path(directory))
 
         self.assertEqual(settings.dbname, expected_dbname)
         self.assertTrue(settings.database_inferred)
-        self.assertEqual(settings.connection_hint(), "PROJECT_CODE_INTELLIGENCE_DATABASE_URL=<hidden>")
+        self.assertEqual(settings.connection_hint(), "PCI_DATABASE_URL=<hidden>")
         self.assertEqual(
             settings.display_target(), f"postgresql://example.invalid:5432/{expected_dbname}?sslmode=prefer"
         )
 
     def test_database_url_with_database_disables_inference(self) -> None:
         settings = DatabaseSettings.from_env({
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://example.invalid/db",
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "ignored-scope",
+            "PCI_DATABASE_URL": "postgresql://example.invalid/db",
+            "PCI_DATABASE_SCOPE_PATH": "ignored-scope",
         })
 
         self.assertEqual(settings.dbname, "db")
@@ -226,9 +226,9 @@ class DatabaseSettingsTests(unittest.TestCase):
 
     def test_explicit_pgvector_db_disables_inference_when_url_has_no_database(self) -> None:
         settings = DatabaseSettings.from_env({
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://example.invalid",
-            "PGVECTOR_DB": "explicit_db",
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "ignored-scope",
+            "PCI_DATABASE_URL": "postgresql://example.invalid",
+            "PCI_PG_DB": "explicit_db",
+            "PCI_DATABASE_SCOPE_PATH": "ignored-scope",
         })
 
         self.assertEqual(settings.dbname, "explicit_db")
@@ -238,72 +238,64 @@ class DatabaseSettingsTests(unittest.TestCase):
     def test_report_missing_connection_parts(self) -> None:
         settings = DatabaseSettings(dbname="codeintel", user="reader", password=None)
 
-        self.assertEqual(settings.missing_connection_names(), ["PGVECTOR_PASS"])
+        self.assertEqual(settings.missing_connection_names(), ["PCI_PG_PASS"])
 
     def test_accept_database_url_without_individual_parts(self) -> None:
-        settings = DatabaseSettings.from_env({
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://example.invalid/db"
-        })
+        settings = DatabaseSettings.from_env({"PCI_DATABASE_URL": "postgresql://example.invalid/db"})
 
         self.assertEqual(settings.missing_connection_names(), [])
-        self.assertEqual(settings.connection_hint(), "PROJECT_CODE_INTELLIGENCE_DATABASE_URL=<hidden>")
+        self.assertEqual(settings.connection_hint(), "PCI_DATABASE_URL=<hidden>")
         self.assertEqual(settings.display_target(), "postgresql://example.invalid/db")
 
     def test_accept_database_url_with_separate_credentials(self) -> None:
         credential = "test-credential"
         settings = DatabaseSettings.from_env({
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://example.invalid/db",
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_USER": "app",
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD": credential,
+            "PCI_DATABASE_URL": "postgresql://example.invalid/db",
+            "PCI_DATABASE_USER": "app",
+            "PCI_DATABASE_PASSWORD": credential,
         })
 
         self.assertEqual(settings.dsn_user, "app")
         self.assertEqual(settings.dsn_password, credential)
         self.assertEqual(
             settings.connection_hint(),
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_URL=<hidden> "
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_USER=<set> "
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD=<set>",
+            "PCI_DATABASE_URL=<hidden> PCI_DATABASE_USER=<set> PCI_DATABASE_PASSWORD=<set>",
         )
 
     def test_mcp_database_url_reports_mcp_credential_sources(self) -> None:
         settings = DatabaseSettings.from_env(
             {
-                "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://example.invalid/db",
-                "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "project_ro",
-                "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "-".join(("ro", "credential")),
+                "PCI_MCP_DATABASE_URL": "postgresql://example.invalid/db",
+                "PCI_MCP_DATABASE_USER": "project_ro",
+                "PCI_MCP_DATABASE_PASSWORD": "-".join(("ro", "credential")),
             },
             role="mcp",
         )
 
         self.assertEqual(
             settings.connection_hint(),
-            "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL=<hidden> "
-            "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER=<set> "
-            "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD=<set>",
+            "PCI_MCP_DATABASE_URL=<hidden> PCI_MCP_DATABASE_USER=<set> PCI_MCP_DATABASE_PASSWORD=<set>",
         )
 
     def test_accept_legacy_pgvector_dsn_without_individual_parts(self) -> None:
-        settings = DatabaseSettings.from_env({"PGVECTOR_DSN": "postgresql://example.invalid/db"})
+        settings = DatabaseSettings.from_env({"PCI_PG_DSN": "postgresql://example.invalid/db"})
 
         self.assertEqual(settings.missing_connection_names(), [])
-        self.assertEqual(settings.connection_hint(), "PGVECTOR_DSN=<hidden>")
+        self.assertEqual(settings.connection_hint(), "PCI_PG_DSN=<hidden>")
         self.assertEqual(settings.display_target(), "postgresql://example.invalid/db")
 
     def test_database_url_takes_precedence_over_legacy_dsn(self) -> None:
         settings = DatabaseSettings.from_env({
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://primary.example.invalid/db",
-            "PGVECTOR_DSN": "postgresql://legacy.example.invalid/db",
+            "PCI_DATABASE_URL": "postgresql://primary.example.invalid/db",
+            "PCI_PG_DSN": "postgresql://legacy.example.invalid/db",
         })
 
-        self.assertEqual(settings.connection_hint(), "PROJECT_CODE_INTELLIGENCE_DATABASE_URL=<hidden>")
+        self.assertEqual(settings.connection_hint(), "PCI_DATABASE_URL=<hidden>")
         self.assertEqual(settings.display_target(), "postgresql://primary.example.invalid/db")
 
     def test_display_target_hides_passwords(self) -> None:
         settings = DatabaseSettings.from_env({
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": (
-                "postgresql://user:secret@example.invalid:5432/db?sslmode=require&password=secret"
-            )
+            "PCI_DATABASE_URL": ("postgresql://user:secret@example.invalid:5432/db?sslmode=require&password=secret")
         })
 
         self.assertEqual(
@@ -441,7 +433,7 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
 
         with patch.dict(
             os.environ,
-            {"PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/work/demo-workspace"},
+            {"PCI_DATABASE_SCOPE_PATH": "/work/demo-workspace"},
             clear=False,
         ):
             output = mcp_ro_export_block(mcp_config_context(plan, bootstrap, command="/usr/bin/pci-mcp"))
@@ -450,13 +442,13 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
             raise AssertionError("expected MCP export block")
         self.assertIn("Export for pci-mcp (RO)", output)
         self.assertIn(
-            "export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL='postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer'",
+            "export PCI_MCP_DATABASE_URL='postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer'",
             output,
         )
-        self.assertIn("export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER=pci_demo_ro", output)
-        self.assertIn("export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD='ro fixture'", output)
-        self.assertIn("export PROJECT_CODE_INTELLIGENCE_COLLECTION=demo-workspace", output)
-        self.assertIn("export PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH=/work/demo-workspace", output)
+        self.assertIn("export PCI_MCP_DATABASE_USER=pci_demo_ro", output)
+        self.assertIn("export PCI_MCP_DATABASE_PASSWORD='ro fixture'", output)
+        self.assertIn("export PCI_COLLECTION=demo-workspace", output)
+        self.assertIn("export PCI_DATABASE_SCOPE_PATH=/work/demo-workspace", output)
         self.assertNotIn("pci_demo_ro:ro%20fixture@", output)
 
     def test_default_mcp_server_name_is_generic(self) -> None:
@@ -480,7 +472,7 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
 
         with patch.dict(
             os.environ,
-            {"PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/work/demo-workspace"},
+            {"PCI_DATABASE_SCOPE_PATH": "/work/demo-workspace"},
             clear=False,
         ):
             context = mcp_config_context(plan, bootstrap, command="/usr/bin/pci-mcp")
@@ -493,11 +485,11 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         self.assertIn('command = "/usr/bin/pci-mcp"', output)
         self.assertIn('cwd = "/work/demo-workspace"', output)
         self.assertIn("env_vars = [", output)
-        self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL"', output)
-        self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER"', output)
-        self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD"', output)
-        self.assertNotIn('"PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH"', output)
-        self.assertNotIn('"PROJECT_CODE_INTELLIGENCE_COLLECTION"', output)
+        self.assertIn('"PCI_MCP_DATABASE_URL"', output)
+        self.assertIn('"PCI_MCP_DATABASE_USER"', output)
+        self.assertIn('"PCI_MCP_DATABASE_PASSWORD"', output)
+        self.assertNotIn('"PCI_DATABASE_SCOPE_PATH"', output)
+        self.assertNotIn('"PCI_COLLECTION"', output)
         self.assertNotIn("postgresql://db.example.invalid", output)
         self.assertNotIn("pci_demo_ro", output)
         self.assertNotIn("ro fixture", output)
@@ -524,7 +516,7 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         opencode_output = opencode_mcp_config_block(context)
         vscode_output = vscode_mcp_config_block(context)
         zed_output = zed_mcp_config_block(context)
-        credential_key = "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_" + "PASSWORD"
+        credential_key = "PCI_MCP_DATABASE_" + "PASSWORD"
 
         self.assertIn(f'"{credential_key}": "${{{credential_key}}}"', claude_output)
         self.assertIn(f'"{credential_key}": "{{env:{credential_key}}}"', opencode_output)
@@ -532,23 +524,23 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         self.assertIn('"type": "stdio"', vscode_output)
         self.assertIn('"servers": {', vscode_output)
         self.assertIn(
-            '"PROJECT_CODE_INTELLIGENCE_COLLECTION": "${env:PROJECT_CODE_INTELLIGENCE_COLLECTION}"',
+            '"PCI_COLLECTION": "${env:PCI_COLLECTION}"',
             vscode_output,
         )
         self.assertIn('"context_servers": {', zed_output)
         self.assertIn('"project-code-intelligence": {', zed_output)
         self.assertIn('"command": "/usr/bin/pci-mcp"', zed_output)
-        self.assertIn('"PROJECT_CODE_INTELLIGENCE_COLLECTION": "demo-workspace"', zed_output)
-        self.assertIn('"PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH":', zed_output)
-        self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "ro-fixture"', zed_output)
+        self.assertIn('"PCI_COLLECTION": "demo-workspace"', zed_output)
+        self.assertIn('"PCI_DATABASE_SCOPE_PATH":', zed_output)
+        self.assertIn('"PCI_MCP_DATABASE_PASSWORD": "ro-fixture"', zed_output)
         self.assertIn(
-            '"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer"',
+            '"PCI_MCP_DATABASE_URL": "postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer"',
             zed_output,
         )
-        self.assertNotIn("PROJECT_CODE_INTELLIGENCE_COLLECTION", claude_output)
-        self.assertNotIn("PROJECT_CODE_INTELLIGENCE_COLLECTION", opencode_output)
-        self.assertNotIn("PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH", claude_output)
-        self.assertNotIn("PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH", opencode_output)
+        self.assertNotIn("PCI_COLLECTION", claude_output)
+        self.assertNotIn("PCI_COLLECTION", opencode_output)
+        self.assertNotIn("PCI_DATABASE_SCOPE_PATH", claude_output)
+        self.assertNotIn("PCI_DATABASE_SCOPE_PATH", opencode_output)
         self.assertNotIn(ro_value, claude_output)
         self.assertNotIn(ro_value, opencode_output)
         self.assertNotIn(ro_value, vscode_output)
@@ -579,10 +571,10 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         self.assertIn('"command": "/usr/bin/pci-mcp"', output)
         self.assertIn('"autoApprove": []', output)
         self.assertIn('"disabled": false', output)
-        self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "ro-fixture"', output)
-        self.assertIn('"PROJECT_CODE_INTELLIGENCE_COLLECTION": "demo-workspace"', output)
+        self.assertIn('"PCI_MCP_DATABASE_PASSWORD": "ro-fixture"', output)
+        self.assertIn('"PCI_COLLECTION": "demo-workspace"', output)
         self.assertIn(
-            '"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer"',
+            '"PCI_MCP_DATABASE_URL": "postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer"',
             output,
         )
 
@@ -601,7 +593,7 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
 
         with patch.dict(
             os.environ,
-            {"PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/work/demo-workspace"},
+            {"PCI_DATABASE_SCOPE_PATH": "/work/demo-workspace"},
             clear=False,
         ):
             context = mcp_config_context(plan, bootstrap, command="/usr/bin/pci-mcp")
@@ -627,17 +619,17 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         self.assertIn("[mcp_servers.project-code-intelligence]", output)
         self.assertIn("Required environment variables for pci-mcp (RO)", output)
         self.assertIn(
-            "export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL='postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer'",
+            "export PCI_MCP_DATABASE_URL='postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer'",
             output,
         )
-        self.assertIn("export PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD='ro fixture'", output)
-        self.assertNotIn("export PROJECT_CODE_INTELLIGENCE_COLLECTION=", output)
-        self.assertNotIn("export PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH=", output)
+        self.assertIn("export PCI_MCP_DATABASE_PASSWORD='ro fixture'", output)
+        self.assertNotIn("export PCI_COLLECTION=", output)
+        self.assertNotIn("export PCI_DATABASE_SCOPE_PATH=", output)
 
         project_config = output.split("Required environment variables for pci-mcp (RO)", maxsplit=1)[0]
         self.assertNotIn("ro fixture", project_config)
         self.assertNotIn("postgresql://db.example.invalid", project_config)
-        self.assertNotIn("PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH", project_config)
+        self.assertNotIn("PCI_DATABASE_SCOPE_PATH", project_config)
 
         vscode_output = mcp_config_block(context, "vscode")
 
@@ -646,8 +638,8 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         self.assertIn("VS Code Copilot project-scoped MCP config", vscode_output)
         self.assertIn("Write this snippet to: /work/demo-workspace/.vscode/mcp.json", vscode_output)
         self.assertIn('"servers": {', vscode_output)
-        self.assertIn("export PROJECT_CODE_INTELLIGENCE_COLLECTION=demo-workspace", vscode_output)
-        self.assertIn("export PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH=/work/demo-workspace", vscode_output)
+        self.assertIn("export PCI_COLLECTION=demo-workspace", vscode_output)
+        self.assertIn("export PCI_DATABASE_SCOPE_PATH=/work/demo-workspace", vscode_output)
 
         cline_output = mcp_config_block(context, "cline")
 
@@ -657,7 +649,7 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         self.assertIn("Add or merge this snippet under mcpServers", cline_output)
         self.assertIn("Cline's VS Code MCP settings are user-scoped", cline_output)
         self.assertIn("This JSON contains read-only database credentials", cline_output)
-        self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "ro fixture"', cline_output)
+        self.assertIn('"PCI_MCP_DATABASE_PASSWORD": "ro fixture"', cline_output)
         self.assertNotIn("Required environment variables for pci-mcp (RO)", cline_output)
 
     def test_zed_mcp_config_block_embeds_project_settings_environment(self) -> None:
@@ -675,7 +667,7 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
 
         with patch.dict(
             os.environ,
-            {"PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/work/demo-workspace"},
+            {"PCI_DATABASE_SCOPE_PATH": "/work/demo-workspace"},
             clear=False,
         ):
             context = mcp_config_context(plan, bootstrap, command="/usr/bin/pci-mcp")
@@ -692,21 +684,21 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         self.assertIn("Write or merge this snippet into: /work/demo-workspace/.zed/settings.json", zed_output)
         self.assertIn('{\n  "context_servers": {\n    "project-code-intelligence": {', zed_output)
         self.assertIn('"command": "/usr/bin/pci-mcp"', zed_output)
-        self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL"', zed_output)
-        self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER": "pci_demo_ro"', zed_output)
-        self.assertIn('"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD": "ro fixture"', zed_output)
+        self.assertIn('"PCI_MCP_DATABASE_URL"', zed_output)
+        self.assertIn('"PCI_MCP_DATABASE_USER": "pci_demo_ro"', zed_output)
+        self.assertIn('"PCI_MCP_DATABASE_PASSWORD": "ro fixture"', zed_output)
         self.assertIn(
-            '"PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL": "postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer"',
+            '"PCI_MCP_DATABASE_URL": "postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer"',
             zed_output,
         )
-        self.assertIn('"PROJECT_CODE_INTELLIGENCE_COLLECTION": "demo-workspace"', zed_output)
-        self.assertIn('"PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH": "/work/demo-workspace"', zed_output)
+        self.assertIn('"PCI_COLLECTION": "demo-workspace"', zed_output)
+        self.assertIn('"PCI_DATABASE_SCOPE_PATH": "/work/demo-workspace"', zed_output)
         self.assertIn("contains read-only database credentials", zed_output)
         self.assertIn("Trust the worktree in Zed", zed_output)
         self.assertIn("do not commit it", zed_output)
         self.assertNotIn("Add MCP Server", zed_output)
         self.assertNotIn("Required environment variables for pci-mcp (RO)", zed_output)
-        self.assertNotIn("export PROJECT_CODE_INTELLIGENCE_COLLECTION=", zed_output)
+        self.assertNotIn("export PCI_COLLECTION=", zed_output)
 
     def test_codex_mcp_config_block_quotes_non_bare_toml_server_names(self) -> None:
         ro_value = "-".join(("ro", "fixture"))
@@ -807,7 +799,7 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
 class CodeIntelParserTests(unittest.TestCase):
     def test_env_bool_rejects_ambiguous_values(self) -> None:
         with self.assertRaises(ConfigError):
-            _ = env_bool("PROJECT_CODE_INTELLIGENCE_PREEMBED", env={"PROJECT_CODE_INTELLIGENCE_PREEMBED": "maybe"})
+            _ = env_bool("PCI_PREEMBED", env={"PCI_PREEMBED": "maybe"})
 
     def test_profile_loader_reports_configuration_errors(self) -> None:
         with self.assertRaises(ProfileLoadError):
@@ -815,26 +807,24 @@ class CodeIntelParserTests(unittest.TestCase):
 
     def test_default_embedding_endpoint_infers_lemonade_for_flm_model(self) -> None:
         self.assertEqual(
-            default_embedding_endpoint({"PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL": "embed-gemma-300m-FLM"}),
+            default_embedding_endpoint({"PCI_EMBEDDING_ENDPOINT_MODEL": "embed-gemma-300m-FLM"}),
             DEFAULT_LEMONADE_EMBEDDING_ENDPOINT,
         )
 
     def test_default_embedding_endpoint_keeps_non_flm_unset(self) -> None:
-        self.assertIsNone(default_embedding_endpoint({"PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL": "local"}))
+        self.assertIsNone(default_embedding_endpoint({"PCI_EMBEDDING_ENDPOINT_MODEL": "local"}))
 
     def test_default_embedding_endpoint_can_use_local_fastembed_default(self) -> None:
         self.assertEqual(
-            default_embedding_endpoint(
-                {"PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL": "local"}, local_default=True
-            ),
+            default_embedding_endpoint({"PCI_EMBEDDING_ENDPOINT_MODEL": "local"}, local_default=True),
             "http://127.0.0.1:18081/v1/embeddings",
         )
 
     def test_default_embedding_endpoint_prefers_configured_endpoint(self) -> None:
         self.assertEqual(
             default_embedding_endpoint({
-                "PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT": "http://127.0.0.1:18081/v1/embeddings",
-                "PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL": "embed-gemma-300m-FLM",
+                "PCI_EMBEDDING_ENDPOINT": "http://127.0.0.1:18081/v1/embeddings",
+                "PCI_EMBEDDING_ENDPOINT_MODEL": "embed-gemma-300m-FLM",
             }),
             "http://127.0.0.1:18081/v1/embeddings",
         )
@@ -848,23 +838,19 @@ class CodeIntelParserTests(unittest.TestCase):
     def test_default_embedding_endpoint_model_prefers_configured_model(self) -> None:
         self.assertEqual(
             default_embedding_endpoint_model(
-                {"PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL": "custom-model"},
+                {"PCI_EMBEDDING_ENDPOINT_MODEL": "custom-model"},
                 endpoint=DEFAULT_LEMONADE_EMBEDDING_ENDPOINT,
             ),
             "custom-model",
         )
 
     def test_ingest_settings_infer_lemonade_endpoint_for_flm_model(self) -> None:
-        settings = IngestSettings.from_env({
-            "PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL": "embed-gemma-300m-FLM"
-        })
+        settings = IngestSettings.from_env({"PCI_EMBEDDING_ENDPOINT_MODEL": "embed-gemma-300m-FLM"})
 
         self.assertEqual(settings.embedding_endpoint, DEFAULT_LEMONADE_EMBEDDING_ENDPOINT)
 
     def test_ingest_settings_uses_strict_local_runtime_model_for_shared_endpoint(self) -> None:
-        settings = IngestSettings.from_env({
-            "PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT": DEFAULT_LEMONADE_EMBEDDING_ENDPOINT
-        })
+        settings = IngestSettings.from_env({"PCI_EMBEDDING_ENDPOINT": DEFAULT_LEMONADE_EMBEDDING_ENDPOINT})
 
         self.assertEqual(settings.embedding_endpoint_model, DEFAULT_EMBEDDING_ENDPOINT_MODEL)
 
@@ -879,7 +865,7 @@ class CodeIntelParserTests(unittest.TestCase):
 
         validate_embedding_endpoint(
             "https://embedding.example.invalid/v1/embeddings",
-            env={"PROJECT_CODE_INTELLIGENCE_ALLOW_REMOTE_EMBEDDING": "1"},
+            env={"PCI_ALLOW_REMOTE_EMBEDDING": "1"},
         )
 
     def test_semantic_query_uses_configured_embedding_endpoint(self) -> None:
@@ -887,8 +873,8 @@ class CodeIntelParserTests(unittest.TestCase):
             patch.dict(
                 os.environ,
                 {
-                    "PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT": "http://127.0.0.1:18081/v1/embeddings",
-                    "PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL": "demo-model",
+                    "PCI_EMBEDDING_ENDPOINT": "http://127.0.0.1:18081/v1/embeddings",
+                    "PCI_EMBEDDING_ENDPOINT_MODEL": "demo-model",
                 },
             ),
             patch(
@@ -929,11 +915,11 @@ class CodeIntelParserTests(unittest.TestCase):
 
     def test_ingest_settings_parse_ci_friendly_environment(self) -> None:
         settings = IngestSettings.from_env({
-            "PROJECT_CODE_INTELLIGENCE_COLLECTION": "nightly",
-            "PROJECT_CODE_INTELLIGENCE_REPOS": "repo-a,repo-b",
-            "PROJECT_CODE_INTELLIGENCE_MODE": "full",
-            "PROJECT_CODE_INTELLIGENCE_PREEMBED": "0",
-            "PROJECT_CODE_INTELLIGENCE_RUNTIME_HEARTBEAT_SECONDS": "60",
+            "PCI_COLLECTION": "nightly",
+            "PCI_REPOS": "repo-a,repo-b",
+            "PCI_MODE": "full",
+            "PCI_PREEMBED": "0",
+            "PCI_RUNTIME_HEARTBEAT_SECONDS": "60",
         })
 
         self.assertEqual(settings.collection, "nightly")
@@ -1771,7 +1757,7 @@ class McpQueryTests(unittest.TestCase):
         )
 
     def test_mcp_collection_env_is_hard_scope_by_default(self) -> None:
-        with patch.dict(os.environ, {"PROJECT_CODE_INTELLIGENCE_COLLECTION": "public"}, clear=True):
+        with patch.dict(os.environ, {"PCI_COLLECTION": "public"}, clear=True):
             clauses, params = code_intel_clauses({"repo": "sample-repo"}, "r")
             self.assertIn("r.collection = %s", " AND ".join(clauses))
             self.assertEqual(params[0], "public")
@@ -1783,8 +1769,8 @@ class McpQueryTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "PROJECT_CODE_INTELLIGENCE_COLLECTION": "public",
-                "PROJECT_CODE_INTELLIGENCE_ALLOW_COLLECTION_OVERRIDE": "1",
+                "PCI_COLLECTION": "public",
+                "PCI_ALLOW_COLLECTION_OVERRIDE": "1",
             },
             clear=True,
         ):

@@ -24,9 +24,9 @@ class UserConfigTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
             text = path.read_text(encoding="utf-8")
-            self.assertIn("PROJECT_CODE_INTELLIGENCE_DATABASE_URL=", text)
-            self.assertIn("PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER=pci_index_admin", text)
-            self.assertIn("PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD='secret value'", text)
+            self.assertIn("PCI_DATABASE_URL=", text)
+            self.assertIn("PCI_DATABASE_ADMIN_USER=pci_index_admin", text)
+            self.assertIn("PCI_DATABASE_ADMIN_PASSWORD='secret value'", text)
 
     def test_load_pci_index_user_config_sets_missing_values_without_overriding_environment(self) -> None:
         credential = " ".join(("secret", "value"))
@@ -39,18 +39,16 @@ class UserConfigTests(unittest.TestCase):
             )
             env = {
                 "XDG_CONFIG_HOME": directory,
-                "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER": "explicit_admin",
+                "PCI_DATABASE_ADMIN_USER": "explicit_admin",
             }
 
             result = config.load_pci_index_user_config(env)
 
             self.assertIsNotNone(result)
-            self.assertEqual(
-                env["PROJECT_CODE_INTELLIGENCE_DATABASE_URL"], "postgresql://db.example.invalid:5432?sslmode=prefer"
-            )
-            self.assertEqual(env["PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER"], "explicit_admin")
-            self.assertEqual(env["PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD"], "secret value")
-            self.assertIn("PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER", result.skipped if result else ())
+            self.assertEqual(env["PCI_DATABASE_URL"], "postgresql://db.example.invalid:5432?sslmode=prefer")
+            self.assertEqual(env["PCI_DATABASE_ADMIN_USER"], "explicit_admin")
+            self.assertEqual(env["PCI_DATABASE_ADMIN_PASSWORD"], "secret value")
+            self.assertIn("PCI_DATABASE_ADMIN_USER", result.skipped if result else ())
 
     def test_load_pci_index_user_config_refuses_group_or_world_readable_file(self) -> None:
         credential = " ".join(("secret", "value"))

@@ -160,9 +160,9 @@ class DatabaseContractTests(unittest.TestCase):
     def test_database_admin_credentials_are_parsed_without_affecting_normal_conninfo(self) -> None:
         admin_credential = "-".join(("admin", "credential"))
         settings = DatabaseSettings.from_env({
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://db.example.invalid/codeintel",
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER": "postgres",
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD": admin_credential,
+            "PCI_DATABASE_URL": "postgresql://db.example.invalid/codeintel",
+            "PCI_DATABASE_ADMIN_USER": "postgres",
+            "PCI_DATABASE_ADMIN_PASSWORD": admin_credential,
         })
 
         self.assertEqual(settings.admin_user, "postgres")
@@ -171,7 +171,7 @@ class DatabaseContractTests(unittest.TestCase):
 
     def test_role_database_url_renders_scope_in_userinfo(self) -> None:
         settings = DatabaseSettings.from_env({
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://db.example.invalid/codeintel?sslmode=prefer"
+            "PCI_DATABASE_URL": "postgresql://db.example.invalid/codeintel?sslmode=prefer"
         })
 
         url = settings.role_database_url("pci_demo_rw", "secret")
@@ -371,15 +371,15 @@ class DatabaseGuidanceTests(unittest.TestCase):
     def test_mcp_connection_guidance_names_mcp_environment(self) -> None:
         settings = DatabaseSettings(
             dsn="postgresql://db.example.invalid/pci_demo?sslmode=prefer",
-            dsn_source="PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL",
+            dsn_source="PCI_MCP_DATABASE_URL",
         )
 
         message = db.connection_configuration_guidance(settings)
 
-        self.assertIn("PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL", message)
-        self.assertIn("PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER", message)
-        self.assertIn("PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD", message)
-        self.assertIn("PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH", message)
+        self.assertIn("PCI_MCP_DATABASE_URL", message)
+        self.assertIn("PCI_MCP_DATABASE_USER", message)
+        self.assertIn("PCI_MCP_DATABASE_PASSWORD", message)
+        self.assertIn("PCI_DATABASE_SCOPE_PATH", message)
 
 
 class DatabaseBootstrapTests(unittest.TestCase):
@@ -389,11 +389,11 @@ class DatabaseBootstrapTests(unittest.TestCase):
         postgres_credential = "-".join(("postgres", "credential"))
         index_credential = "-".join(("index", "credential"))
         env = {
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://db.example.invalid/codeintel",
-            "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER": "postgres",
-            "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD": postgres_credential,
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER": DEFAULT_POSTGRES_INDEX_ADMIN_ROLE,
-            "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD": index_credential,
+            "PCI_DATABASE_URL": "postgresql://db.example.invalid/codeintel",
+            "PCI_POSTGRES_ADMIN_USER": "postgres",
+            "PCI_POSTGRES_ADMIN_PASSWORD": postgres_credential,
+            "PCI_DATABASE_ADMIN_USER": DEFAULT_POSTGRES_INDEX_ADMIN_ROLE,
+            "PCI_DATABASE_ADMIN_PASSWORD": index_credential,
         }
 
         doctor_settings = DatabaseSettings.from_env(env, admin_scope="postgres")
@@ -422,9 +422,7 @@ class DatabaseBootstrapTests(unittest.TestCase):
         ):
             _ = bootstrap_postgres_roles(settings)
 
-        self.assertIn(
-            "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER must be a PostgreSQL admin role", str(raised.exception)
-        )
+        self.assertIn("PCI_POSTGRES_ADMIN_USER must be a PostgreSQL admin role", str(raised.exception))
 
     def test_postgres_role_bootstrap_resets_existing_index_admin_with_real_admin(self) -> None:
         settings = DatabaseSettings(
@@ -529,8 +527,8 @@ class DatabaseBootstrapTests(unittest.TestCase):
         self.assertNotIn("CREATE ROLE", maintenance_statements)
 
     def test_bootstrap_creates_project_roles_from_writer_credentials_when_admin_missing(self) -> None:
-        # Bundled-local scenario: PGVECTOR_USER/PASS supply codeintel:codeintel and the user has
-        # not set PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_*. The writer is the container's superuser
+        # Bundled-local scenario: PCI_PG_USER/PASS supply codeintel:codeintel and the user has
+        # not set PCI_DATABASE_ADMIN_*. The writer is the container's superuser
         # so we should still create per-project rw/ro roles for pci-mcp.
         writer_credential = "-".join(("codeintel", "writer"))
         settings = DatabaseSettings(

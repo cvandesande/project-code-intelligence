@@ -1636,8 +1636,8 @@ def _database_runtime_identity() -> Json:
         "target": target,
         "fingerprint": hashlib.sha256(target.encode("utf-8")).hexdigest()[:16],
         "dsn_source": settings.dsn_source,
-        "user_source": settings.dsn_user_source if settings.dsn_user else "PGVECTOR_USER",
-        "password_source": settings.dsn_auth_source if settings.dsn_password else "PGVECTOR_PASS",
+        "user_source": settings.dsn_user_source if settings.dsn_user else "PCI_PG_USER",
+        "password_source": settings.dsn_auth_source if settings.dsn_password else "PCI_PG_PASS",
         "password_set": bool(settings.dsn_password or settings.password),
         "database_inferred": settings.database_inferred,
         "scope_path": str(config.configured_database_scope_path()),
@@ -2226,7 +2226,7 @@ def semantic_search_embedding_error(endpoint: str, exc: BaseException) -> McpPro
         "must embed the query with a model compatible with the indexed record embeddings. "
         f"The configured endpoint is unavailable: {endpoint}. "
         "Start one of the local embedding profiles shown by pci-doctor, or set "
-        "PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT to a trusted OpenAI-compatible "
+        "PCI_EMBEDDING_ENDPOINT to a trusted OpenAI-compatible "
         f"embedding provider. Detail: {exc}"
     )
 

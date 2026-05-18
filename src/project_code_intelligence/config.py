@@ -22,11 +22,11 @@ from project_code_intelligence.common import default_database_name
 from project_code_intelligence.exceptions import ConfigError
 
 Env = Mapping[str, str]
-DEFAULT_PGVECTOR_HOST = "127.0.0.1"
-DEFAULT_PGVECTOR_PORT = "5433"
-DEFAULT_PGVECTOR_DB = "codeintel"
-DEFAULT_PGVECTOR_USER = "codeintel"
-DEFAULT_PGVECTOR_PASS = DEFAULT_PGVECTOR_USER
+DEFAULT_PCI_PG_HOST = "127.0.0.1"
+DEFAULT_PCI_PG_PORT = "5433"
+DEFAULT_PCI_PG_DB = "codeintel"
+DEFAULT_PCI_PG_USER = "codeintel"
+DEFAULT_PCI_PG_PASS = DEFAULT_PCI_PG_USER
 DEFAULT_DB_CONNECT_TIMEOUT_SECONDS = 10
 DEFAULT_DB_KEEPALIVES_IDLE_SECONDS = 30
 DEFAULT_DB_KEEPALIVES_INTERVAL_SECONDS = 10
@@ -45,13 +45,13 @@ DEFAULT_LARGE_GPU_EMBEDDING_MODEL = "Qwen3-Embedding-4B-Q8_0.gguf"
 DEFAULT_APPLE_EMBED_MODEL = "mlx-community/Qwen3-Embedding-0.6B-8bit"
 DEFAULT_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small"
 DEFAULT_VOYAGE_EMBEDDING_MODEL = "voyage-3.5"
-DATABASE_SCOPE_PATH_ENV = "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH"
+DATABASE_SCOPE_PATH_ENV = "PCI_DATABASE_SCOPE_PATH"
 APP_CONFIG_DIR_NAME = "project-code-intelligence"
 PCI_INDEX_USER_CONFIG_FILENAME = "pci-index.env"
 PCI_INDEX_USER_CONFIG_ENV_NAMES = (
-    "PROJECT_CODE_INTELLIGENCE_DATABASE_URL",
-    "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER",
-    "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD",
+    "PCI_DATABASE_URL",
+    "PCI_DATABASE_ADMIN_USER",
+    "PCI_DATABASE_ADMIN_PASSWORD",
 )
 ENV_ASSIGNMENT_PARTS = 1
 EXPORT_ENV_ASSIGNMENT_PARTS = 2
@@ -125,9 +125,9 @@ def write_pci_index_user_config(
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.parent.chmod(0o700)
     content = _format_pci_index_user_config({
-        "PROJECT_CODE_INTELLIGENCE_DATABASE_URL": database_url,
-        "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER": database_admin_user,
-        "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD": database_admin_password,
+        "PCI_DATABASE_URL": database_url,
+        "PCI_DATABASE_ADMIN_USER": database_admin_user,
+        "PCI_DATABASE_ADMIN_PASSWORD": database_admin_password,
     })
     fd, tmp_name = tempfile.mkstemp(prefix=f".{PCI_INDEX_USER_CONFIG_FILENAME}.", dir=path.parent)
     tmp_path = Path(tmp_name)
@@ -250,10 +250,10 @@ def env_float(
 
 
 def default_embedding_endpoint(env: Env | None = None, *, local_default: bool = False) -> str | None:
-    configured = env_text("PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT", env=env)
+    configured = env_text("PCI_EMBEDDING_ENDPOINT", env=env)
     if configured:
         return configured
-    model = env_text("PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL", env=env)
+    model = env_text("PCI_EMBEDDING_ENDPOINT_MODEL", env=env)
     if model and model.strip().lower().endswith("-flm"):
         return DEFAULT_LEMONADE_EMBEDDING_ENDPOINT
     if local_default:
@@ -262,11 +262,11 @@ def default_embedding_endpoint(env: Env | None = None, *, local_default: bool = 
 
 
 def default_embedding_endpoint_model(env: Env | None = None, *, endpoint: str | None = None) -> str:
-    configured = env_text("PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL", env=env)
+    configured = env_text("PCI_EMBEDDING_ENDPOINT_MODEL", env=env)
     if configured:
         return configured
     if endpoint is None:
-        endpoint = env_text("PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT", env=env)
+        endpoint = env_text("PCI_EMBEDDING_ENDPOINT", env=env)
     if endpoint and endpoint.rstrip("/") == DEFAULT_LOCAL_EMBEDDING_ENDPOINT:
         return DEFAULT_LOCAL_EMBEDDING_ENDPOINT_MODEL
     return DEFAULT_EMBEDDING_ENDPOINT_MODEL
@@ -367,7 +367,7 @@ def inferred_database_name(env: Env | None = None) -> str:
 
 
 def embedding_api_key(endpoint: str | None = None, *, env: Env | None = None) -> str | None:
-    configured = env_text("PROJECT_CODE_INTELLIGENCE_EMBEDDING_API_KEY", env=env)
+    configured = env_text("PCI_EMBEDDING_API_KEY", env=env)
     if configured:
         return configured
     hostname = (endpoint_hostname(endpoint) or "").lower()
@@ -405,16 +405,16 @@ def _role_env_value(
 @dataclass(frozen=True)
 class DatabaseSettings:
     dsn: str | None = None
-    dsn_source: str = "PROJECT_CODE_INTELLIGENCE_DATABASE_URL"
+    dsn_source: str = "PCI_DATABASE_URL"
     dsn_user: str | None = None
-    dsn_user_source: str = "PROJECT_CODE_INTELLIGENCE_DATABASE_USER"
+    dsn_user_source: str = "PCI_DATABASE_USER"
     dsn_password: str | None = None
-    dsn_auth_source: str = "PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD"
-    host: str = DEFAULT_PGVECTOR_HOST
-    port: str = DEFAULT_PGVECTOR_PORT
-    dbname: str | None = DEFAULT_PGVECTOR_DB
-    user: str | None = DEFAULT_PGVECTOR_USER
-    password: str | None = DEFAULT_PGVECTOR_PASS
+    dsn_auth_source: str = "PCI_DATABASE_PASSWORD"
+    host: str = DEFAULT_PCI_PG_HOST
+    port: str = DEFAULT_PCI_PG_PORT
+    dbname: str | None = DEFAULT_PCI_PG_DB
+    user: str | None = DEFAULT_PCI_PG_USER
+    password: str | None = DEFAULT_PCI_PG_PASS
     admin_user: str | None = None
     admin_password: str | None = None
     sslmode: str = "prefer"
@@ -439,14 +439,14 @@ class DatabaseSettings:
         database_url = _role_env_value(
             env,
             mcp=mcp,
-            mcp_name="PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL",
-            generic_name="PROJECT_CODE_INTELLIGENCE_DATABASE_URL",
-            fallback_source="PGVECTOR_DSN",
+            mcp_name="PCI_MCP_DATABASE_URL",
+            generic_name="PCI_DATABASE_URL",
+            fallback_source="PCI_PG_DSN",
         )
-        legacy_dsn = env_text("PGVECTOR_DSN", env=env)
+        legacy_dsn = env_text("PCI_PG_DSN", env=env)
         dsn = database_url.value or legacy_dsn
         dsn_defines_database = bool(dsn and database_url_defines_database(dsn))
-        explicit_dbname = env_text("PGVECTOR_DB", env=env)
+        explicit_dbname = env_text("PCI_PG_DB", env=env)
         database_inferred = not dsn_defines_database and explicit_dbname is None
         dbname = (
             database_url_dbname(dsn)
@@ -458,27 +458,27 @@ class DatabaseSettings:
         dsn_user = _role_env_value(
             env,
             mcp=mcp,
-            mcp_name="PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER",
-            generic_name="PROJECT_CODE_INTELLIGENCE_DATABASE_USER",
+            mcp_name="PCI_MCP_DATABASE_USER",
+            generic_name="PCI_DATABASE_USER",
         )
         dsn_auth = _role_env_value(
             env,
             mcp=mcp,
-            mcp_name="PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD",
-            generic_name="PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD",
+            mcp_name="PCI_MCP_DATABASE_PASSWORD",
+            generic_name="PCI_DATABASE_PASSWORD",
         )
-        user = (env_text("PROJECT_CODE_INTELLIGENCE_MCP_PGVECTOR_USER", env=env) if mcp else None) or env_text(
-            "PGVECTOR_USER", DEFAULT_PGVECTOR_USER, env=env
+        user = (env_text("PCI_MCP_PG_USER", env=env) if mcp else None) or env_text(
+            "PCI_PG_USER", DEFAULT_PCI_PG_USER, env=env
         )
-        password = (env_text("PROJECT_CODE_INTELLIGENCE_MCP_PGVECTOR_PASS", env=env) if mcp else None) or env_text(
-            "PGVECTOR_PASS", DEFAULT_PGVECTOR_PASS, env=env
+        password = (env_text("PCI_MCP_PG_PASS", env=env) if mcp else None) or env_text(
+            "PCI_PG_PASS", DEFAULT_PCI_PG_PASS, env=env
         )
         if admin_scope == "database":
-            admin_user = env_text("PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER", env=env)
-            admin_password = env_text("PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD", env=env)
+            admin_user = env_text("PCI_DATABASE_ADMIN_USER", env=env)
+            admin_password = env_text("PCI_DATABASE_ADMIN_PASSWORD", env=env)
         elif admin_scope == "postgres":
-            admin_user = env_text("PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER", env=env)
-            admin_password = env_text("PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD", env=env)
+            admin_user = env_text("PCI_POSTGRES_ADMIN_USER", env=env)
+            admin_password = env_text("PCI_POSTGRES_ADMIN_PASSWORD", env=env)
         else:
             raise ValueError("admin_scope must be 'database' or 'postgres'")
         return cls(
@@ -488,39 +488,39 @@ class DatabaseSettings:
             dsn_user_source=dsn_user.source,
             dsn_password=dsn_auth.value,
             dsn_auth_source=dsn_auth.source,
-            host=env_text("PGVECTOR_HOST", DEFAULT_PGVECTOR_HOST, env=env) or DEFAULT_PGVECTOR_HOST,
-            port=env_text("PGVECTOR_PORT", DEFAULT_PGVECTOR_PORT, env=env) or DEFAULT_PGVECTOR_PORT,
+            host=env_text("PCI_PG_HOST", DEFAULT_PCI_PG_HOST, env=env) or DEFAULT_PCI_PG_HOST,
+            port=env_text("PCI_PG_PORT", DEFAULT_PCI_PG_PORT, env=env) or DEFAULT_PCI_PG_PORT,
             dbname=dbname,
             user=user,
             password=password,
             admin_user=admin_user,
             admin_password=admin_password,
-            sslmode=env_text("PGVECTOR_SSLMODE", "prefer", env=env) or "prefer",
+            sslmode=env_text("PCI_PG_SSLMODE", "prefer", env=env) or "prefer",
             connect_timeout_seconds=env_int(
-                "PROJECT_CODE_INTELLIGENCE_DB_CONNECT_TIMEOUT_SECONDS",
+                "PCI_DB_CONNECT_TIMEOUT_SECONDS",
                 DEFAULT_DB_CONNECT_TIMEOUT_SECONDS,
                 env=env,
                 minimum=1,
             ),
             keepalives_idle_seconds=env_int(
-                "PROJECT_CODE_INTELLIGENCE_DB_KEEPALIVES_IDLE_SECONDS",
+                "PCI_DB_KEEPALIVES_IDLE_SECONDS",
                 DEFAULT_DB_KEEPALIVES_IDLE_SECONDS,
                 env=env,
                 minimum=1,
             ),
             keepalives_interval_seconds=env_int(
-                "PROJECT_CODE_INTELLIGENCE_DB_KEEPALIVES_INTERVAL_SECONDS",
+                "PCI_DB_KEEPALIVES_INTERVAL_SECONDS",
                 DEFAULT_DB_KEEPALIVES_INTERVAL_SECONDS,
                 env=env,
                 minimum=1,
             ),
             keepalives_count=env_int(
-                "PROJECT_CODE_INTELLIGENCE_DB_KEEPALIVES_COUNT",
+                "PCI_DB_KEEPALIVES_COUNT",
                 DEFAULT_DB_KEEPALIVES_COUNT,
                 env=env,
                 minimum=1,
             ),
-            allow_writes=env_bool("PROJECT_CODE_INTELLIGENCE_ALLOW_WRITES", default=False, env=env),
+            allow_writes=env_bool("PCI_ALLOW_WRITES", default=False, env=env),
             database_inferred=database_inferred,
         )
 
@@ -530,9 +530,9 @@ class DatabaseSettings:
         return [
             name
             for name, value in (
-                ("PGVECTOR_DB", self.dbname),
-                ("PGVECTOR_USER", self.user),
-                ("PGVECTOR_PASS", self.password),
+                ("PCI_PG_DB", self.dbname),
+                ("PCI_PG_USER", self.user),
+                ("PCI_PG_PASS", self.password),
             )
             if not value
         ]
@@ -550,11 +550,11 @@ class DatabaseSettings:
         if self.database_inferred:
             dbname = f"{dbname} (inferred)"
         return (
-            f"PGVECTOR_HOST={self.host} "
-            f"PGVECTOR_PORT={self.port} "
-            f"PGVECTOR_DB={dbname} "
-            f"PGVECTOR_USER={self.user or '<unset>'} "
-            f"PGVECTOR_PASS={'<set>' if self.password else '<unset>'}"
+            f"PCI_PG_HOST={self.host} "
+            f"PCI_PG_PORT={self.port} "
+            f"PCI_PG_DB={dbname} "
+            f"PCI_PG_USER={self.user or '<unset>'} "
+            f"PCI_PG_PASS={'<set>' if self.password else '<unset>'}"
         )
 
     def display_target(self) -> str:
@@ -605,12 +605,12 @@ class IngestSettings:
     def from_env(cls, env: Env | None = None) -> IngestSettings:
         embedding_endpoint = default_embedding_endpoint(env=env)
         return cls(
-            collection=env_text("PROJECT_CODE_INTELLIGENCE_COLLECTION", env=env),
-            profile=env_text("PROJECT_CODE_INTELLIGENCE_PROFILE", "generic", env=env) or "generic",
-            repos=env_text("PROJECT_CODE_INTELLIGENCE_REPOS", env=env),
-            mode=env_text("PROJECT_CODE_INTELLIGENCE_MODE", "incremental", env=env) or "incremental",
+            collection=env_text("PCI_COLLECTION", env=env),
+            profile=env_text("PCI_PROFILE", "generic", env=env) or "generic",
+            repos=env_text("PCI_REPOS", env=env),
+            mode=env_text("PCI_MODE", "incremental", env=env) or "incremental",
             sarif_max_bytes=env_int(
-                "PROJECT_CODE_INTELLIGENCE_SARIF_MAX_BYTES",
+                "PCI_SARIF_MAX_BYTES",
                 50 * 1024 * 1024,
                 env=env,
                 minimum=0,
@@ -618,20 +618,20 @@ class IngestSettings:
             embedding_endpoint=embedding_endpoint,
             embedding_endpoint_model=default_embedding_endpoint_model(env=env, endpoint=embedding_endpoint),
             embedding_max_chars=env_int(
-                "PROJECT_CODE_INTELLIGENCE_EMBEDDING_MAX_CHARS",
+                "PCI_EMBEDDING_MAX_CHARS",
                 3000,
                 env=env,
                 minimum=1,
             ),
-            preembed=env_bool("PROJECT_CODE_INTELLIGENCE_PREEMBED", default=True, env=env),
+            preembed=env_bool("PCI_PREEMBED", default=True, env=env),
             preembedding_ahead_batches=env_int(
-                "PROJECT_CODE_INTELLIGENCE_PREEMBED_AHEAD_BATCHES",
+                "PCI_PREEMBED_AHEAD_BATCHES",
                 16,
                 env=env,
                 minimum=1,
             ),
             runtime_heartbeat_seconds=env_int(
-                "PROJECT_CODE_INTELLIGENCE_RUNTIME_HEARTBEAT_SECONDS",
+                "PCI_RUNTIME_HEARTBEAT_SECONDS",
                 300,
                 env=env,
                 minimum=0,
@@ -640,12 +640,12 @@ class IngestSettings:
 
 
 def configured_collection(env: Env | None = None) -> str | None:
-    return env_text("PROJECT_CODE_INTELLIGENCE_COLLECTION", env=env)
+    return env_text("PCI_COLLECTION", env=env)
 
 
 def configured_collection_defaulted(env: Env | None = None) -> bool:
-    return env_bool("PROJECT_CODE_INTELLIGENCE_COLLECTION_DEFAULTED", default=False, env=env)
+    return env_bool("PCI_COLLECTION_DEFAULTED", default=False, env=env)
 
 
 def collection_override_allowed(env: Env | None = None) -> bool:
-    return env_bool("PROJECT_CODE_INTELLIGENCE_ALLOW_COLLECTION_OVERRIDE", default=False, env=env)
+    return env_bool("PCI_ALLOW_COLLECTION_OVERRIDE", default=False, env=env)

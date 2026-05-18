@@ -38,7 +38,7 @@ VOYAGE_EMBEDDING_ENDPOINT = "https://api.voyageai.com/v1/embeddings"
 
 
 def default_gpu_model_detail(env: config.Env) -> str:
-    model_file = config.env_text("PROJECT_CODE_INTELLIGENCE_HF_MODEL_FILE", GPU_QWEN3_DEFAULT_MODEL, env=env)
+    model_file = config.env_text("PCI_HF_MODEL_FILE", GPU_QWEN3_DEFAULT_MODEL, env=env)
     model_path = Path("models") / (model_file or GPU_QWEN3_DEFAULT_MODEL)
     if model_path.is_file():
         return f"default GGUF present at {model_path}"
@@ -66,7 +66,7 @@ def check_embedding_options(
                 "ok",
                 f"AMD NPU embeddings: Lemonade FLM default {config.DEFAULT_LEMONADE_EMBEDDING_MODEL}.",
                 f"Use {process.container_engine_name()} compose --profile npu up -d lemonade-npu. Set "
-                "PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL only to override the default.",
+                "PCI_EMBEDDING_ENDPOINT_MODEL only to override the default.",
             )
         )
     else:
@@ -106,7 +106,7 @@ def check_embedding_options(
                 "ok",
                 f"Apple GPU embeddings: native MLX default {config.DEFAULT_APPLE_EMBED_MODEL}.",
                 "Run pci-apple-embed-server to start the native MLX embedding server. "
-                "Override the model with PROJECT_CODE_INTELLIGENCE_APPLE_EMBED_MODEL.",
+                "Override the model with PCI_APPLE_EMBED_MODEL.",
             )
         )
     if not any(gpu.vendor in {"AMD", "NVIDIA", "Apple"} for gpu in gpus):
@@ -136,8 +136,7 @@ def check_embedding_options(
             "option-remote",
             "ok",
             "Remote OpenAI-compatible embeddings: OpenAI text-embedding-3-small or Voyage voyage-3.5.",
-            "Requires PROJECT_CODE_INTELLIGENCE_ALLOW_REMOTE_EMBEDDING=1 because source-derived text leaves "
-            "the machine.",
+            "Requires PCI_ALLOW_REMOTE_EMBEDDING=1 because source-derived text leaves the machine.",
         )
     )
     return results
@@ -153,14 +152,14 @@ def endpoint_host(endpoint: str) -> str:
 
 
 def configured_embedding_requested(env: config.Env) -> tuple[bool, CheckResult | None]:
-    embed, error = bool_from_env("PROJECT_CODE_INTELLIGENCE_EMBED", default=False, env=env)
+    embed, error = bool_from_env("PCI_EMBED", default=False, env=env)
     if error:
         return False, error
     return (
         embed
-        or bool(config.env_text("PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT", env=env))
-        or bool(config.env_text("PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT_MODEL", env=env))
-        or bool(config.env_text("PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL", env=env)),
+        or bool(config.env_text("PCI_EMBEDDING_ENDPOINT", env=env))
+        or bool(config.env_text("PCI_EMBEDDING_ENDPOINT_MODEL", env=env))
+        or bool(config.env_text("PCI_LLAMA_MODEL", env=env)),
         None,
     )
 
@@ -193,14 +192,14 @@ def remote_provider_precheck(endpoint: str, model: str, *, required: bool, env: 
             "embedding-auth",
             status,
             "OpenAI embeddings require an API key.",
-            "Set PROJECT_CODE_INTELLIGENCE_EMBEDDING_API_KEY or OPENAI_API_KEY.",
+            "Set PCI_EMBEDDING_API_KEY or OPENAI_API_KEY.",
         )
     if host == "api.voyageai.com" and not config.embedding_api_key(endpoint, env=env):
         return result(
             "embedding-auth",
             status,
             "Voyage embeddings require an API key.",
-            "Set PROJECT_CODE_INTELLIGENCE_EMBEDDING_API_KEY or VOYAGE_API_KEY.",
+            "Set PCI_EMBEDDING_API_KEY or VOYAGE_API_KEY.",
         )
     return None
 

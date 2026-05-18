@@ -98,9 +98,9 @@ def sysfs_gfx_targets(sysfs_root: Path = Path("/sys/class/drm")) -> list[str]:
 
 
 def detected_gfx_targets() -> tuple[list[str], str]:
-    override = os.environ.get("PROJECT_CODE_INTELLIGENCE_AMD_GFX")
+    override = os.environ.get("PCI_AMD_GFX")
     if override:
-        return [normalize_gfx_target(override)], "PROJECT_CODE_INTELLIGENCE_AMD_GFX"
+        return [normalize_gfx_target(override)], "PCI_AMD_GFX"
 
     sysfs_targets = sysfs_gfx_targets()
     if sysfs_targets:
@@ -115,22 +115,20 @@ def detected_gfx_targets() -> tuple[list[str], str]:
 
 
 def selected_bundle() -> tuple[str, str, str]:
-    bundle_override = os.environ.get("PROJECT_CODE_INTELLIGENCE_LLAMA_CPP_ROCM_BUNDLE")
+    bundle_override = os.environ.get("PCI_LLAMA_CPP_ROCM_BUNDLE")
     if bundle_override:
         bundle = normalize_rocm_bundle(bundle_override)
-        return "", bundle, "PROJECT_CODE_INTELLIGENCE_LLAMA_CPP_ROCM_BUNDLE"
+        return "", bundle, "PCI_LLAMA_CPP_ROCM_BUNDLE"
 
     targets, source = detected_gfx_targets()
     if not targets:
-        fail("could not detect an AMD gfx target; install rocminfo or set PROJECT_CODE_INTELLIGENCE_AMD_GFX=gfxNNNN")
+        fail("could not detect an AMD gfx target; install rocminfo or set PCI_AMD_GFX=gfxNNNN")
 
     bundles = {bundle_for_gfx_target(target) for target in targets}
     if len(bundles) != 1:
         fail(
-            "detected multiple AMD gfx bundle families "
-            + ", ".join(sorted(bundles))
-            + "; set PROJECT_CODE_INTELLIGENCE_AMD_GFX or "
-            "PROJECT_CODE_INTELLIGENCE_LLAMA_CPP_ROCM_BUNDLE explicitly"
+            "detected multiple AMD gfx bundle families " + ", ".join(sorted(bundles)) + "; set PCI_AMD_GFX or "
+            "PCI_LLAMA_CPP_ROCM_BUNDLE explicitly"
         )
     return targets[0], bundles.pop(), source
 
@@ -198,11 +196,11 @@ def select(args: RocmNamespace) -> Selection:
 
 def print_env(selection: Selection) -> None:
     values = {
-        "PROJECT_CODE_INTELLIGENCE_AMD_GFX": selection["gfx_target"],
-        "PROJECT_CODE_INTELLIGENCE_LLAMA_CPP_ROCM_BUNDLE": selection["bundle"],
-        "PROJECT_CODE_INTELLIGENCE_LLAMA_CPP_ROCM_RELEASE": selection["release"],
-        "PROJECT_CODE_INTELLIGENCE_LLAMA_CPP_ROCM_ASSET": selection["asset"],
-        "PROJECT_CODE_INTELLIGENCE_LLAMA_CPP_ROCM_URL": selection["url"],
+        "PCI_AMD_GFX": selection["gfx_target"],
+        "PCI_LLAMA_CPP_ROCM_BUNDLE": selection["bundle"],
+        "PCI_LLAMA_CPP_ROCM_RELEASE": selection["release"],
+        "PCI_LLAMA_CPP_ROCM_ASSET": selection["asset"],
+        "PCI_LLAMA_CPP_ROCM_URL": selection["url"],
     }
     for name, value in values.items():
         if value:
@@ -213,12 +211,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     _ = parser.add_argument(
         "--repo",
-        default=os.environ.get("PROJECT_CODE_INTELLIGENCE_LLAMA_CPP_ROCM_REPO", DEFAULT_LLAMACPP_ROCM_REPO),
+        default=os.environ.get("PCI_LLAMA_CPP_ROCM_REPO", DEFAULT_LLAMACPP_ROCM_REPO),
         help="GitHub repository in owner/name form.",
     )
     _ = parser.add_argument(
         "--release",
-        default=os.environ.get("PROJECT_CODE_INTELLIGENCE_LLAMA_CPP_ROCM_RELEASE", "latest"),
+        default=os.environ.get("PCI_LLAMA_CPP_ROCM_RELEASE", "latest"),
         help="Release tag, or 'latest' to query GitHub's latest release.",
     )
     _ = parser.add_argument(

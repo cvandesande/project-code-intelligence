@@ -67,18 +67,15 @@ class FastEmbedHTTPServer(ThreadingHTTPServer):
 
 
 def fastembed_model_name() -> str:
-    return (
-        config.env_text("PROJECT_CODE_INTELLIGENCE_FASTEMBED_MODEL", config.DEFAULT_FASTEMBED_MODEL)
-        or config.DEFAULT_FASTEMBED_MODEL
-    )
+    return config.env_text("PCI_FASTEMBED_MODEL", config.DEFAULT_FASTEMBED_MODEL) or config.DEFAULT_FASTEMBED_MODEL
 
 
 def fastembed_cache_dir() -> str | None:
-    return config.env_text("PROJECT_CODE_INTELLIGENCE_FASTEMBED_CACHE_DIR")
+    return config.env_text("PCI_FASTEMBED_CACHE_DIR")
 
 
 def fastembed_request_max_bytes() -> int:
-    return config.env_int("PROJECT_CODE_INTELLIGENCE_FASTEMBED_MAX_REQUEST_BYTES", 4 * 1024 * 1024, minimum=1024)
+    return config.env_int("PCI_FASTEMBED_MAX_REQUEST_BYTES", 4 * 1024 * 1024, minimum=1024)
 
 
 def load_fastembed_model(model_name: str) -> FastEmbedModel:
@@ -154,7 +151,7 @@ class FastEmbedHandler(BaseHTTPRequestHandler):
 
     @override
     def log_message(self, format: str, *args: object) -> None:
-        if config.env_bool("PROJECT_CODE_INTELLIGENCE_FASTEMBED_ACCESS_LOG", default=False):
+        if config.env_bool("PCI_FASTEMBED_ACCESS_LOG", default=False):
             super().log_message(format, *args)
 
     def do_GET(self) -> None:
@@ -187,11 +184,8 @@ class FastEmbedHandler(BaseHTTPRequestHandler):
 def serve() -> int:
     model_name = fastembed_model_name()
     model = load_fastembed_model(model_name)
-    host = (
-        config.env_text("PROJECT_CODE_INTELLIGENCE_FASTEMBED_HOST", config.DEFAULT_FASTEMBED_HOST)
-        or config.DEFAULT_FASTEMBED_HOST
-    )
-    port = config.env_int("PROJECT_CODE_INTELLIGENCE_FASTEMBED_PORT", config.DEFAULT_FASTEMBED_PORT, minimum=1)
+    host = config.env_text("PCI_FASTEMBED_HOST", config.DEFAULT_FASTEMBED_HOST) or config.DEFAULT_FASTEMBED_HOST
+    port = config.env_int("PCI_FASTEMBED_PORT", config.DEFAULT_FASTEMBED_PORT, minimum=1)
     server = FastEmbedHTTPServer((host, port), FastEmbedHandler, model=model, model_name=model_name)
     _ = sys.stderr.write(f"FastEmbed server listening on {host}:{port} with model {model_name}\n")
     _ = sys.stderr.flush()

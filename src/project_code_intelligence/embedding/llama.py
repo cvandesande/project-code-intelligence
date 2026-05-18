@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 
 def configured_llama_dir() -> Path | None:
-    value = os.environ.get("PROJECT_CODE_INTELLIGENCE_LLAMA_CPP_DIR")
+    value = os.environ.get("PCI_LLAMA_CPP_DIR")
     return Path(value) if value else None
 
 
@@ -49,7 +49,7 @@ def resolve_executable(value: str) -> Path:
 
 
 def llama_embedding_binary() -> Path:
-    configured_binary = os.environ.get("PROJECT_CODE_INTELLIGENCE_LLAMA_EMBEDDING_BIN")
+    configured_binary = os.environ.get("PCI_LLAMA_EMBEDDING_BIN")
     if configured_binary:
         return resolve_executable(configured_binary)
     configured_dir = configured_llama_dir()
@@ -59,17 +59,17 @@ def llama_embedding_binary() -> Path:
 
 
 def llama_timeout_seconds() -> int:
-    return config.env_int("PROJECT_CODE_INTELLIGENCE_LLAMA_TIMEOUT_SECONDS", 3600, minimum=1)
+    return config.env_int("PCI_LLAMA_TIMEOUT_SECONDS", 3600, minimum=1)
 
 
 def build_command(prompt_file: Path) -> list[str]:
     binary = llama_embedding_binary()
-    model = os.environ.get("PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL")
-    use_default_gemma = os.environ.get("PROJECT_CODE_INTELLIGENCE_LLAMA_EMBD_GEMMA_DEFAULT") == "1"
+    model = os.environ.get("PCI_LLAMA_MODEL")
+    use_default_gemma = os.environ.get("PCI_LLAMA_EMBD_GEMMA_DEFAULT") == "1"
     if not model and not use_default_gemma:
         raise RuntimeError(
-            "Set PROJECT_CODE_INTELLIGENCE_LLAMA_MODEL=/path/to/embedding-model.gguf, "
-            "or set PROJECT_CODE_INTELLIGENCE_LLAMA_EMBD_GEMMA_DEFAULT=1 to let llama.cpp "
+            "Set PCI_LLAMA_MODEL=/path/to/embedding-model.gguf, "
+            "or set PCI_LLAMA_EMBD_GEMMA_DEFAULT=1 to let llama.cpp "
             "use its default EmbeddingGemma model."
         )
 
@@ -85,7 +85,7 @@ def build_command(prompt_file: Path) -> list[str]:
     elif use_default_gemma:
         command.append("--embd-gemma-default")
 
-    extra = os.environ.get("PROJECT_CODE_INTELLIGENCE_LLAMA_EXTRA_ARGS")
+    extra = os.environ.get("PCI_LLAMA_EXTRA_ARGS")
     if extra:
         command.extend(shlex.split(extra))
     return command

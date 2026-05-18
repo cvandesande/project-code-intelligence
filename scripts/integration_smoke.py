@@ -20,26 +20,26 @@ if SRC_DIR.is_dir():
 from project_code_intelligence import process  # noqa: E402
 
 SMOKE_DATABASE_ENV_NAMES = (
-    "PGVECTOR_DB",
-    "PGVECTOR_DSN",
-    "PGVECTOR_HOST",
-    "PGVECTOR_PASS",
-    "PGVECTOR_PORT",
-    "PGVECTOR_SSLMODE",
-    "PGVECTOR_USER",
-    "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD",
-    "PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER",
-    "PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD",
-    "PROJECT_CODE_INTELLIGENCE_DATABASE_SCOPE_PATH",
-    "PROJECT_CODE_INTELLIGENCE_DATABASE_URL",
-    "PROJECT_CODE_INTELLIGENCE_DATABASE_USER",
-    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_PASSWORD",
-    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL",
-    "PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_USER",
-    "PROJECT_CODE_INTELLIGENCE_MCP_PGVECTOR_PASS",
-    "PROJECT_CODE_INTELLIGENCE_MCP_PGVECTOR_USER",
-    "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_PASSWORD",
-    "PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_USER",
+    "PCI_PG_DB",
+    "PCI_PG_DSN",
+    "PCI_PG_HOST",
+    "PCI_PG_PASS",
+    "PCI_PG_PORT",
+    "PCI_PG_SSLMODE",
+    "PCI_PG_USER",
+    "PCI_DATABASE_ADMIN_PASSWORD",
+    "PCI_DATABASE_ADMIN_USER",
+    "PCI_DATABASE_PASSWORD",
+    "PCI_DATABASE_SCOPE_PATH",
+    "PCI_DATABASE_URL",
+    "PCI_DATABASE_USER",
+    "PCI_MCP_DATABASE_PASSWORD",
+    "PCI_MCP_DATABASE_URL",
+    "PCI_MCP_DATABASE_USER",
+    "PCI_MCP_PG_PASS",
+    "PCI_MCP_PG_USER",
+    "PCI_POSTGRES_ADMIN_PASSWORD",
+    "PCI_POSTGRES_ADMIN_USER",
 )
 
 
@@ -119,7 +119,7 @@ def write_fixture_repo(path: Path) -> None:
 
 def smoke_env(collection: str) -> dict[str, str]:
     env = os.environ.copy()
-    bind_host = env.get("PROJECT_CODE_INTELLIGENCE_BIND_HOST") or "127.0.0.1"
+    bind_host = env.get("PCI_BIND_HOST") or "127.0.0.1"
     try:
         bind_address = ipaddress.ip_address(bind_host)
     except ValueError:
@@ -128,22 +128,22 @@ def smoke_env(collection: str) -> dict[str, str]:
         db_host = "127.0.0.1" if bind_address.is_unspecified else bind_host
     if ":" in db_host and not db_host.startswith("["):
         db_host = f"[{db_host}]"
-    db_port = env.get("PGVECTOR_PORT") or "5433"
-    db_name = env.get("PGVECTOR_DB") or "codeintel"
-    db_user = env.get("PGVECTOR_USER") or "codeintel"
-    db_password = env.get("PGVECTOR_PASS") or "codeintel"
+    db_port = env.get("PCI_PG_PORT") or "5433"
+    db_name = env.get("PCI_PG_DB") or "codeintel"
+    db_user = env.get("PCI_PG_USER") or "codeintel"
+    db_password = env.get("PCI_PG_PASS") or "codeintel"
     for name in SMOKE_DATABASE_ENV_NAMES:
         _ = env.pop(name, None)
     env["PYTHONPATH"] = str(SRC_DIR) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    env["PROJECT_CODE_INTELLIGENCE_DATABASE_URL"] = f"postgresql://{db_host}:{db_port}/{db_name}?sslmode=prefer"
-    env["PROJECT_CODE_INTELLIGENCE_DATABASE_USER"] = db_user
-    env["PROJECT_CODE_INTELLIGENCE_DATABASE_PASSWORD"] = db_password
-    env["PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER"] = db_user
-    env["PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD"] = db_password
-    env["PROJECT_CODE_INTELLIGENCE_COLLECTION"] = collection
-    env["PROJECT_CODE_INTELLIGENCE_MODE"] = "full"
-    env["PROJECT_CODE_INTELLIGENCE_PROFILE"] = "generic"
-    env["PROJECT_CODE_INTELLIGENCE_REPOS"] = "."
+    env["PCI_DATABASE_URL"] = f"postgresql://{db_host}:{db_port}/{db_name}?sslmode=prefer"
+    env["PCI_DATABASE_USER"] = db_user
+    env["PCI_DATABASE_PASSWORD"] = db_password
+    env["PCI_DATABASE_ADMIN_USER"] = db_user
+    env["PCI_DATABASE_ADMIN_PASSWORD"] = db_password
+    env["PCI_COLLECTION"] = collection
+    env["PCI_MODE"] = "full"
+    env["PCI_PROFILE"] = "generic"
+    env["PCI_REPOS"] = "."
     return env
 
 
@@ -259,7 +259,7 @@ def pci_index_command(env: dict[str, str], *extra_args: str) -> list[str]:
         "-m",
         "project_code_intelligence.cli",
         "--collection",
-        env["PROJECT_CODE_INTELLIGENCE_COLLECTION"],
+        env["PCI_COLLECTION"],
         ".",
         "--no-embed",
         *extra_args,
@@ -278,7 +278,7 @@ def run_ingest_checks(fixture_dir: Path, env: dict[str, str]) -> None:
     if '"snapshot_ids"' not in ingest.stdout:
         fail("ingest output did not include snapshot IDs")
     incremental_env = dict(env)
-    incremental_env["PROJECT_CODE_INTELLIGENCE_MODE"] = "incremental"
+    incremental_env["PCI_MODE"] = "incremental"
     incremental = run(
         pci_index_command(incremental_env),
         cwd=fixture_dir,
@@ -323,7 +323,7 @@ def run_mcp_checks(fixture_dir: Path, env: dict[str, str]) -> tuple[int, int]:
     malformed = call_mcp_request("{not-json}\n", cwd=fixture_dir, env=env)
     assert_mcp_error(malformed, "Expecting property name")
     small_request_env = dict(env)
-    small_request_env["PROJECT_CODE_INTELLIGENCE_MCP_MAX_REQUEST_BYTES"] = "1024"
+    small_request_env["PCI_MCP_MAX_REQUEST_BYTES"] = "1024"
     oversized = call_mcp_request("x" * 2048 + "\n", cwd=fixture_dir, env=small_request_env)
     assert_mcp_error(oversized, "MCP_MAX_REQUEST_BYTES")
     return len(cast("list[object]", snapshots)), len(search_results_list)

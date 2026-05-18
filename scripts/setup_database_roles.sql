@@ -5,14 +5,14 @@
 -- MCP server so that an exploited MCP boundary cannot write to the database.
 --
 -- Usage:
---   psql "$PROJECT_CODE_INTELLIGENCE_DATABASE_URL" \
+--   psql "$PCI_DATABASE_URL" \
 --     -v reader_password="'choose-a-strong-password'" \
 --     -f scripts/setup_database_roles.sql
 --
 -- After running this once, set the following env vars for the MCP server only:
---   PROJECT_CODE_INTELLIGENCE_MCP_PGVECTOR_USER=codeintel_reader
---   PROJECT_CODE_INTELLIGENCE_MCP_PGVECTOR_PASS=<reader_password>
--- (or supply PROJECT_CODE_INTELLIGENCE_MCP_DATABASE_URL with the reader DSN).
+--   PCI_MCP_PG_USER=codeintel_reader
+--   PCI_MCP_PG_PASS=<reader_password>
+-- (or supply PCI_MCP_DATABASE_URL with the reader DSN).
 --
 -- The writer role (existing user) remains unchanged.
 

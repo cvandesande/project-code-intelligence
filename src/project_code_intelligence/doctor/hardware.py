@@ -568,7 +568,6 @@ def _check_apple_metal(env: config.Env) -> list[CheckResult]:
             "apple-metal-model",
             "warn",
             "No local embedding model is configured.",
-            "Run pci-apple-embed-server to start a local model, "
-            "or set PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT for a remote provider.",
+            "Run pci-apple-embed-server to start a local model, or set PCI_EMBEDDING_ENDPOINT for a remote provider.",
         )
     ]

@@ -32,10 +32,10 @@ class FakeConnection:
 class McpDatabaseSessionTests(unittest.TestCase):
     def test_session_timeout_settings_use_mcp_environment(self) -> None:
         env = {
-            "PROJECT_CODE_INTELLIGENCE_MCP_STATEMENT_TIMEOUT_MS": "250",
-            "PROJECT_CODE_INTELLIGENCE_MCP_LOCK_TIMEOUT_MS": "50",
-            "PROJECT_CODE_INTELLIGENCE_MCP_IDLE_IN_TRANSACTION_TIMEOUT_MS": "500",
-            "PROJECT_CODE_INTELLIGENCE_MCP_MAX_STATUS_ROWS": "25",
+            "PCI_MCP_STATEMENT_TIMEOUT_MS": "250",
+            "PCI_MCP_LOCK_TIMEOUT_MS": "50",
+            "PCI_MCP_IDLE_IN_TRANSACTION_TIMEOUT_MS": "500",
+            "PCI_MCP_MAX_STATUS_ROWS": "25",
         }
 
         with patch.dict(os.environ, env, clear=True):

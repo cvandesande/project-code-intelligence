@@ -450,7 +450,7 @@ def _next_steps(
             steps.extend((
                 ("Start a local database", f"{engine} compose up -d pgvector"),
                 ("Index a repo and bootstrap its inferred database", "pci-index ."),
-                ("Use a remote Postgres instead", "set PROJECT_CODE_INTELLIGENCE_DATABASE_URL"),
+                ("Use a remote Postgres instead", "set PCI_DATABASE_URL"),
             ))
         elif is_local is False:
             steps.extend((
@@ -462,7 +462,7 @@ def _next_steps(
                 ("Start a local database", f"{engine} compose up -d pgvector"),
                 ("Bootstrap a remote Postgres", "pci-doctor --init-postgres"),
                 ("Index a repo and bootstrap its inferred database", "pci-index ."),
-                ("Use a remote Postgres instead", "set PROJECT_CODE_INTELLIGENCE_DATABASE_URL"),
+                ("Use a remote Postgres instead", "set PCI_DATABASE_URL"),
             ))
     elif issue_names & project_db_names:
         steps.append(("Index a repo and bootstrap its inferred database", "pci-index ."))
@@ -471,7 +471,7 @@ def _next_steps(
             (_PROFILE_FRIENDLY_DESCRIPTIONS.get(profile, f"Start {profile} embeddings"), cmd)
             for profile, cmd in local_embedding_startup_commands(by_name)
         )
-        steps.append(("Use a remote provider", "set PROJECT_CODE_INTELLIGENCE_EMBEDDING_ENDPOINT"))
+        steps.append(("Use a remote provider", "set PCI_EMBEDDING_ENDPOINT"))
     return steps
 
 
@@ -545,7 +545,7 @@ def format_postgres_bootstrap_result(result: PostgresBootstrapResult, *, color: 
             Text("Accounts", style="bold"),
             accounts,
             Text(),
-            Text("Use this role as PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_* for pci-index.", overflow="fold"),
+            Text("Use this role as PCI_DATABASE_ADMIN_* for pci-index.", overflow="fold"),
             Text(
                 "pci-index creates inferred project databases, schema, and scoped RO/RW roles. "
                 f"New project databases inherit pgvector from {result.template_database}.",
@@ -564,8 +564,8 @@ def format_postgres_bootstrap_result(result: PostgresBootstrapResult, *, color: 
     exports = "\n".join((
         "",
         "Export for pci-index",
-        _shell_export("PROJECT_CODE_INTELLIGENCE_DATABASE_URL", result.postgres_url),
-        _shell_export("PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER", result.index_role.name),
-        _shell_export("PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_PASSWORD", password),
+        _shell_export("PCI_DATABASE_URL", result.postgres_url),
+        _shell_export("PCI_DATABASE_ADMIN_USER", result.index_role.name),
+        _shell_export("PCI_DATABASE_ADMIN_PASSWORD", password),
     ))
     return buffer.getvalue().rstrip("\n") + exports

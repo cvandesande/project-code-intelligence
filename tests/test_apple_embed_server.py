@@ -96,16 +96,16 @@ class _TestHandler(AppleEmbedHandler):
 
 class ModelNameTests(unittest.TestCase):
     def test_returns_default_when_env_not_set(self) -> None:
-        env = {k: v for k, v in os.environ.items() if k != "PROJECT_CODE_INTELLIGENCE_APPLE_EMBED_MODEL"}
+        env = {k: v for k, v in os.environ.items() if k != "PCI_APPLE_EMBED_MODEL"}
         with patch.dict(os.environ, env, clear=True):
             self.assertEqual(apple_embed_model_name(), config.DEFAULT_APPLE_EMBED_MODEL)
 
     def test_returns_configured_model(self) -> None:
-        with patch.dict(os.environ, {"PROJECT_CODE_INTELLIGENCE_APPLE_EMBED_MODEL": "custom/model"}):
+        with patch.dict(os.environ, {"PCI_APPLE_EMBED_MODEL": "custom/model"}):
             self.assertEqual(apple_embed_model_name(), "custom/model")
 
     def test_falls_back_to_default_when_env_is_empty_string(self) -> None:
-        with patch.dict(os.environ, {"PROJECT_CODE_INTELLIGENCE_APPLE_EMBED_MODEL": ""}):
+        with patch.dict(os.environ, {"PCI_APPLE_EMBED_MODEL": ""}):
             self.assertEqual(apple_embed_model_name(), config.DEFAULT_APPLE_EMBED_MODEL)
 
 
