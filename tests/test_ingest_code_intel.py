@@ -39,6 +39,7 @@ from project_code_intelligence.ingest_code_intel import (
     database_bootstrap_report,
     default_mcp_server_name,
     discover_plan_sarif_files,
+    emit_mcp_config,
     mcp_config_block,
     mcp_config_context,
     mcp_project_config_path,
@@ -741,6 +742,49 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         )
 
         self.assertIsNone(mcp_config_context(plan, bootstrap, command="/usr/bin/pci-mcp"))
+
+    def test_emit_mcp_config_softens_error_when_bootstrap_used_fast_path(self) -> None:
+        # Re-run scenario for the bundled local DB: the rw role already exists, so
+        # bootstrap_inferred_database short-circuits and returns rw_role with no password and no
+        # ro_role. Re-emitting MCP creds isn't possible without an admin salt, but the originally
+        # emitted creds remain valid, so we print guidance instead of raising.
+        plan = build_ingest_plan(cli_args(collection="demo-workspace", root=Path.cwd(), repos=".", mcp_config="vscode"))
+        bootstrap = db.DatabaseBootstrapResult(
+            dbname="pci_demo",
+            rw_role=db.DatabaseRole(
+                name="pci_demo_rw",
+                password=None,
+                created=False,
+                database_url="postgresql://pci_demo_rw@127.0.0.1:5433/pci_demo?sslmode=prefer",
+            ),
+        )
+
+        with (
+            patch(
+                "project_code_intelligence.ingest_code_intel.progress.detect_summary_mode",
+                return_value="pretty",
+            ),
+            patch("project_code_intelligence.ingest_code_intel.write_stdout") as write_stdout,
+        ):
+            emit_mcp_config(plan, bootstrap)
+
+        output = "\n".join(call.args[0] for call in write_stdout.call_args_list)
+        self.assertIn("MCP credentials were emitted", output)
+        self.assertIn("pci-index --reset", output)
+
+    def test_emit_mcp_config_still_raises_when_no_bootstrap_at_all(self) -> None:
+        plan = build_ingest_plan(cli_args(collection="demo-workspace", root=Path.cwd(), repos=".", mcp_config="vscode"))
+
+        with (
+            patch(
+                "project_code_intelligence.ingest_code_intel.progress.detect_summary_mode",
+                return_value="pretty",
+            ),
+            self.assertRaises(db.DatabaseConnectionError) as raised,
+        ):
+            emit_mcp_config(plan, None)
+
+        self.assertIn("RO password is not available", str(raised.exception))
 
     def test_init_db_only_bootstraps_without_scanning(self) -> None:
         bootstrap = db.DatabaseBootstrapResult(dbname="pci_demo", database_created=True)

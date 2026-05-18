@@ -1177,6 +1177,19 @@ def mcp_config_block(context: McpConfigContext | None, config_format: str) -> st
     return mcp_project_config_guidance(context, config_format, body, env_names=env_names)
 
 
+def _bootstrap_used_fast_path(bootstrap: db.DatabaseBootstrapResult | None) -> bool:
+    """Detect the rerun fast-path: the rw role exists but its password is not in-memory.
+
+    bootstrap_inferred_database short-circuits to _connect_existing_inferred_database_with_scoped_role
+    when the configured writer already matches the per-project rw role, leaving ro_role=None and
+    rw_role.password=None. Re-emitting MCP creds isn't possible without re-deriving from an admin
+    salt we don't have on this run, but the originally-emitted creds remain valid.
+    """
+    if bootstrap is None or bootstrap.rw_role is None:
+        return False
+    return bootstrap.rw_role.password is None and bootstrap.ro_role is None
+
+
 def emit_mcp_config(plan: IngestPlan, bootstrap: db.DatabaseBootstrapResult | None) -> None:
     if progress.detect_summary_mode() == "json":
         return
@@ -1185,6 +1198,13 @@ def emit_mcp_config(plan: IngestPlan, bootstrap: db.DatabaseBootstrapResult | No
     block = mcp_config_block(context, config_format)
     if block is None:
         if plan.args.mcp_config:
+            if _bootstrap_used_fast_path(bootstrap):
+                write_stdout(
+                    "MCP credentials were emitted when this database was first bootstrapped and "
+                    "cannot be re-derived from the current writer credentials. Your existing MCP "
+                    "configuration is still valid. To regenerate, run `pci-index --reset .` first."
+                )
+                return
             raise db.DatabaseConnectionError(
                 "Could not emit MCP configuration because the project RO password is not available. "
                 "Run pci-index --init-db with PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_USER/"

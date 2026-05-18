@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import dataclass, field
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,11 +31,31 @@ from project_code_intelligence.db import (
 
 
 class _FakeCursor:
-    def __init__(self, row: dict[str, object] | None = None) -> None:
+    def __init__(self, row: dict[str, object] | None = None, rows: list[dict[str, object]] | None = None) -> None:
         self._row = row
+        self._rows = rows or ([] if row is None else [row])
 
     def fetchone(self) -> dict[str, object] | None:
         return self._row
+
+    def fetchall(self) -> list[dict[str, object]]:
+        return list(self._rows)
+
+
+@dataclass(frozen=True)
+class _FakePgCatalog:
+    """Bundle of pg_catalog rows returned by `_FakeRoleBootstrapConnection.execute`."""
+
+    tables: list[str] = field(default_factory=list)
+    sequences: list[str] = field(default_factory=list)
+    functions: list[tuple[str, str]] = field(default_factory=list)
+
+
+_DEFAULT_FAKE_ROLE_ATTRIBUTES: dict[str, object] = {
+    "rolcanlogin": True,
+    "rolcreatedb": True,
+    "rolcreaterole": True,
+}
 
 
 class _FakeRoleBootstrapConnection:
@@ -44,17 +65,13 @@ class _FakeRoleBootstrapConnection:
         database_exists: bool = True,
         extension_exists: bool = False,
         role_exists: bool = False,
-        role_attributes: dict[str, object] | None = None,
+        catalog: _FakePgCatalog | None = None,
     ) -> None:
         self.statements: list[str] = []
         self.database_exists = database_exists
         self.extension_exists = extension_exists
         self.role_exists = role_exists
-        self.role_attributes = role_attributes or {
-            "rolcanlogin": True,
-            "rolcreatedb": True,
-            "rolcreaterole": True,
-        }
+        self.catalog = catalog or _FakePgCatalog()
 
     def __enter__(self) -> _FakeRoleBootstrapConnection:
         return self
@@ -69,14 +86,29 @@ class _FakeRoleBootstrapConnection:
         _ = params
         text = str(query)
         self.statements.append(text)
+        return self._cursor_for_query(text)
+
+    def _cursor_for_query(self, text: str) -> _FakeCursor:
+        # rolcanlogin probes carry both "rolcanlogin" and "FROM pg_roles"; check first so the
+        # generic pg_roles branch below doesn't claim them.
         if "rolcanlogin" in text and "FROM pg_roles" in text:
-            return _FakeCursor(self.role_attributes if self.role_exists else None)
-        if "FROM pg_roles" in text:
-            return _FakeCursor({"ok": 1} if self.role_exists else None)
-        if "FROM pg_database" in text:
-            return _FakeCursor({"ok": 1} if self.database_exists else None)
-        if "FROM pg_extension" in text:
-            return _FakeCursor({"ok": 1} if self.extension_exists else None)
+            return _FakeCursor(_DEFAULT_FAKE_ROLE_ATTRIBUTES if self.role_exists else None)
+        existence_probes = (
+            ("FROM pg_roles", self.role_exists),
+            ("FROM pg_database", self.database_exists),
+            ("FROM pg_extension", self.extension_exists),
+        )
+        for needle, present in existence_probes:
+            if needle in text:
+                return _FakeCursor({"ok": 1} if present else None)
+        catalog_probes: tuple[tuple[str, list[dict[str, object]]], ...] = (
+            ("FROM pg_tables", [{"tablename": name} for name in self.catalog.tables]),
+            ("FROM pg_sequences", [{"sequencename": name} for name in self.catalog.sequences]),
+            ("FROM pg_proc", [{"proname": name, "args": args} for name, args in self.catalog.functions]),
+        )
+        for needle, rows in catalog_probes:
+            if needle in text:
+                return _FakeCursor(rows=rows)
         return _FakeCursor({"ok": 1})
 
 
@@ -495,6 +527,111 @@ class DatabaseBootstrapTests(unittest.TestCase):
         maintenance_statements = "\n".join(maintenance_connection.statements)
         self.assertNotIn("ALTER ROLE", maintenance_statements)
         self.assertNotIn("CREATE ROLE", maintenance_statements)
+
+    def test_bootstrap_creates_project_roles_from_writer_credentials_when_admin_missing(self) -> None:
+        # Bundled-local scenario: PGVECTOR_USER/PASS supply codeintel:codeintel and the user has
+        # not set PROJECT_CODE_INTELLIGENCE_DATABASE_ADMIN_*. The writer is the container's superuser
+        # so we should still create per-project rw/ro roles for pci-mcp.
+        writer_credential = "-".join(("codeintel", "writer"))
+        settings = DatabaseSettings(
+            host="127.0.0.1",
+            port="5433",
+            dbname="pci_demo",
+            user="codeintel",
+            password=writer_credential,
+            database_inferred=True,
+        )
+        maintenance_connection = _FakeRoleBootstrapConnection()
+        target_connection = _FakeRoleBootstrapConnection(extension_exists=True)
+
+        with (
+            patch("project_code_intelligence.db.Connection.connect", return_value=maintenance_connection),
+            patch("project_code_intelligence.db.connect", return_value=target_connection),
+        ):
+            bootstrap = db.bootstrap_inferred_database(settings)
+
+        self.assertIsNotNone(bootstrap.rw_role)
+        self.assertIsNotNone(bootstrap.ro_role)
+        self.assertEqual(
+            bootstrap.rw_role.password if bootstrap.rw_role else None,
+            project_database_role_password("pci_demo", "pci_demo_rw", writer_credential),
+        )
+        self.assertEqual(
+            bootstrap.ro_role.password if bootstrap.ro_role else None,
+            project_database_role_password("pci_demo", "pci_demo_ro", writer_credential),
+        )
+        maintenance_statements = "\n".join(maintenance_connection.statements)
+        self.assertIn("CREATE ROLE pci_demo_rw", maintenance_statements)
+        self.assertIn("CREATE ROLE pci_demo_ro", maintenance_statements)
+
+    def test_writer_admin_fallback_is_noop_when_admin_already_set(self) -> None:
+        settings = DatabaseSettings(
+            host="127.0.0.1",
+            dbname="pci_demo",
+            user="codeintel",
+            password=self.TEST_CREDENTIAL,
+            admin_user="postgres",
+            admin_password=self.TEST_CREDENTIAL,
+            database_inferred=True,
+        )
+
+        result = db._writer_admin_fallback(settings)
+
+        self.assertIs(result, settings)
+
+    def test_bootstrap_reassigns_legacy_table_ownership_to_rw_role(self) -> None:
+        # Pre-existing DB whose tables were populated by an old writer (e.g. codeintel) before
+        # per-project roles existed. After we create the rw role and switch the runtime writer to
+        # it, ensure_schema's ALTER TABLE statements would otherwise fail with 'must be owner'.
+        writer_credential = "-".join(("codeintel", "writer"))
+        settings = DatabaseSettings(
+            host="127.0.0.1",
+            port="5433",
+            dbname="pci_demo",
+            user="codeintel",
+            password=writer_credential,
+            database_inferred=True,
+        )
+        maintenance_connection = _FakeRoleBootstrapConnection()
+        target_connection = _FakeRoleBootstrapConnection(
+            extension_exists=True,
+            catalog=_FakePgCatalog(
+                tables=["project_code_intel_snapshots", "project_code_intel_files"],
+                sequences=["project_code_intel_snapshots_id_seq"],
+                functions=[("project_code_intel_touch_updated_at", "")],
+            ),
+        )
+
+        with (
+            patch("project_code_intelligence.db.Connection.connect", return_value=maintenance_connection),
+            patch("project_code_intelligence.db.connect", return_value=target_connection),
+        ):
+            _ = db.bootstrap_inferred_database(settings)
+
+        target_statements = "\n".join(target_connection.statements)
+        self.assertIn("ALTER TABLE public.project_code_intel_snapshots OWNER TO pci_demo_rw", target_statements)
+        self.assertIn("ALTER TABLE public.project_code_intel_files OWNER TO pci_demo_rw", target_statements)
+        self.assertIn(
+            "ALTER SEQUENCE public.project_code_intel_snapshots_id_seq OWNER TO pci_demo_rw",
+            target_statements,
+        )
+        self.assertIn(
+            "ALTER FUNCTION public.project_code_intel_touch_updated_at() OWNER TO pci_demo_rw",
+            target_statements,
+        )
+
+    def test_writer_admin_fallback_is_noop_when_writer_credentials_missing(self) -> None:
+        settings = DatabaseSettings(
+            host="db.example.invalid",
+            dbname="pci_demo",
+            user=None,
+            password=None,
+            database_inferred=True,
+        )
+
+        result = db._writer_admin_fallback(settings)
+
+        self.assertIs(result, settings)
 
 
 if __name__ == "__main__":
