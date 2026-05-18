@@ -82,6 +82,11 @@ class InventoryContractTests(unittest.TestCase):
             "Dockerfile": "dockerfile",
             "Containerfile": "dockerfile",
             "docker/app.dockerfile": "dockerfile",
+            "build/Dockerfile.ubi8": "dockerfile",
+            "build/Dockerfile.ubi9": "dockerfile",
+            "build/Dockerfile.ubi10": "dockerfile",
+            "build/Dockerfile-debug": "dockerfile",
+            "build/Containerfile.fedora": "dockerfile",
             "infra/main.tf": "terraform",
             "infra/vars.tfvars": "terraform",
             "infra/build.pkr.hcl": "packer",
@@ -104,6 +109,27 @@ class InventoryContractTests(unittest.TestCase):
         for path, expected in cases.items():
             with self.subTest(path=path):
                 self.assertEqual(language_for(path), expected)
+
+    def test_language_for_read_file_detects_dockerfile_syntax_directive(self) -> None:
+        # BuildKit Dockerfiles can be named anything when paired with `# syntax=docker/dockerfile:...`.
+        # Sniff the directive so e.g. `infra/recipe.txt` containing that pragma is classified properly.
+        self.assertEqual(
+            language_for_read_file(
+                "infra/recipe.txt",
+                b"# syntax=docker/dockerfile:1.6\nFROM alpine\n",
+                read_ok=True,
+            ),
+            "dockerfile",
+        )
+        # Case-insensitive: `# SYNTAX=docker/dockerfile:...` is valid per the directive parser.
+        self.assertEqual(
+            language_for_read_file(
+                "infra/recipe.txt",
+                b"# SYNTAX=docker/dockerfile:1.6\nFROM alpine\n",
+                read_ok=True,
+            ),
+            "dockerfile",
+        )
 
     def test_language_for_read_file_uses_shebang_for_unsuffixed_scripts(self) -> None:
         self.assertEqual(language_for_read_file("scripts/env", b"#!/usr/bin/env bash\n", read_ok=True), "shell")
