@@ -150,6 +150,22 @@ compose-check: ## Validate docker-compose.yml and bundled copy
 
 tool-install: ## Install or upgrade the pci-* binaries with uv
 	uv tool install . --reinstall
+	@bindir=$$(uv tool dir --bin 2>/dev/null) || bindir=""; \
+	if [ -z "$$bindir" ]; then exit 0; fi; \
+	case ":$$PATH:" in \
+	  *":$$bindir:"*) exit 0 ;; \
+	esac; \
+	printf '\n  %s is not on your PATH (uv tool install shims live there).\n' "$$bindir" >&2; \
+	if [ -t 0 ] && [ -t 2 ]; then \
+	  printf '  Run `uv tool update-shell` now to add it? [y/N] ' >&2; \
+	  read -r reply; \
+	  case "$$reply" in \
+	    [Yy]|[Yy][Ee][Ss]) uv tool update-shell ;; \
+	    *) printf '  Skipped. Run `uv tool update-shell` (or add %s to PATH manually) when ready.\n' "$$bindir" >&2 ;; \
+	  esac; \
+	else \
+	  printf '  Run `uv tool update-shell` (or add it to PATH manually) so the pci-* commands are found.\n' >&2; \
+	fi
 
 tool-uninstall: ## Uninstall the pci-* binaries
 	-uv tool uninstall project-code-intelligence
