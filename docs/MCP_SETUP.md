@@ -182,9 +182,12 @@ project databases inherit pgvector from `template1`. If a project database was
 created before `template1` had pgvector, reset that inferred database and index
 again.
 
-If admin variables are not set, `pci-index` uses the normal configured
-credentials. Those credentials must already be able to create/use the inferred
-database, and no separate RW/RO roles are generated.
+If admin variables are not set, `pci-index` promotes the writer credentials to
+the effective admin and still creates per-project RW/RO roles using
+deterministic HMAC-derived passwords. The bundled local pgvector container
+ships with a writer that has `CREATEROLE`, so this works without setup; for a
+remote Postgres whose writer lacks `CREATEROLE` the role-creation SQL fails
+with guidance to run `pci-doctor --init-postgres`.
 
 If your MCP client or secret manager separates credentials, leave them out of
 the URL and pass them separately:
