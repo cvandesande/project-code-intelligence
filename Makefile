@@ -30,72 +30,78 @@ SHELL_FILES := \
 	docker/llamacpp-cuda/entrypoint.sh \
 	docker/llamacpp-rocm/entrypoint.sh
 
-.PHONY: check lint format-check format shellcheck shell-format-check shell-format test coverage dead-code dependency-check architecture-check semgrep-check quality-strict typecheck security security-audit deps-audit doctor integration-smoke scan scan-dry-run mcp-smoke embedding-bench amd-rocm-bundle compose-check compose-up compose-cpu compose-npu compose-amdgpu compose-nvidia compose-down tool-install
+.PHONY: help check lint format-check format shellcheck shell-format-check shell-format test coverage dead-code dependency-check architecture-check semgrep-check quality-strict typecheck security security-audit deps-audit doctor integration-smoke scan scan-dry-run mcp-smoke embedding-bench amd-rocm-bundle compose-check tool-install tool-uninstall
 
-check: format-check shell-format-check lint shellcheck test dead-code dependency-check architecture-check semgrep-check coverage typecheck security deps-audit compose-check
+# Preserve the historical default (`make` runs the full quality gate); `help` is opt-in.
+.DEFAULT_GOAL := check
 
-lint:
+help: ## Show this help and exit
+	@awk 'BEGIN {FS = ":[^#]*## "; print "Targets (default: check):"} /^[a-zA-Z][a-zA-Z0-9_-]+:[^=]*## / {printf "  %-22s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+check: format-check shell-format-check lint shellcheck test dead-code dependency-check architecture-check semgrep-check coverage typecheck security deps-audit compose-check ## Run the full local quality gate
+
+lint: ## Lint Python with ruff
 	$(RUFF) check $(RUFF_TARGETS)
 
-format-check:
+format-check: ## Verify Python is ruff-formatted
 	$(RUFF) format --check $(RUFF_TARGETS)
 
-format:
+format: ## Auto-format Python with ruff
 	$(RUFF) format $(RUFF_TARGETS)
 
-shellcheck:
+shellcheck: ## Lint shell scripts with shellcheck
 	@if command -v $(SHELLCHECK) >/dev/null 2>&1; then \
 		$(SHELLCHECK) $(SHELL_FILES); \
 	else \
 		echo "warning: shellcheck not found; skipping shell lint" >&2; \
 	fi
 
-shell-format-check:
+shell-format-check: ## Verify shell scripts are shfmt-formatted
 	@if command -v $(SHFMT) >/dev/null 2>&1; then \
 		$(SHFMT) -d $(SHELL_FILES); \
 	else \
 		echo "warning: shfmt not found; skipping shell format check" >&2; \
 	fi
 
-shell-format:
+shell-format: ## Auto-format shell scripts with shfmt
 	@if command -v $(SHFMT) >/dev/null 2>&1; then \
 		$(SHFMT) -w $(SHELL_FILES); \
 	else \
 		echo "warning: shfmt not found; skipping shell formatting" >&2; \
 	fi
 
-test:
+test: ## Run unit tests
 	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m unittest discover -s tests -v
 
-coverage:
+coverage: ## Run tests with coverage report
 	$(COVERAGE) erase
 	PYTHONPATH=$(PYTHONPATH) $(COVERAGE) run -m unittest discover -s tests -v
 	$(COVERAGE) report -m --sort=cover
 
-dead-code:
+dead-code: ## Find unused code with vulture
 	$(VULTURE) src tests scripts vulture_whitelist.py --min-confidence 0 --sort-by-size
 
-dependency-check:
+dependency-check: ## Find unused or undeclared deps with deptry
 	$(DEPTRY) src scripts
 
-architecture-check:
+architecture-check: ## Enforce import boundaries with lint-imports
 	$(LINT_IMPORTS) --config pyproject.toml
 
-semgrep-check:
+semgrep-check: ## Run semgrep static analysis with project rules
 	$(SEMGREP) scan --config semgrep.yml --error --strict --metrics=off --disable-version-check --quiet src scripts tests
 
-quality-strict: dead-code dependency-check architecture-check semgrep-check coverage
+quality-strict: dead-code dependency-check architecture-check semgrep-check coverage ## Run the strict optional quality gates
 
-typecheck:
+typecheck: ## Type-check with basedpyright
 	$(BASEDPYRIGHT) --warnings
 
-security:
+security: ## Run bandit security scan
 	$(BANDIT) -c pyproject.toml -r src tests scripts --severity-level all --confidence-level all
 
-security-audit:
+security-audit: ## Run bandit including nosec-suppressed findings
 	$(BANDIT) -c pyproject.toml -r src tests scripts --severity-level all --confidence-level all --ignore-nosec
 
-deps-audit:
+deps-audit: ## Audit Python dependencies with pip-audit
 	@set -eu; \
 	if ! command -v uv >/dev/null 2>&1; then \
 		echo "warning: uv not found; skipping dependency audit" >&2; \
@@ -108,28 +114,29 @@ deps-audit:
 		echo "warning: pip-audit not found; skipping dependency audit" >&2; \
 	fi
 
-doctor:
+doctor: ## Run pci-doctor diagnostics
 	./pci-doctor
 
-integration-smoke: compose-up
+integration-smoke: ## Bring up pgvector and run integration smoke test
+	$(DOCKER) compose up -d --wait --wait-timeout 60 pgvector
 	PYTHONPATH=$(PYTHONPATH) $(PYTHON) scripts/integration_smoke.py
 
-scan:
+scan: ## Index this repo into the local DB with pci-index
 	./pci-index .
 
-scan-dry-run:
+scan-dry-run: ## Preview indexing without writing to the DB
 	./pci-index . --dry-run
 
-mcp-smoke:
+mcp-smoke: ## Run pci-mcp-smoke end-to-end probes
 	./pci-mcp-smoke
 
-embedding-bench:
+embedding-bench: ## Run the embedding endpoint benchmark
 	./pci-embedding-bench
 
-amd-rocm-bundle:
+amd-rocm-bundle: ## Print the llama.cpp ROCm bundle selection for this GPU
 	$(PYTHON) scripts/select_llamacpp_rocm_bundle.py --format env
 
-compose-check:
+compose-check: ## Validate docker-compose.yml and bundled copy
 	@if ! diff -q docker-compose.yml src/project_code_intelligence/docker-compose.yml >/dev/null 2>&1; then \
 		echo "error: docker-compose.yml and src/project_code_intelligence/docker-compose.yml are out of sync" >&2; \
 		diff docker-compose.yml src/project_code_intelligence/docker-compose.yml >&2; \
@@ -141,23 +148,8 @@ compose-check:
 		echo "warning: no container engine (docker or podman) with compose support found; skipping compose validation" >&2; \
 	fi
 
-compose-up:
-	$(DOCKER) compose up -d --wait --wait-timeout 60 pgvector
-
-compose-cpu:
-	$(DOCKER) compose --profile cpu up -d --build
-
-compose-npu:
-	$(DOCKER) compose --profile npu up -d
-
-compose-amdgpu:
-	$(DOCKER) compose --profile amdgpu up -d --build
-
-compose-nvidia:
-	$(DOCKER) compose --profile nvidia up -d --build
-
-compose-down:
-	$(DOCKER) compose down
-
-tool-install:
+tool-install: ## Install or upgrade the pci-* binaries with uv
 	uv tool install . --reinstall
+
+tool-uninstall: ## Uninstall the pci-* binaries
+	-uv tool uninstall project-code-intelligence
