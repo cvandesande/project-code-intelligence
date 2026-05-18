@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -11,10 +13,12 @@ from unittest.mock import patch
 
 from project_code_intelligence import config
 from project_code_intelligence import db as pci_db
+from project_code_intelligence import server as mcp_server
 from project_code_intelligence.embedding.types import EmbeddingEndpointUnavailableError
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError, McpWritePermissionError
 from project_code_intelligence.mcp import db as mcp_db
 from project_code_intelligence.mcp import tools as mcp_tools
+from project_code_intelligence.mcp import transport as mcp_transport
 from project_code_intelligence.mcp.filters import (
     code_intel_clauses,
     json_argument,
@@ -529,17 +533,22 @@ class McpTextSearchExecutionTests(unittest.TestCase):
             _ = mcp_tools.tool_search_code_intel_text({"mode": "enumerate", "query": "hello"})
         self.assertIn("lists records by filters", str(ctx.exception))
 
-    def test_explicit_missing_snapshot_id_raises(self) -> None:
-        # First cursor responds to the existence probe with no row.
-        conn = QueuedConnection([FakeCursor(one=None)])
+    def test_explicit_missing_snapshot_id_emits_warning_not_error(self) -> None:
+        # First cursor responds to the snapshot existence probe with no row; the second is the
+        # main list query that returns no rows because the snapshot doesn't exist.
+        conn = QueuedConnection([FakeCursor(one=None), FakeCursor(many=[])])
         with (
             patch.dict(os.environ, {}, clear=True),
             patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
-            self.assertRaises(McpProtocolError) as ctx,
         ):
-            _ = mcp_tools.tool_list_code_intel_files({"snapshot_id": 9999})
-        self.assertIn("9999", str(ctx.exception))
+            response = mcp_tools.tool_list_code_intel_files({"snapshot_id": 9999})
+        payload = mcp_text_payload(response)
+        self.assertEqual(payload.get("files"), [])
+        warnings = cast("list[dict[str, object]]", payload.get("warnings", []))
+        snapshot_warnings = [w for w in warnings if w.get("kind") == "empty_snapshot_scope"]
+        self.assertEqual(len(snapshot_warnings), 1)
+        self.assertEqual(snapshot_warnings[0].get("snapshot_id"), 9999)
 
     def test_text_search_is_untracked_filter(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[])])
@@ -2049,6 +2058,54 @@ class McpStatusWarningTests(unittest.TestCase):
         self.assertEqual(warnings[0]["repo"], "missing-repo")
 
 
+class McpEnumScopeWarningTests(unittest.TestCase):
+    def test_text_search_unknown_language_emits_empty_language_scope(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[]), FakeCursor(one={"exists": 1})])
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_search_code_intel_text({"query": "needle", "language": "cobol"})
+        warnings = cast("list[dict[str, object]]", mcp_text_payload(response).get("warnings", []))
+        kinds = {w["kind"] for w in warnings}
+        self.assertIn("empty_language_scope", kinds)
+        language_warning = next(w for w in warnings if w["kind"] == "empty_language_scope")
+        self.assertEqual(language_warning["language"], "cobol")
+
+    def test_list_files_unknown_file_role_emits_empty_file_role_scope(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[]), FakeCursor(one={"exists": 1})])
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_list_code_intel_files({"file_role": "no_such_role"})
+        warnings = cast("list[dict[str, object]]", mcp_text_payload(response).get("warnings", []))
+        self.assertTrue(any(w["kind"] == "empty_file_role_scope" for w in warnings))
+
+    def test_text_search_inferred_enumerate_emits_mode_warning(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[]), FakeCursor(one={"exists": 1})])
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_tools, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools.mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            # No query, no explicit mode → silently falls through to enumerate; warning surfaces it.
+            response = mcp_tools.tool_search_code_intel_text({})
+        warnings = cast("list[dict[str, object]]", mcp_text_payload(response).get("warnings", []))
+        self.assertTrue(any(w["kind"] == "mode_inferred_enumerate" for w in warnings))
+
+    def test_related_code_intel_rejects_record_id_plus_symbol(self) -> None:
+        with self.assertRaises(McpProtocolError) as ctx:
+            _ = mcp_tools.tool_related_code_intel({"record_id": "foo::bar", "symbol": "baz"})
+        self.assertIn("exactly one of record_id or symbol", str(ctx.exception))
+
+    def test_get_code_intel_record_rejects_whitespace_record_id(self) -> None:
+        with self.assertRaises(McpProtocolTypeError):
+            _ = mcp_tools.tool_get_code_intel_record({"record_id": "   "})
+
+
 class McpParserFailureToolTests(unittest.TestCase):
     def test_parser_failures_empty_valid_repo_has_no_empty_repo_warning(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[]), FakeCursor(one={"exists": 1})])
@@ -2529,6 +2586,11 @@ class McpToolShapeTests(unittest.TestCase):
             FakeCursor(many=[]),
             FakeCursor(many=[]),
             FakeCursor(many=[]),
+            # verbose=True also pulls file dimensions (language / file_role / content_class) for
+            # the queryability section so empty_<dim>_scope warnings can point at valid values.
+            FakeCursor(many=[]),
+            FakeCursor(many=[]),
+            FakeCursor(many=[]),
         ])
 
         with (
@@ -2657,6 +2719,11 @@ class McpToolShapeTests(unittest.TestCase):
             FakeCursor(many=[]),
             FakeCursor(many=[]),
             FakeCursor(many=[{"edge_type": "call_candidate", "edges": 3}]),
+            # include_queryability=True triggers distinct-value lookups for the three file
+            # dimensions so empty_<dim>_scope warnings can point at concrete valid values.
+            FakeCursor(many=[{"value": "go"}, {"value": "python"}]),
+            FakeCursor(many=[{"value": "source"}, {"value": "test"}]),
+            FakeCursor(many=[{"value": "code"}]),
         ])
 
         with (
@@ -2679,6 +2746,9 @@ class McpToolShapeTests(unittest.TestCase):
                 "configured_embed_record_type_count": 3,
                 "empty_embed_record_type_count": 1,
                 "edge_type_count": 1,
+                "language_count": 2,
+                "file_role_count": 2,
+                "content_class_count": 1,
                 "has_text": True,
                 "has_semantic": True,
                 "has_edges": True,
@@ -2688,6 +2758,9 @@ class McpToolShapeTests(unittest.TestCase):
                 "configured_embed_record_types": ["code_chunk", "resource_object", "security_pattern"],
                 "empty_embed_record_types": ["resource_object"],
                 "edge_types": ["call_candidate"],
+                "languages": ["go", "python"],
+                "file_roles": ["source", "test"],
+                "content_classes": ["code"],
             },
         )
 
@@ -2904,6 +2977,76 @@ class McpToolShapeTests(unittest.TestCase):
         self.assertEqual(result["id"], 1)
         metadata = cast("dict[str, object]", result["metadata"])
         self.assertEqual(metadata["doc_links"], ["https://a", "https://b"])
+
+
+class McpServerEntryPointTests(unittest.TestCase):
+    def test_initialize_response_advertises_dynamic_server_version(self) -> None:
+        with patch("project_code_intelligence.mcp.transport.server_version", return_value="9.9.9+abcdef0"):
+            response = mcp_transport.control_response("initialize", "id-1")
+
+        if response is None:
+            raise AssertionError("expected initialize response")
+        result = cast("dict[str, object]", response["result"])
+        server_info = cast("dict[str, object]", result["serverInfo"])
+        self.assertEqual(server_info["version"], "9.9.9+abcdef0")
+        self.assertEqual(server_info["name"], "project-code-intelligence")
+
+    def test_server_version_appends_short_commit_when_available(self) -> None:
+        with (
+            patch.object(mcp_transport, "_git_short_commit", return_value="abc1234"),
+            patch.object(mcp_transport.importlib_metadata, "version", return_value="0.1.0"),
+        ):
+            self.assertEqual(mcp_transport.server_version(), "0.1.0+abc1234")
+
+    def test_server_version_omits_commit_when_unavailable(self) -> None:
+        with (
+            patch.object(mcp_transport, "_git_short_commit", return_value=None),
+            patch.object(mcp_transport.importlib_metadata, "version", return_value="0.1.0"),
+        ):
+            self.assertEqual(mcp_transport.server_version(), "0.1.0")
+
+    def test_pci_mcp_help_flag_exits_cleanly(self) -> None:
+        captured = io.StringIO()
+        with (
+            contextlib.redirect_stdout(captured),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            _ = mcp_server.main(["--help"])
+
+        # argparse exits 0 for --help / --version
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("pci-mcp", captured.getvalue())
+
+    def test_pci_mcp_version_flag_exits_cleanly(self) -> None:
+        captured = io.StringIO()
+        with (
+            patch("project_code_intelligence.server.server_version", return_value="0.1.0+abc1234"),
+            contextlib.redirect_stdout(captured),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            _ = mcp_server.main(["--version"])
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("0.1.0+abc1234", captured.getvalue())
+
+    def test_pci_mcp_rejects_unknown_arguments(self) -> None:
+        captured_err = io.StringIO()
+        with (
+            contextlib.redirect_stderr(captured_err),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            _ = mcp_server.main(["--bogus"])
+
+        # argparse exits 2 for usage errors
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--bogus", captured_err.getvalue())
+
+    def test_pci_mcp_without_args_runs_stdio_loop(self) -> None:
+        with patch("project_code_intelligence.server.stdio_main", return_value=0) as stdio_main:
+            exit_code = mcp_server.main([])
+
+        self.assertEqual(exit_code, 0)
+        stdio_main.assert_called_once_with()
 
 
 if __name__ == "__main__":

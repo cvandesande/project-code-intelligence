@@ -6,10 +6,11 @@ import json
 import os
 import sys
 import traceback
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from project_code_intelligence import config, db, progress
+from project_code_intelligence import config, db, process, progress
 from project_code_intelligence.common import default_collection
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError, McpWritePermissionError
 from project_code_intelligence.mcp.protocol import (
@@ -28,6 +29,42 @@ if TYPE_CHECKING:
     from project_code_intelligence.models import JsonObject, JsonValue
 
 PROTOCOL_VERSION = "2024-11-05"
+
+
+def _git_short_commit() -> str | None:
+    """Best-effort short commit lookup for editable installs / source checkouts.
+
+    Returns None when git isn't available or this isn't a checkout (e.g. wheel install).
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    try:
+        result = process.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--short", "HEAD"],
+            process.RunOptions(capture_output=True, timeout=2.0),
+        )
+    except (OSError, process.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    commit = result.stdout.strip()
+    return commit or None
+
+
+def server_version() -> str:
+    """Return version + short commit hash when available.
+
+    Format: "<version>+<commit>" if commit is available (PEP 440 local segment),
+    otherwise just "<version>". Pre-1.0 the commit is the most useful identifier;
+    it's surfaced in --version and in the MCP initialize serverInfo.version.
+    """
+    try:
+        base = importlib_metadata.version("project-code-intelligence")
+    except importlib_metadata.PackageNotFoundError:
+        base = "unknown"
+    commit = _git_short_commit()
+    if commit is None:
+        return base
+    return f"{base}+{commit}"
 
 
 def set_mcp_environment_defaults() -> None:
@@ -52,7 +89,7 @@ def control_response(method: object, request_id: JsonValue) -> Json | None:
                 "capabilities": {"tools": {}},
                 "serverInfo": {
                     "name": "project-code-intelligence",
-                    "version": "0.1.0",
+                    "version": server_version(),
                 },
             },
         )

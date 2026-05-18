@@ -687,6 +687,17 @@ def repo_scope_exists(conn: db.DbConnection, args: Json) -> bool | None:
     )
 
 
+def _attach_warnings(response: dict[str, object], warnings: Sequence[Json]) -> None:
+    """Set response['warnings'] when warnings is non-empty.
+
+    Centralizes the conditional-assign pattern that several tools repeat, and keeps the
+    `warnings` list out of the caller's local-variable count (matters because some handlers
+    are right at PLR0914's threshold).
+    """
+    if warnings:
+        response["warnings"] = cast("JsonValue", list(warnings))
+
+
 def _empty_repo_scope_warning(repo: str) -> Json:
     return {
         "kind": "empty_repo_scope",
@@ -695,7 +706,40 @@ def _empty_repo_scope_warning(repo: str) -> Json:
     }
 
 
-def _scope_filter_warnings(args: Json, rows: Sequence[object], *, repo_exists: bool | None = None) -> list[Json]:
+# Enum-ish filter dimensions for which we emit `empty_<dim>_scope` warnings when a value is
+# supplied but no rows match. Snapshot_id has its own warning shape (it's numeric, not enum).
+_ENUM_FILTER_DIMENSIONS: tuple[str, ...] = ("language", "file_role", "record_type", "content_class")
+
+
+def _empty_enum_scope_warning(dimension: str, value: str) -> Json:
+    return {
+        "kind": f"empty_{dimension}_scope",
+        dimension: value,
+        "message": (
+            f"no results matched the {dimension}={value!r} filter; run code_intel_status with "
+            f"include_queryability=true to see valid {dimension} values in this index"
+        ),
+    }
+
+
+def _empty_snapshot_scope_warning(snapshot_id: int) -> Json:
+    return {
+        "kind": "empty_snapshot_scope",
+        "snapshot_id": snapshot_id,
+        "message": (
+            f"snapshot_id={snapshot_id} does not exist in this index; "
+            "run code_intel_status with include_snapshots=true to see valid snapshot ids"
+        ),
+    }
+
+
+def _scope_filter_warnings(
+    args: Json,
+    rows: Sequence[object],
+    *,
+    repo_exists: bool | None = None,
+    missing_snapshot_warning: Json | None = None,
+) -> list[Json]:
     warnings: list[Json] = []
     source_path = optional_text(args, "source_path")
     source_path_prefix = optional_text(args, "source_path_prefix")
@@ -710,6 +754,12 @@ def _scope_filter_warnings(args: Json, rows: Sequence[object], *, repo_exists: b
         return warnings
     if repo and repo_exists is False:
         warnings.append(_empty_repo_scope_warning(repo))
+    if missing_snapshot_warning is not None:
+        warnings.append(missing_snapshot_warning)
+    for dimension in _ENUM_FILTER_DIMENSIONS:
+        value = optional_text(args, dimension)
+        if value:
+            warnings.append(_empty_enum_scope_warning(dimension, value))
     if source_path or source_path_prefix:
         warning: Json = {
             "kind": "empty_path_scope",
@@ -1095,17 +1145,24 @@ def code_intel_tables_exist(conn: db.DbConnection) -> bool:
     return mcp_db.code_intel_tables_exist(conn)
 
 
-def validate_explicit_snapshot_id(conn: db.DbConnection, args: Json) -> None:
-    """When snapshot_id is explicitly set, fail loudly if it doesn't exist."""
+def snapshot_scope_warning(conn: db.DbConnection, args: Json) -> Json | None:
+    """Return `empty_snapshot_scope` warning when an explicit snapshot_id doesn't exist.
+
+    Replaces the older "raise on unknown snapshot" pattern so unknown snapshots surface as a
+    structured warning (parallel to `empty_repo_scope`) rather than a JSON-RPC error. This
+    unifies "unknown scope" UX across repo, snapshot_id, and the enum-ish filter dimensions.
+    Returns None when snapshot_id wasn't supplied, or when it was and the snapshot exists.
+    """
     snapshot_id = optional_int(args, "snapshot_id")
     if snapshot_id is None:
-        return
+        return None
     row = conn.execute(
         "SELECT 1 FROM project_code_intel_snapshots WHERE id = %s",
         [snapshot_id],
     ).fetchone()
-    if row is None:
-        raise McpProtocolError(f"snapshot_id {snapshot_id} does not exist")
+    if row is not None:
+        return None
+    return _empty_snapshot_scope_warning(snapshot_id)
 
 
 def table_regclass_exists(conn: db.DbConnection, table: str) -> bool:
@@ -1320,11 +1377,45 @@ def _status_repo_not_found(args: Json, rows: StatusRows) -> bool:
     )
 
 
-def _status_scope_warnings(args: Json, rows: StatusRows) -> list[Json]:
+def _status_scope_warnings(args: Json, rows: StatusRows, *, missing_snapshot_warning: Json | None = None) -> list[Json]:
+    warnings: list[Json] = []
     repo = optional_text(args, "repo")
     if repo and _status_repo_not_found(args, rows):
-        return [_empty_repo_scope_warning(repo)]
-    return []
+        warnings.append(_empty_repo_scope_warning(repo))
+    if missing_snapshot_warning is not None:
+        warnings.append(missing_snapshot_warning)
+    return warnings
+
+
+# Precomputed SELECT + IS-NOT-NULL fragments keyed by the file column we're enumerating.
+# Stored as literals so we never interpolate the column name into a SQL string at runtime; this
+# keeps Bandit / ruff S608 happy (the lints don't trust f-strings even when the input is bounded).
+_FILE_DIMENSION_SELECTS: dict[str, str] = {
+    "language": "SELECT DISTINCT f.language AS value FROM project_code_intel_files f",
+    "file_role": "SELECT DISTINCT f.file_role AS value FROM project_code_intel_files f",
+    "content_class": "SELECT DISTINCT f.content_class AS value FROM project_code_intel_files f",
+}
+_FILE_DIMENSION_NONEMPTY_CLAUSES: dict[str, tuple[str, str]] = {
+    "language": ("f.language IS NOT NULL", "f.language <> ''"),
+    "file_role": ("f.file_role IS NOT NULL", "f.file_role <> ''"),
+    "content_class": ("f.content_class IS NOT NULL", "f.content_class <> ''"),
+}
+
+
+def _status_file_dimensions(conn: db.DbConnection, filters: StatusFilters) -> dict[str, list[str]]:
+    """Return sorted distinct values for the enum-ish file columns the queryability section exposes.
+
+    Used by the empty_<dim>_scope warnings to point callers at the authoritative valid-value list.
+    """
+    out: dict[str, list[str]] = {}
+    for column_name, select in _FILE_DIMENSION_SELECTS.items():
+        extra_clauses = [*filters.files.clauses, *_FILE_DIMENSION_NONEMPTY_CLAUSES[column_name]]
+        rows = conn.execute(
+            db.query_sql(query_with_where(select, extra_clauses, "ORDER BY value")),
+            filters.files.params,
+        ).fetchall()
+        out[column_name] = [str(row["value"]) for row in rows]
+    return out
 
 
 def _status_file_breakdowns(
@@ -1408,6 +1499,7 @@ def _status_queryability(
     snapshots: list[Json],
     records_by_type: list[db.DbRow],
     edges_by_type: list[db.DbRow],
+    file_dimensions: dict[str, list[str]] | None,
     *,
     include_details: bool,
 ) -> Json:
@@ -1437,6 +1529,17 @@ def _status_queryability(
         "has_semantic": bool(semantic_record_types),
         "has_edges": bool(edge_types),
     }
+    if file_dimensions is not None:
+        languages = list(file_dimensions.get("language", []))
+        file_roles = list(file_dimensions.get("file_role", []))
+        content_classes = list(file_dimensions.get("content_class", []))
+        queryability.update({
+            "language_count": len(languages),
+            "file_role_count": len(file_roles),
+            "content_class_count": len(content_classes),
+        })
+    else:
+        languages, file_roles, content_classes = [], [], []
     if include_details:
         queryability.update({
             "text_record_types": text_record_types,
@@ -1446,6 +1549,12 @@ def _status_queryability(
             "empty_embed_record_types": empty_embed_record_types,
             "edge_types": edge_types,
         })
+        if file_dimensions is not None:
+            queryability.update({
+                "languages": languages,
+                "file_roles": file_roles,
+                "content_classes": content_classes,
+            })
     return queryability
 
 
@@ -1471,6 +1580,7 @@ class StatusRows:
     edge_types: list[db.DbRow]
     breakdowns: dict[str, list[db.DbRow]] | None
     static_rows: tuple[list[db.DbRow], list[db.DbRow]] | None
+    file_dimensions: dict[str, list[str]] | None = None
 
 
 def _status_include_flags(args: Json) -> StatusIncludeFlags:
@@ -1681,6 +1791,7 @@ def _load_status_rows(
         edge_types=edge_types,
         breakdowns=_status_file_breakdowns(conn, filters, directory_depth) if includes.breakdowns else None,
         static_rows=static_status_rows(conn, filters) if includes.static_summary else None,
+        file_dimensions=_status_file_dimensions(conn, filters) if includes.queryability else None,
     )
 
 
@@ -1697,12 +1808,13 @@ def tool_code_intel_status(args: Json) -> Json:
             if includes.runtime:
                 missing_schema_response["runtime"] = server_runtime_identity()
             return ok(missing_schema_response)
-        validate_explicit_snapshot_id(conn, args)
+        missing_snapshot_warning = snapshot_scope_warning(conn, args)
         rows = _load_status_rows(conn, filters, includes, directory_depth)
     queryability = _status_queryability(
         rows.snapshots,
         rows.records_by_type,
         rows.edge_types,
+        rows.file_dimensions,
         include_details=includes.queryability,
     )
     full_snapshots = includes.snapshots and includes.verbose
@@ -1757,12 +1869,13 @@ def tool_code_intel_status(args: Json) -> Json:
         response["runtime"] = server_runtime_identity()
     if _status_repo_not_found(args, rows):
         response["found"] = False
-    warnings = [
-        *_status_snapshot_warnings(rows.snapshots),
-        *_status_scope_warnings(args, rows),
-    ]
-    if warnings:
-        response["warnings"] = warnings
+    _attach_warnings(
+        response,
+        [
+            *_status_snapshot_warnings(rows.snapshots),
+            *_status_scope_warnings(args, rows, missing_snapshot_warning=missing_snapshot_warning),
+        ],
+    )
     return ok(response)
 
 
@@ -1803,7 +1916,13 @@ def _execute_text_search(
     return rows, strategy, fallback_reason
 
 
-def _text_search_warnings(query: str | None, strategy: SearchQueryStrategy, fallback_reason: str | None) -> list[Json]:
+def _text_search_warnings(
+    query: str | None,
+    strategy: SearchQueryStrategy,
+    fallback_reason: str | None,
+    args: Json,
+    mode: SearchMode,
+) -> list[Json]:
     warnings: list[Json] = []
     if query and REGEX_LIKE_QUERY_RE.search(query):
         warnings.append({
@@ -1819,6 +1938,17 @@ def _text_search_warnings(query: str | None, strategy: SearchQueryStrategy, fall
         if fallback_reason:
             warning["fallback_reason"] = fallback_reason
         warnings.append(warning)
+    # Surface the silent search→enumerate switch: when mode is omitted and the query is empty,
+    # search_mode() falls through to "enumerate" so the tool browses records by filter. That's
+    # useful for ad hoc enumeration, but easy to hit by mistake when an LLM forgets to set query.
+    if not query and mode == "enumerate" and optional_text(args, "mode") is None:
+        warnings.append({
+            "kind": "mode_inferred_enumerate",
+            "message": (
+                "no query was supplied, so this call enumerated records matching the supplied filters "
+                "instead of searching. Set mode=search with a non-empty query for ranked text search."
+            ),
+        })
     return warnings
 
 
@@ -2047,10 +2177,11 @@ def tool_search_code_intel_text(args: Json) -> Json:
     limit = require_int(args, "limit", 10, 1, 50)
     snippet_length = require_int(args, "snippet_length", DEFAULT_SNIPPET_LENGTH, 1, 800)
     repo_exists: bool | None = None
+    missing_snapshot_warning: Json | None = None
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
-        validate_explicit_snapshot_id(conn, args)
+        missing_snapshot_warning = snapshot_scope_warning(conn, args)
         rows, strategy, fallback_reason = _execute_text_search(conn, args, terms, limit)
         if not rows:
             repo_exists = repo_scope_exists(conn, args)
@@ -2076,8 +2207,8 @@ def tool_search_code_intel_text(args: Json) -> Json:
     if fallback_reason:
         response["fallback_reason"] = fallback_reason
     warnings = [
-        *_text_search_warnings(query, strategy, fallback_reason),
-        *_scope_filter_warnings(args, rows, repo_exists=repo_exists),
+        *_text_search_warnings(query, strategy, fallback_reason, args, mode),
+        *_scope_filter_warnings(args, rows, repo_exists=repo_exists, missing_snapshot_warning=missing_snapshot_warning),
     ]
     if warnings:
         response["warnings"] = warnings
@@ -2159,15 +2290,18 @@ def semantic_filter_queryability_response(args: Json, query: str) -> Json | None
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return {"error": "code intelligence schema is not initialized"}
-        validate_explicit_snapshot_id(conn, args)
+        missing_snapshot_warning = snapshot_scope_warning(conn, args)
         warning = semantic_filter_queryability_warning(conn, args)
     if not warning:
         return None
+    warnings: list[Json] = [warning]
+    if missing_snapshot_warning is not None:
+        warnings.append(missing_snapshot_warning)
     return {
         "query": query,
         **snapshot_scope_response(args),
         "results": [],
-        "warnings": [warning],
+        "warnings": warnings,
     }
 
 
@@ -2198,10 +2332,11 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
         limit_plan.sql,
     ]
     repo_exists: bool | None = None
+    missing_snapshot_warning: Json | None = None
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
-        validate_explicit_snapshot_id(conn, args)
+        missing_snapshot_warning = snapshot_scope_warning(conn, args)
         rows = conn.execute(
             db.query_sql(
                 query_with_where(
@@ -2306,9 +2441,10 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
             _format_records(rows, verbose=verbose, snippet_length=snippet_length, snippet_terms=lexical_terms),
         ),
     }
-    warnings = _scope_filter_warnings(args, rows, repo_exists=repo_exists)
-    if warnings:
-        response["warnings"] = warnings
+    _attach_warnings(
+        response,
+        _scope_filter_warnings(args, rows, repo_exists=repo_exists, missing_snapshot_warning=missing_snapshot_warning),
+    )
     return ok(response)
 
 
@@ -2363,7 +2499,10 @@ def _get_record_ids_arg(args: Json) -> tuple[list[str], bool]:
     if record_id is not None and record_ids is not None:
         raise McpProtocolError("provide exactly one of record_id or record_ids")
     if record_id is not None:
-        if not isinstance(record_id, str) or not record_id:
+        # Use .strip() in the non-empty check so whitespace-only strings (e.g. "   ") are rejected
+        # here instead of silently falling through to a {found: false} miss. Pydantic's min_length
+        # constraint passes whitespace because it measures raw length.
+        if not isinstance(record_id, str) or not record_id.strip():
             raise McpProtocolTypeError("record_id must be a non-empty string")
         return [record_id], False
     if record_ids is None:
@@ -2372,7 +2511,7 @@ def _get_record_ids_arg(args: Json) -> tuple[list[str], bool]:
         raise McpProtocolTypeError("record_ids must be a non-empty list of strings")
     out: list[str] = []
     for item in cast("list[object]", record_ids):
-        if not isinstance(item, str) or not item:
+        if not isinstance(item, str) or not item.strip():
             raise McpProtocolTypeError("record_ids entries must be non-empty strings")
         out.append(item)
     return out, True
@@ -2399,6 +2538,26 @@ def _build_record_lookup(args: Json, ids: list[str], *, batch: bool, include_con
     return query_sql, params
 
 
+def _format_record_batch_response(
+    rows: Sequence[db.DbRow],
+    ids: Sequence[str],
+    *,
+    verbose: bool,
+    include_metadata: bool | None,
+    missing_snapshot_warning: Json | None,
+) -> Json:
+    rows_by_record_id = {str(row["record_id"]): row for row in rows}
+    ordered = (rows_by_record_id[rid] for rid in ids if rid in rows_by_record_id)
+    formatted = [dict(row) if verbose else _compact_record(row, include_metadata=include_metadata) for row in ordered]
+    response: dict[str, object] = {"results": cast("JsonValue", formatted)}
+    missing = [rid for rid in ids if rid not in rows_by_record_id]
+    if missing:
+        response["missing"] = missing
+    if missing_snapshot_warning is not None:
+        response["warnings"] = [missing_snapshot_warning]
+    return response
+
+
 def tool_get_code_intel_record(args: Json) -> Json:
     ids, batch = _get_record_ids_arg(args)
     include_content = optional_bool(args, "include_content")
@@ -2408,24 +2567,26 @@ def tool_get_code_intel_record(args: Json) -> Json:
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
-        validate_explicit_snapshot_id(conn, args)
+        missing_snapshot_warning = snapshot_scope_warning(conn, args)
         cursor = conn.execute(db.query_sql(query_sql), params)
         if not batch:
             row = cursor.fetchone()
             if row is None:
-                return ok({"found": False})
+                response: Json = {"found": False}
+                if missing_snapshot_warning is not None:
+                    response["warnings"] = [missing_snapshot_warning]
+                return ok(response)
             return ok({"result": dict(row) if verbose else _compact_record(row, include_metadata=include_metadata)})
         rows = cursor.fetchall()
-    rows_by_record_id = {str(row["record_id"]): row for row in rows}
-    ordered_rows = [rows_by_record_id[rid] for rid in ids if rid in rows_by_record_id]
-    formatted = [
-        dict(row) if verbose else _compact_record(row, include_metadata=include_metadata) for row in ordered_rows
-    ]
-    missing = [rid for rid in ids if rid not in rows_by_record_id]
-    response: Json = {"results": cast("JsonValue", formatted)}
-    if missing:
-        response["missing"] = missing
-    return ok(response)
+    return ok(
+        _format_record_batch_response(
+            rows,
+            ids,
+            verbose=verbose,
+            include_metadata=include_metadata,
+            missing_snapshot_warning=missing_snapshot_warning,
+        )
+    )
 
 
 def tool_related_code_intel(args: Json) -> Json:
@@ -2433,13 +2594,17 @@ def tool_related_code_intel(args: Json) -> Json:
     symbol = optional_text(args, "symbol")
     if not record_id and not symbol:
         raise McpProtocolError("record_id or symbol is required")
+    if record_id and symbol:
+        # Match the source_path / source_path_prefix mutex pattern: reject ambiguity rather than
+        # silently picking record_id (the historical behavior, which made symbol look ignored).
+        raise McpProtocolError("provide exactly one of record_id or symbol")
     direction = related_direction(args)
     clauses, params = related_base_edge_filters(args, direction)
 
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
-        validate_explicit_snapshot_id(conn, args)
+        missing_snapshot_warning = snapshot_scope_warning(conn, args)
         parent_record_ids: set[str] = set()
         scoped_record_ids: list[str] = []
         if record_id:
@@ -2454,7 +2619,8 @@ def tool_related_code_intel(args: Json) -> Json:
                             "kind": "record_not_found",
                             "record_id": record_id,
                             "message": "record_id was not found in the selected code intelligence scope",
-                        }
+                        },
+                        *([missing_snapshot_warning] if missing_snapshot_warning is not None else []),
                     ],
                 })
             clauses.append(related_record_clause(direction))
@@ -2500,24 +2666,27 @@ def tool_related_code_intel(args: Json) -> Json:
             params,
         ).fetchall()
     verbose = optional_bool(args, "verbose") or False
-    related_context = RelatedQueryContext(
-        record_id=record_id,
-        symbol=symbol,
-        direction=direction,
-        scoped_record_ids=tuple(scoped_record_ids),
-        parent_record_ids=frozenset(parent_record_ids),
-    )
     annotated_edges = annotate_related_edges(
         edges,
-        context=related_context,
+        context=RelatedQueryContext(
+            record_id=record_id,
+            symbol=symbol,
+            direction=direction,
+            scoped_record_ids=tuple(scoped_record_ids),
+            parent_record_ids=frozenset(parent_record_ids),
+        ),
     )
     response: Json = {
         **snapshot_scope_response(args),
         "edges": cast("JsonValue", _format_edges(annotated_edges, verbose=verbose)),
     }
-    response["warnings"] = _related_edge_warnings(annotated_edges)
-    if not response["warnings"]:
-        del response["warnings"]
+    _attach_warnings(
+        response,
+        [
+            *_related_edge_warnings(annotated_edges),
+            *([missing_snapshot_warning] if missing_snapshot_warning is not None else []),
+        ],
+    )
     return ok(response)
 
 
@@ -2565,10 +2734,11 @@ def tool_search_static_findings(args: Json) -> Json:
     params.append(limit)
     repo_exists: bool | None = None
     static_runs_found: bool | None = None
+    missing_snapshot_warning: Json | None = None
     with mcp_db.connect() as conn:
         if not table_regclass_exists(conn, "project_code_intel_static_findings"):
             return ok({"error": "static-analysis schema is not initialized"})
-        validate_explicit_snapshot_id(conn, args)
+        missing_snapshot_warning = snapshot_scope_warning(conn, args)
         rows = conn.execute(
             db.query_sql(
                 query_with_where(
@@ -2598,7 +2768,9 @@ def tool_search_static_findings(args: Json) -> Json:
     response: Json = {**snapshot_scope_response(args), "results": cast("JsonValue", rows)}
     if static_runs_found is not None:
         response["static_runs_found"] = static_runs_found
-    warnings = _scope_filter_warnings(args, rows, repo_exists=repo_exists)
+    warnings = _scope_filter_warnings(
+        args, rows, repo_exists=repo_exists, missing_snapshot_warning=missing_snapshot_warning
+    )
     if static_runs_found is False:
         warnings.append({
             "kind": "static_analysis_not_run",
@@ -3106,10 +3278,11 @@ def tool_list_code_intel_files(args: Json) -> Json:
     query_params = [sorted(SOURCE_LANGUAGES), *params, limit]
 
     repo_exists: bool | None = None
+    missing_snapshot_warning: Json | None = None
     with mcp_db.connect() as conn:
         if not code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
-        validate_explicit_snapshot_id(conn, args)
+        missing_snapshot_warning = snapshot_scope_warning(conn, args)
         rows = conn.execute(
             db.query_sql(
                 query_with_where(
@@ -3127,7 +3300,9 @@ def tool_list_code_intel_files(args: Json) -> Json:
             repo_exists = repo_scope_exists(conn, args)
     files: list[object] = list(rows) if verbose else [_compact_file(row) for row in rows]
     response: Json = {**snapshot_scope_response(args), "files": cast("JsonValue", files)}
-    warnings = _scope_filter_warnings(args, rows, repo_exists=repo_exists)
+    warnings = _scope_filter_warnings(
+        args, rows, repo_exists=repo_exists, missing_snapshot_warning=missing_snapshot_warning
+    )
     false_filter_warning = _overconstrained_boolean_filter_warning(args, rows)
     if false_filter_warning:
         warnings.append(false_filter_warning)
@@ -3150,10 +3325,11 @@ def tool_list_code_intel_parser_failures(args: Json) -> Json:
     params.append(limit)
 
     repo_exists: bool | None = None
+    missing_snapshot_warning: Json | None = None
     with mcp_db.connect() as conn:
         if not table_regclass_exists(conn, "project_code_intel_parser_failures"):
             return ok({"error": "code intelligence schema is not initialized"})
-        validate_explicit_snapshot_id(conn, args)
+        missing_snapshot_warning = snapshot_scope_warning(conn, args)
         rows = conn.execute(
             db.query_sql(
                 query_with_where(
@@ -3175,7 +3351,9 @@ def tool_list_code_intel_parser_failures(args: Json) -> Json:
         if not rows:
             repo_exists = repo_scope_exists(conn, args)
     response: Json = {**snapshot_scope_response(args), "parser_failures": cast("JsonValue", rows)}
-    warnings = _scope_filter_warnings(args, rows, repo_exists=repo_exists)
+    warnings = _scope_filter_warnings(
+        args, rows, repo_exists=repo_exists, missing_snapshot_warning=missing_snapshot_warning
+    )
     if warnings:
         response["warnings"] = warnings
     return ok(response)
