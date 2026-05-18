@@ -177,8 +177,9 @@ def parser() -> argparse.ArgumentParser:
         "--init-postgres",
         action="store_true",
         help=(
-            "Create/update the PostgreSQL role pci-index uses to initialize project databases. "
-            "Requires PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_* credentials."
+            "Bootstrap a remote PostgreSQL: create/update the role pci-index uses to initialize "
+            "project databases and install pgvector into template1. Not needed for the bundled local "
+            "container at 127.0.0.1. Requires PROJECT_CODE_INTELLIGENCE_POSTGRES_ADMIN_* credentials."
         ),
     )
     _ = argument_parser.add_argument(

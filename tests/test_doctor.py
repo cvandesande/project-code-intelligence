@@ -255,8 +255,11 @@ class DoctorTests(unittest.TestCase):
         self.assertNotIn("nvidia: docker compose --profile nvidia", output)
         self.assertNotIn("card=card0", output)
 
-    def test_format_summary_suggests_database_initialization_for_db_issues(self) -> None:
-        with patch("project_code_intelligence.process.container_engine_name", return_value="docker"):
+    def test_format_summary_suggests_local_steps_for_loopback_db_target(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("project_code_intelligence.process.container_engine_name", return_value="docker"),
+        ):
             output = format_summary(
                 [
                     CheckResult("platform", "ok", "Python 3.13 on Linux"),
@@ -267,11 +270,37 @@ class DoctorTests(unittest.TestCase):
 
         self.assertIn("Start a local database", output)
         self.assertIn("docker compose up -d pgvector", output)
-        self.assertIn("Prepare Postgres roles", output)
-        self.assertIn("pci-doctor --init-postgres", output)
         self.assertIn("Index a repo and bootstrap its inferred database", output)
+        self.assertIn("Use a remote Postgres instead", output)
+        self.assertNotIn("Bootstrap a remote Postgres", output)
+        self.assertNotIn("pci-doctor --init-postgres", output)
+        self.assertNotIn("Prepare Postgres roles", output)
         self.assertNotIn("Prepare inferred DB roles", output)
         self.assertNotIn("pci-doctor --init-db", output)
+
+    def test_format_summary_suggests_init_postgres_for_remote_db_target(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {"PROJECT_CODE_INTELLIGENCE_DATABASE_URL": "postgresql://db.example.invalid:5432/codeintel"},
+                clear=True,
+            ),
+            patch("project_code_intelligence.process.container_engine_name", return_value="docker"),
+        ):
+            output = format_summary(
+                [
+                    CheckResult("platform", "ok", "Python 3.13 on Linux"),
+                    CheckResult("database", "fail", "Could not connect to PostgreSQL/pgvector."),
+                ],
+                color=False,
+            )
+
+        self.assertIn("Bootstrap a remote Postgres", output)
+        self.assertIn("pci-doctor --init-postgres", output)
+        self.assertIn("Index a repo and bootstrap its inferred database", output)
+        self.assertNotIn("Start a local database", output)
+        self.assertNotIn("docker compose up -d pgvector", output)
+        self.assertNotIn("Use a remote Postgres instead", output)
 
     def test_format_summary_keeps_gpu_memory_summary_compact(self) -> None:
         output = format_summary(

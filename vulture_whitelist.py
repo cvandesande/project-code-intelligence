@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from http.client import HTTPResponse
 
+from project_code_intelligence.code_profiles.openwrt import OpenWrtProfile
 from typing_extensions import LiteralString
 
-from project_code_intelligence.code_profiles.openwrt import OpenWrtProfile
 from project_code_intelligence.db import AutocommitConnect
 from project_code_intelligence.embedding import apple_embed_server as _apple_embed_server
 
