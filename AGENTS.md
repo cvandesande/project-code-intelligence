@@ -60,6 +60,15 @@ lives in Postgres/pgvector.
     MCP responses or input validation change.
   - `schema.sql` — Postgres schema; treat migrations as compatibility
     events.
+- Pattern matching (`match`): use where it does structural work — nested
+  dict destructuring (e.g. `case {"k": {"inner": str() as x}}:`),
+  closed-union or AST type dispatch, exception `isinstance` alternation,
+  type-coercion chains where bool-before-int ordering matters. Skip
+  single-shot `if isinstance(x, T) and <cond>: <use>` guards: basedpyright
+  strict requires `case _: pass`, so the rewrite is strictly longer with
+  no clarity gain. Always use class patterns with `()` (`bool()`, `str()`,
+  `dict()`) — bare names bind, they don't compare to outer scope. For
+  constants in patterns, use dotted names or `if` guards.
 - Don't weaken any of the checks `make check` runs. Fix the underlying
   issue, or narrowly justify a documented exception.
 
