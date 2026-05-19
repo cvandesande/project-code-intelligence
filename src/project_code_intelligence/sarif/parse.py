@@ -45,31 +45,31 @@ def sarif_description_text(value: object) -> str | None:
 
 
 def sarif_region(location: JsonObject) -> JsonObject:
-    physical = location.get("physicalLocation")
-    if not isinstance(physical, dict):
-        return {}
-    region = physical.get("region")
-    return json_object(region)
+    match location:
+        case {"physicalLocation": {"region": dict() as region}}:
+            return region
+        case _:
+            return {}
 
 
 def sarif_int(value: object) -> int | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.isdigit():
-        return int(value)
-    return None
+    match value:
+        case bool() | None:
+            return None
+        case int():
+            return value
+        case str() as text if text.isdigit():
+            return int(text)
+        case _:
+            return None
 
 
 def sarif_artifact_location(location: JsonObject) -> JsonObject:
-    physical = location.get("physicalLocation")
-    if not isinstance(physical, dict):
-        return {}
-    artifact = physical.get("artifactLocation")
-    if not isinstance(artifact, dict):
-        return {}
-    return json_object(artifact)
+    match location:
+        case {"physicalLocation": {"artifactLocation": dict() as artifact}}:
+            return artifact
+        case _:
+            return {}
 
 
 def sarif_artifact_uri(location: JsonObject) -> str | None:
@@ -90,11 +90,11 @@ def sarif_original_uri_base_ids(run: JsonObject) -> dict[str, str]:
         return {}
     out: dict[str, str] = {}
     for key, value in raw.items():
-        if not isinstance(value, dict):
-            continue
-        uri = value.get("uri")
-        if uri:
-            out[str(key)] = str(uri)
+        match value:
+            case {"uri": uri} if uri:
+                out[str(key)] = str(uri)
+            case _:
+                pass
     return out
 
 
@@ -173,10 +173,11 @@ def sarif_tool_metadata(run: JsonObject) -> SarifToolMetadata:
 
 
 def sarif_automation_id(run: JsonObject) -> str | None:
-    automation = run.get("automationDetails")
-    if isinstance(automation, dict) and automation.get("id"):
-        return str(automation["id"])
-    return None
+    match run:
+        case {"automationDetails": {"id": id_value}} if id_value:
+            return str(id_value)
+        case _:
+            return None
 
 
 def sarif_finding_key(result: JsonObject, run_index: int, result_index: int) -> str:

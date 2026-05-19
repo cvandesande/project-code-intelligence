@@ -310,13 +310,15 @@ class CliNamespace(argparse.Namespace):
 
 def json_int(obj: JsonObject, key: str) -> int:
     value = obj.get(key)
-    if isinstance(value, bool):
-        raise TypeError(f"{key} is not an integer")
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.isdigit():
-        return int(value)
-    raise TypeError(f"{key} is not an integer")
+    match value:
+        case bool():
+            raise TypeError(f"{key} is not an integer")
+        case int():
+            return value
+        case str() if value.isdigit():
+            return int(value)
+        case _:
+            raise TypeError(f"{key} is not an integer")
 
 
 @dataclass(frozen=True)
@@ -1596,10 +1598,11 @@ def sarif_provenance_revision_ids(run_metadata: JsonObject) -> list[str]:
         return []
     revisions: list[str] = []
     for item in provenance:
-        if isinstance(item, dict):
-            revision = item.get("revisionId")
-            if isinstance(revision, str) and revision:
+        match item:
+            case {"revisionId": str() as revision} if revision:
                 revisions.append(revision)
+            case _:
+                pass
     return sorted(set(revisions))
 
 

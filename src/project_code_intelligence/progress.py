@@ -341,12 +341,11 @@ class RichEmitter:
         if label is not None:
             return "running", label
         metrics = runtime_state.active_metrics.snapshot()
-        progress = metrics.get("progress", {})
-        if isinstance(progress, dict):
-            phase = progress.get("phase")
-            if isinstance(phase, str):
+        match metrics.get("progress", {}):
+            case {"phase": str() as phase}:
                 return "running", PHASE_LABELS.get(phase, phase.upper())
-        return "running", "STARTING"
+            case _:
+                return "running", "STARTING"
 
     def live_title_text(self) -> str:
         if len(self.repos) > 1:
@@ -632,14 +631,14 @@ def _summary_status(report: JsonObject) -> tuple[console_ui.PillKind, str]:
 
 def _summary_header(report: JsonObject) -> Table:
     status, label = _summary_status(report)
-    repos_value = report.get("repos")
-    if isinstance(repos_value, list) and repos_value:
-        repos_text = ", ".join(str(item) for item in repos_value)
-        title = f"pci-index {repos_text}"
-    elif isinstance(repos_value, str):
-        title = f"pci-index {repos_value}"
-    else:
-        title = "pci-index"
+    match report.get("repos"):
+        case list() as repos_value if repos_value:
+            repos_text = ", ".join(str(item) for item in repos_value)
+            title = f"pci-index {repos_text}"
+        case str() as repos_value:
+            title = f"pci-index {repos_value}"
+        case _:
+            title = "pci-index"
     return console_ui.header_row(title, status, label)
 
 
@@ -747,10 +746,11 @@ def _sarif_warning_counts(report: JsonObject) -> tuple[int, int]:
     warn_count = 0
     note_count = 0
     for item in warnings:
-        if isinstance(item, dict) and item.get("severity") == "warn":
-            warn_count += 1
-        else:
-            note_count += 1
+        match item:
+            case {"severity": "warn"}:
+                warn_count += 1
+            case _:
+                note_count += 1
     return warn_count, note_count
 
 

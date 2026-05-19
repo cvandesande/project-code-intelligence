@@ -216,11 +216,11 @@ def _probe_detail(probe: dict[str, object], tool: str) -> str:
         error = probe.get("error")
         if isinstance(error, str):
             return error
-        response = _as_dict(probe.get("response"))
-        if response is not None:
-            inner = response.get("error")
-            if isinstance(inner, str):
+        match probe.get("response"):
+            case {"error": str() as inner}:
                 return inner
+            case _:
+                pass
         return "failed"
     payload = _extract_payload(probe.get("response"))
     if payload is None:
@@ -259,11 +259,11 @@ def render_status(response: object, *, repo: str, probes: list[dict[str, object]
 def render_error(response: object) -> None:
     console = console_ui.build_console()
     message: str = "MCP server returned an error"
-    outer = _as_dict(response)
-    if outer is not None:
-        error = _as_dict(outer.get("error"))
-        if error is not None and isinstance(error.get("message"), str):
-            message = str(error["message"])
+    match response:
+        case {"error": {"message": str() as outer_message}}:
+            message = outer_message
+        case _:
+            pass
     payload = _extract_payload(response)
     if payload is not None and isinstance(payload.get("error"), str):
         message = str(payload["error"])
