@@ -11,7 +11,6 @@ this module supplies the per-edge rules.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
@@ -33,7 +32,7 @@ from project_code_intelligence.mcp.scope import make_warning
 from project_code_intelligence.mcp.status import positive_int
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 
 RelatedDirection: TypeAlias = Literal["any", "incoming", "outgoing"]
@@ -106,10 +105,11 @@ def related_clause_params(direction: RelatedDirection, value: object) -> QueryPa
 
 
 def unresolved_edge_target_kind(edge: Mapping[str, object]) -> str:
-    metadata = edge.get("metadata")
-    if isinstance(metadata, Mapping) and cast("Mapping[object, object]", metadata).get("call_kind") == "member_call":
-        return "member_call"
-    return "unresolved"
+    match edge.get("metadata"):
+        case {"call_kind": "member_call"}:
+            return "member_call"
+        case _:
+            return "unresolved"
 
 
 def related_edge_target_resolved(edge: Mapping[str, object]) -> bool:

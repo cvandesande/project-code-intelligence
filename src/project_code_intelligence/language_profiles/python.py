@@ -29,21 +29,25 @@ def python_module_name(path: str) -> str:
 
 
 def decorator_name(node: ast.expr) -> str | None:
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        parent = decorator_name(node.value)
-        return f"{parent}.{node.attr}" if parent else node.attr
-    if isinstance(node, ast.Call):
-        return decorator_name(node.func)
-    return None
+    match node:
+        case ast.Name():
+            return node.id
+        case ast.Attribute():
+            parent = decorator_name(node.value)
+            return f"{parent}.{node.attr}" if parent else node.attr
+        case ast.Call():
+            return decorator_name(node.func)
+        case _:
+            return None
 
 
 def import_name(node: ast.Import | ast.ImportFrom) -> list[str]:
-    if isinstance(node, ast.Import):
-        return [alias.name for alias in node.names]
-    module = "." * node.level + (node.module or "")
-    return [module] if module else []
+    match node:
+        case ast.Import():
+            return [alias.name for alias in node.names]
+        case ast.ImportFrom():
+            module = "." * node.level + (node.module or "")
+            return [module] if module else []
 
 
 def python_file_metadata(path: str, text: str) -> JsonObject:
@@ -57,15 +61,21 @@ def python_file_metadata(path: str, text: str) -> JsonObject:
     decorators: list[str] = []
     has_async = False
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            imports.extend(import_name(node))
-        elif isinstance(node, ast.ClassDef):
-            classes.append(node.name)
-            decorators.extend(name for item in node.decorator_list if (name := decorator_name(item)))
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            functions.append(node.name)
-            decorators.extend(name for item in node.decorator_list if (name := decorator_name(item)))
-            has_async = has_async or isinstance(node, ast.AsyncFunctionDef)
+        match node:
+            case ast.Import() | ast.ImportFrom():
+                imports.extend(import_name(node))
+            case ast.ClassDef():
+                classes.append(node.name)
+                decorators.extend(name for item in node.decorator_list if (name := decorator_name(item)))
+            case ast.AsyncFunctionDef():
+                functions.append(node.name)
+                decorators.extend(name for item in node.decorator_list if (name := decorator_name(item)))
+                has_async = True
+            case ast.FunctionDef():
+                functions.append(node.name)
+                decorators.extend(name for item in node.decorator_list if (name := decorator_name(item)))
+            case _:
+                pass
     return compact_metadata({
         "python_module": python_module_name(path),
         "python_imports": unique_limited(imports),

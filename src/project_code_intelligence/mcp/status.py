@@ -372,27 +372,27 @@ def _status_file_breakdowns(
 
 
 def positive_int(value: object) -> int:
-    if isinstance(value, bool):
-        return 0
-    if isinstance(value, int):
-        return max(0, value)
-    if isinstance(value, float):
-        return max(0, int(value))
-    if isinstance(value, str) and value.isdecimal():
-        return int(value)
-    return 0
+    match value:
+        case bool():
+            return 0
+        case int():
+            return max(0, value)
+        case float():
+            return max(0, int(value))
+        case str() if value.isdecimal():
+            return int(value)
+        case _:
+            return 0
 
 
 def _snapshot_embed_record_types(snapshots: list[Json]) -> set[str]:
     record_types: set[str] = set()
     for snapshot in snapshots:
-        metadata = snapshot.get("metadata")
-        if not isinstance(metadata, dict):
-            continue
-        values = cast("dict[object, object]", metadata).get("embed_record_types")
-        if not isinstance(values, list):
-            continue
-        record_types.update(item for item in cast("list[object]", values) if isinstance(item, str) and item)
+        match snapshot.get("metadata"):
+            case {"embed_record_types": list() as values}:
+                record_types.update(item for item in values if isinstance(item, str) and item)
+            case _:
+                pass
     return record_types
 
 
