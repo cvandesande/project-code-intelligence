@@ -144,15 +144,11 @@ def related_edge_sort_priority(
     *,
     context: RelatedQueryContext,
 ) -> int:
-    resolved = related_edge_target_resolved(edge)
-    edge_direction = str(edge.get("direction") or "outgoing")
-    if context.direction != "any":
-        return 0 if resolved else 1
-    if context.symbol and not context.scoped_record_ids:
-        base_priority = 0 if edge_direction == "incoming" else 1
-    else:
-        base_priority = 0 if edge_direction == "outgoing" else 1
-    return base_priority if resolved else base_priority + 2
+    # Called only for `direction in {"incoming", "outgoing"}` — the `any` case
+    # preserves the interleave order produced by `tool_related_code_intel`'s
+    # merge layer and skips this sort entirely.
+    _ = context
+    return 0 if related_edge_target_resolved(edge) else 1
 
 
 def annotate_related_edges(
@@ -175,12 +171,15 @@ def annotate_related_edges(
                 if source in context.parent_record_ids or target in context.parent_record_ids
                 else "record"
             )
-    edges.sort(
-        key=lambda edge: (
-            related_edge_sort_priority(edge, context=context),
-            -positive_int(edge.get("id")),
+    if context.direction != "any":
+        # `any` is already balanced + resolved-first by the merge in `tool_related_code_intel`;
+        # re-sorting here would defeat the interleave.
+        edges.sort(
+            key=lambda edge: (
+                related_edge_sort_priority(edge, context=context),
+                -positive_int(edge.get("id")),
+            )
         )
-    )
     return edges
 
 
@@ -202,34 +201,13 @@ def related_order_clause(
     scoped_record_ids: list[str],
     direction: RelatedDirection,
 ) -> tuple[str, QueryParams]:
-    if direction == "any" and symbol and not scoped_record_ids:
-        return (
-            """
-            CASE
-                WHEN e.target_symbol = %s AND tgt.id IS NOT NULL THEN 0
-                WHEN e.source_symbol = %s AND tgt.id IS NOT NULL THEN 1
-                WHEN e.target_symbol = %s THEN 2
-                ELSE 3
-            END,
-            (tgt.id IS NOT NULL) DESC,
-            e.id DESC
-            """,
-            [symbol, symbol, symbol],
-        )
-    if direction == "any" and scoped_record_ids:
-        return (
-            """
-            CASE
-                WHEN e.source_record_id = ANY(%s) AND tgt.id IS NOT NULL THEN 0
-                WHEN e.target_record_id = ANY(%s) AND tgt.id IS NOT NULL THEN 1
-                WHEN e.source_record_id = ANY(%s) THEN 2
-                ELSE 3
-            END,
-            (tgt.id IS NOT NULL) DESC,
-            e.id DESC
-            """,
-            [scoped_record_ids, scoped_record_ids, scoped_record_ids],
-        )
+    # All callers pass a concrete direction ("incoming" or "outgoing").
+    # `tool_related_code_intel` runs each direction independently for
+    # `direction=any` and balances them in Python; the per-direction order is
+    # resolved-first, newest-first.
+    _ = symbol
+    _ = scoped_record_ids
+    _ = direction
     return "(tgt.id IS NOT NULL) DESC, e.id DESC", []
 
 

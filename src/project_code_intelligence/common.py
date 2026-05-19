@@ -47,6 +47,23 @@ def source_path_for(repo: str, rel_path: str) -> str:
     return rel_path if repo == "." else f"{repo}/{rel_path}"
 
 
+def repo_relative_path(source_path: str | None, repo: str | None) -> str | None:
+    """Inverse of `source_path_for`: strip the repo prefix from a stored source_path.
+
+    Returns a path relative to the repo root — what a consumer with cwd at the repo
+    root would pass to `Read`/`open`. When repo is None, ".", or empty (workspace ==
+    repo root indexing), the source_path is already repo-relative and returned unchanged.
+    """
+    if not source_path:
+        return source_path
+    if not repo or repo == ".":
+        return source_path
+    prefix = f"{repo}/"
+    if source_path.startswith(prefix):
+        return source_path[len(prefix) :]
+    return source_path
+
+
 def repo_for_source_path(source_path: str | None, repos: list[str], default_repo: str | None = None) -> str | None:
     if not source_path:
         return default_repo

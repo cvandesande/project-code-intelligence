@@ -186,7 +186,6 @@ def _status_rows(payload: JsonDict, repo: str, snapshot: JsonDict | None) -> Tab
 
 _PROBE_RESULT_KEYS: dict[str, str] = {
     "list_code_intel_files": "files",
-    "list_code_intel_parser_failures": "parser_failures",
     "search_code_intel_text": "results",
     "search_code_intel_semantic": "results",
     "related_code_intel": "edges",

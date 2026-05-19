@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError
 from project_code_intelligence.mcp.filters import query_with_where, scoped_collection_repo_clauses
-from project_code_intelligence.mcp.formatting import compact_record
+from project_code_intelligence.mcp.formatting import compact_record, verbose_record
 from project_code_intelligence.mcp.protocol import (
     Json,
     QueryParams,
@@ -126,7 +126,9 @@ def format_record_batch_response(
 ) -> Json:
     rows_by_record_id = {str(row["record_id"]): row for row in rows}
     ordered = (rows_by_record_id[rid] for rid in ids if rid in rows_by_record_id)
-    formatted = [dict(row) if verbose else compact_record(row, include_metadata=include_metadata) for row in ordered]
+    formatted = [
+        verbose_record(row) if verbose else compact_record(row, include_metadata=include_metadata) for row in ordered
+    ]
     response: Json = {"results": cast("JsonValue", formatted)}
     missing = [rid for rid in ids if rid not in rows_by_record_id]
     if missing:
