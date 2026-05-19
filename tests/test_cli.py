@@ -418,7 +418,7 @@ class CliWrapperTests(unittest.TestCase):
                     }),
                     "",
                 )
-            return 0, mcp_response({"results": [], "edges": [], "files": [], "parser_failures": []}), ""
+            return 0, mcp_response({"results": [], "edges": [], "files": []}), ""
 
         with tempfile.TemporaryDirectory() as directory:
             old_cwd = Path.cwd()
@@ -460,6 +460,36 @@ class CliWrapperTests(unittest.TestCase):
         result = cast("dict[str, object]", payload["result"])
         content = cast("list[dict[str, object]]", result["content"])
         self.assertIn("code intelligence schema is not initialized", str(content[0]["text"]))
+
+
+class PciIndexShowParserFailuresFlagTests(unittest.TestCase):
+    """Forwarding contract for `pci-index --show-parser-failures`."""
+
+    @staticmethod
+    def _run_with_capture(argv: list[str]) -> tuple[int, list[str]]:
+        forwarded: list[str] = []
+
+        def fake_ingest_main(args: list[str]) -> int:
+            forwarded.extend(args)
+            return 0
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("project_code_intelligence.cli.ingest_code_intel.cli_main", side_effect=fake_ingest_main),
+        ):
+            status = cli.index_main(argv)
+        return status, forwarded
+
+    def test_flag_is_forwarded_when_set(self) -> None:
+        status, forwarded = self._run_with_capture(["--show-parser-failures", "."])
+        self.assertEqual(status, 0)
+        self.assertIn("--show-parser-failures", cli.index_parser().format_help())
+        self.assertIn("--show-parser-failures", forwarded)
+
+    def test_flag_is_omitted_by_default(self) -> None:
+        status, forwarded = self._run_with_capture(["."])
+        self.assertEqual(status, 0)
+        self.assertNotIn("--show-parser-failures", forwarded)
 
 
 class IndexUserConfigTests(unittest.TestCase):

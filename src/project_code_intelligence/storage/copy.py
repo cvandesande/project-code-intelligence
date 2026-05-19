@@ -18,10 +18,16 @@ def copy_unchanged_parser_failures(
     snapshot: Snapshot,
     snapshot_id: int,
     unchanged_paths: set[str],
-) -> int:
+) -> tuple[int, list[str]]:
+    """Copy parser-failure rows forward; return (count, source_paths).
+
+    The returned paths are the rows actually inserted (after ON CONFLICT
+    filtering), in SQL output order. Callers that only need the count can
+    discard the list.
+    """
     if not previous_snapshot_id or previous_snapshot_id == snapshot_id or not unchanged_paths:
-        return 0
-    row = conn.execute(
+        return 0, []
+    rows = conn.execute(
         """
         WITH copied AS (
             INSERT INTO project_code_intel_parser_failures (
@@ -34,9 +40,9 @@ def copy_unchanged_parser_failures(
             WHERE snapshot_id = %s
               AND source_path = ANY(%s)
             ON CONFLICT DO NOTHING
-            RETURNING 1
+            RETURNING source_path
         )
-        SELECT count(*) AS count FROM copied
+        SELECT source_path FROM copied
         """,
         [
             snapshot_id,
@@ -46,8 +52,13 @@ def copy_unchanged_parser_failures(
             previous_snapshot_id,
             sorted(unchanged_paths),
         ],
-    ).fetchone()
-    return row_int(db.require_row(row, "copy unchanged parser failures"), "count")
+    ).fetchall()
+    paths: list[str] = []
+    for row in rows:
+        value = row["source_path"]
+        if isinstance(value, str):
+            paths.append(value)
+    return len(paths), paths
 
 
 def copy_unchanged_records_and_edges(

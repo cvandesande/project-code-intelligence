@@ -181,6 +181,7 @@ class CliArgs:
     prune_keep: int
     mcp_config: str | None
     mcp_server_name: str | None
+    show_parser_failures: bool
 
 
 @dataclass(frozen=True)
@@ -248,6 +249,11 @@ class DbUploadSummary:
             "static_code_flow_steps": 0,
         }
     )
+    # Paths of parser failures (newly inserted + copied), formatted as
+    # "{repo}/{source_path}" so multi-repo workspaces stay unambiguous. Always
+    # populated; the pci-index `--show-parser-failures` flag controls whether
+    # they appear in the final summary report.
+    parser_failure_paths: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -299,6 +305,7 @@ class CliNamespace(argparse.Namespace):
     prune_keep: int
     mcp_config: str | None
     mcp_server_name: str | None
+    show_parser_failures: bool
 
 
 def json_int(obj: JsonObject, key: str) -> int:
@@ -684,6 +691,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--mcp-server-name",
         help="Server key/name for generated MCP client config snippets. Defaults to project-code-intelligence.",
     )
+    _ = parser.add_argument(
+        "--show-parser-failures",
+        action="store_true",
+        help=(
+            "List failing source paths in the summary panel. The 'Parser fails' count row is unchanged; "
+            "with this flag, paths are appended below it (capped in the panel, full list in --json output)."
+        ),
+    )
     return parser
 
 
@@ -730,6 +745,7 @@ def parse_cli_args(argv: list[str] | None = None) -> CliArgs:
         prune_keep=parsed.prune_keep,
         mcp_config=parsed.mcp_config,
         mcp_server_name=parsed.mcp_server_name,
+        show_parser_failures=parsed.show_parser_failures,
     )
 
 
@@ -1687,7 +1703,7 @@ def copy_unchanged_data(conn: db.DbConnection, ingest: RepoIngest, snapshot_id: 
         snapshot_id=snapshot_id,
         unchanged_paths=ingest.unchanged_paths,
     )
-    copied_parser_failure_count = copy_unchanged_parser_failures(
+    copied_parser_failure_count, copied_parser_failure_paths = copy_unchanged_parser_failures(
         conn,
         previous_snapshot_id=ingest.previous_snapshot_id,
         snapshot=ingest.snapshot,
@@ -1697,6 +1713,8 @@ def copy_unchanged_data(conn: db.DbConnection, ingest: RepoIngest, snapshot_id: 
     summary.copied_records += copied_record_count
     summary.copied_edges += copied_edge_count
     summary.copied_parser_failures += copied_parser_failure_count
+    for path in copied_parser_failure_paths:
+        summary.parser_failure_paths.append(f"{ingest.snapshot.repo}/{path}")
     runtime_state.active_metrics.add_phase_total(copied_record_count + copied_edge_count + copied_parser_failure_count)
     runtime_state.active_metrics.add_phase_done(copied_record_count + copied_edge_count + copied_parser_failure_count)
     runtime_state.active_metrics.add("copied_records", copied_record_count)
@@ -1737,6 +1755,15 @@ def insert_repo_records(
         return inserted_records, preembedded, skipped
     finally:
         abandon_preembedding(preembedding_state)
+
+
+def record_inserted_failure_paths(summary: DbUploadSummary, ingest: RepoIngest) -> None:
+    """Stash `{repo}/{source_path}` for each newly-parsed parser failure."""
+    repo = ingest.snapshot.repo
+    for failure in ingest.parser_failures:
+        value = failure.get("source_path")
+        if isinstance(value, str):
+            summary.parser_failure_paths.append(f"{repo}/{value}")
 
 
 def upload_repo_ingest(
@@ -1793,6 +1820,7 @@ def upload_repo_ingest(
     runtime_state.active_metrics.set("db_write_op", "inserting failures")
     inserted_failures = insert_parser_failures(conn, ingest.snapshot, snapshot_id, ingest.parser_failures)
     summary.inserted_parser_failures += inserted_failures
+    record_inserted_failure_paths(summary, ingest)
     add_progress(inserted_failures)
     runtime_state.active_metrics.set("db_write_op", None)
     runtime_state.active_metrics.add("inserted_parser_failures", inserted_failures)
@@ -1895,7 +1923,7 @@ def print_ingest_result(
     embedded_records: int,
     sarif_ingest: SarifIngest,
 ) -> None:
-    progress.emit_summary({
+    report: JsonObject = {
         "repos": plan.repos,
         "collection": plan.collection,
         "database": config.DatabaseSettings.from_env().display_target(),
@@ -1932,7 +1960,10 @@ def print_ingest_result(
         "embedding_max_chars": plan.args.embedding_max_chars if plan.args.embed else None,
         "metrics": runtime_state.active_metrics.snapshot(),
         **database_bootstrap_report(summary.bootstrap),
-    })
+    }
+    if plan.args.show_parser_failures:
+        report["parser_failure_paths"] = sorted(summary.parser_failure_paths)
+    progress.emit_summary(report)
     emit_mcp_config(plan, summary.bootstrap)
 
 

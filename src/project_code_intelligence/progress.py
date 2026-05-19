@@ -802,10 +802,33 @@ def _add_count_rows(rows: Table, report: JsonObject, *, counts: JsonObject, timi
         _add_row(rows, "Embeddings", embedding_text)
 
 
+_PARSER_FAILURE_PATH_DISPLAY_CAP = 10
+
+
+def _parser_failure_paths(report: JsonObject) -> list[str]:
+    raw = report.get("parser_failure_paths")
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, str)]
+
+
+def _add_parser_failure_path_rows(rows: Table, report: JsonObject) -> None:
+    paths = _parser_failure_paths(report)
+    if not paths:
+        return
+    visible = paths[:_PARSER_FAILURE_PATH_DISPLAY_CAP]
+    for path in visible:
+        _add_row(rows, "", path)
+    remainder = len(paths) - len(visible)
+    if remainder > 0:
+        _add_row(rows, "", f"…and {remainder} more")
+
+
 def _add_outcome_rows(rows: Table, report: JsonObject, *, counts: JsonObject, timing: JsonObject) -> None:
     parser_failures = _coerce_int(counts.get("parser_failures"))
     if parser_failures:
         _add_row(rows, "Parser fails", _format_count(parser_failures))
+        _add_parser_failure_path_rows(rows, report)
     sarif_text = _sarif_row_text(report)
     if sarif_text:
         _add_row(rows, "SARIF", sarif_text)

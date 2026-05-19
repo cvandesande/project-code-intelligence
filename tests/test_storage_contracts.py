@@ -439,7 +439,7 @@ class StorageContractTests(unittest.TestCase):
                 snapshot_id=7,
                 unchanged_paths={"src/main.py"},
             ),
-            0,
+            (0, []),
         )
         self.assertEqual(
             copy_unchanged_parser_failures(
@@ -449,7 +449,7 @@ class StorageContractTests(unittest.TestCase):
                 snapshot_id=7,
                 unchanged_paths={"src/main.py"},
             ),
-            0,
+            (0, []),
         )
         self.assertEqual(
             copy_unchanged_records_and_edges(
@@ -464,11 +464,15 @@ class StorageContractTests(unittest.TestCase):
         self.assertEqual(fake.sql, [])
 
     def test_copy_unchanged_rows_uses_sorted_paths_and_snapshot_metadata(self) -> None:
-        fake = FakeRowsConnection([[{"count": "2"}], [{"count": 3}], [{"count": 4}]])
+        fake = FakeRowsConnection([
+            [{"source_path": "src/a.py"}, {"source_path": "src/b.py"}],
+            [{"count": 3}],
+            [{"count": 4}],
+        ])
         snapshot = snapshot_fixture()
         paths = {"src/b.py", "src/a.py"}
 
-        parser_failures = copy_unchanged_parser_failures(
+        parser_failure_count, parser_failure_paths = copy_unchanged_parser_failures(
             cast("db.DbConnection", fake),
             previous_snapshot_id=6,
             snapshot=snapshot,
@@ -483,7 +487,8 @@ class StorageContractTests(unittest.TestCase):
             unchanged_paths=paths,
         )
 
-        self.assertEqual(parser_failures, 2)
+        self.assertEqual(parser_failure_count, 2)
+        self.assertEqual(parser_failure_paths, ["src/a.py", "src/b.py"])
         self.assertEqual((records, edges), (3, 4))
         self.assertIn("project_code_intel_parser_failures", fake.sql[0])
         self.assertEqual(fake.params[0], [7, "test", ".", "commit", 6, ["src/a.py", "src/b.py"]])
