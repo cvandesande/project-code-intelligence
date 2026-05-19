@@ -326,6 +326,46 @@ class SummaryPanelTests(unittest.TestCase):
         self.assertIn("DONE WITH WARNINGS", output)
         self.assertIn("Parser fails", output)
 
+    def test_pretty_summary_omits_parser_failure_paths_by_default(self) -> None:
+        output = self._summary_text({
+            "mode": "incremental",
+            "metrics": {"counts": {"parser_failures": 2}},
+            # parser_failure_paths is absent — the renderer must not invent rows.
+        })
+        self.assertIn("Parser fails", output)
+        self.assertNotIn("src/", output)
+        self.assertNotIn("…and", output)
+
+    def test_pretty_summary_lists_parser_failure_paths_when_provided(self) -> None:
+        output = self._summary_text({
+            "mode": "incremental",
+            "metrics": {"counts": {"parser_failures": 3}},
+            "parser_failure_paths": [
+                "foo/src/broken_one.py",
+                "foo/src/broken_two.py",
+                "foo/vendor/legacy.c",
+            ],
+        })
+        self.assertIn("Parser fails", output)
+        self.assertIn("foo/src/broken_one.py", output)
+        self.assertIn("foo/src/broken_two.py", output)
+        self.assertIn("foo/vendor/legacy.c", output)
+        self.assertNotIn("…and", output)
+
+    def test_pretty_summary_truncates_parser_failure_paths_with_tail(self) -> None:
+        paths = [f"foo/src/file_{idx:02d}.py" for idx in range(15)]
+        output = self._summary_text({
+            "mode": "incremental",
+            "metrics": {"counts": {"parser_failures": 15}},
+            "parser_failure_paths": paths,
+        })
+        # First 10 paths render; 11th onward are folded into the tail.
+        for path in paths[:10]:
+            self.assertIn(path, output)
+        for path in paths[10:]:
+            self.assertNotIn(path, output)
+        self.assertIn("…and 5 more", output)
+
     def test_pretty_summary_renders_sarif_and_static_findings_row(self) -> None:
         output = self._summary_text({
             "mode": "incremental",

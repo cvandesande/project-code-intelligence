@@ -95,6 +95,14 @@ def index_parser() -> argparse.ArgumentParser:
         help="Number of recent snapshots to keep when --prune-snapshots is set (default: 5).",
     )
     _ = parser.add_argument(
+        "--show-parser-failures",
+        action="store_true",
+        help=(
+            "List failing source paths in the summary panel. Default off shows only the 'Parser fails' "
+            "count; the JSON report carries the full path list under 'parser_failure_paths'."
+        ),
+    )
+    _ = parser.add_argument(
         "repo_paths",
         nargs="*",
         help=(
@@ -117,6 +125,7 @@ class IndexNamespace(argparse.Namespace):
     embed: bool | None
     prune_snapshots: bool
     prune_keep: int
+    show_parser_failures: bool
     repo_paths: list[str]
 
 
@@ -259,6 +268,8 @@ def forwarded_index_args(parsed: IndexNamespace, passthrough: list[str]) -> list
         os.environ["PCI_ALLOW_WRITES"] = "1"
     if parsed.prune_snapshots:
         forwarded = [*forwarded, "--prune-snapshots", "--prune-keep", str(parsed.prune_keep)]
+    if parsed.show_parser_failures:
+        forwarded = [*forwarded, "--show-parser-failures"]
     return forwarded
 
 
@@ -481,7 +492,6 @@ def _resolve_smoke_target_repos(repo_paths: list[str], status_response: object) 
 # generic probe — any project either has a `main` symbol or returns 0 edges.
 _SMOKE_TOOLS: tuple[tuple[str, dict[str, object]], ...] = (
     ("list_code_intel_files", {"limit": 5}),
-    ("list_code_intel_parser_failures", {"limit": 5}),
     ("search_code_intel_text", {"limit": 1}),
     ("search_code_intel_semantic", {"query": "main entry point", "limit": 1}),
     ("related_code_intel", {"symbol": "main", "limit": 1}),

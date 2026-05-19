@@ -164,6 +164,7 @@ class CliArgOverrides(TypedDict, total=False):
     prune_keep: int
     mcp_config: str | None
     mcp_server_name: str | None
+    show_parser_failures: bool
 
 
 def cli_args(**overrides: Unpack[CliArgOverrides]) -> CliArgs:
@@ -202,6 +203,7 @@ def cli_args(**overrides: Unpack[CliArgOverrides]) -> CliArgs:
         "prune_keep": 5,
         "mcp_config": None,
         "mcp_server_name": None,
+        "show_parser_failures": False,
     }
     values.update(overrides)
     return CliArgs(**values)
