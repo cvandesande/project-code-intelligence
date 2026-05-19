@@ -423,6 +423,32 @@ def database_exists(conn: DbConnection, dbname: str) -> bool:
     return _database_exists(conn, dbname)
 
 
+def _same_database_connection_settings(left: DatabaseSettings, right: DatabaseSettings) -> bool:
+    return (
+        left.dsn == right.dsn
+        and left.dsn_user == right.dsn_user
+        and left.dsn_password == right.dsn_password
+        and left.host == right.host
+        and left.port == right.port
+        and left.dbname == right.dbname
+        and left.user == right.user
+        and left.password == right.password
+        and left.sslmode == right.sslmode
+    )
+
+
+def _append_unique_database_settings(candidates: list[DatabaseSettings], candidate: DatabaseSettings) -> None:
+    if not any(_same_database_connection_settings(existing, candidate) for existing in candidates):
+        candidates.append(candidate)
+
+
+def _settings_have_runtime_authentication(settings: DatabaseSettings) -> bool:
+    if settings.dsn:
+        parts = urlsplit(settings.dsn)
+        return bool(settings.dsn_user or settings.dsn_password or parts.username or parts.password)
+    return bool(settings.user and settings.password)
+
+
 def _terminate_database_connections(conn: DbConnection, dbname: str) -> None:
     _ = conn.execute(
         """
@@ -435,7 +461,85 @@ def _terminate_database_connections(conn: DbConnection, dbname: str) -> None:
     )
 
 
-def bootstrap_inferred_database(settings: DatabaseSettings) -> DatabaseBootstrapResult:
+def _initialize_inferred_database_privileges(
+    target_settings: DatabaseSettings,
+    *,
+    dbname: str,
+    rw_role: DatabaseRole | None,
+    ro_role: DatabaseRole | None,
+) -> None:
+    with connect(readonly=False, settings=target_settings) as conn:
+        _ = ensure_vector_extension(conn)
+        if rw_role is not None and ro_role is not None:
+            grant_project_database_access_privileges(conn, dbname=dbname, rw_role=rw_role.name, ro_role=ro_role.name)
+            reassign_project_database_objects_to_rw_role(conn, rw_role.name)
+        conn.commit()
+
+
+def _target_database_init_candidates(
+    settings: DatabaseSettings,
+    bootstrap_settings: DatabaseSettings,
+    *,
+    dbname: str,
+    target_fallback_settings: Sequence[DatabaseSettings],
+) -> list[DatabaseSettings]:
+    candidates = [settings_for_database(bootstrap_settings, dbname)]
+    if _settings_have_runtime_authentication(settings):
+        _append_unique_database_settings(candidates, settings_for_database(settings, dbname))
+    for fallback_settings in target_fallback_settings:
+        _append_unique_database_settings(candidates, settings_for_database(fallback_settings, dbname))
+    return candidates
+
+
+def _initialize_inferred_database_privileges_with_fallbacks(
+    target_settings_candidates: Sequence[DatabaseSettings],
+    *,
+    dbname: str,
+    rw_role: DatabaseRole | None,
+    ro_role: DatabaseRole | None,
+) -> None:
+    target_errors: list[DatabaseConnectionError | PsycopgError] = []
+    for target_settings in target_settings_candidates:
+        try:
+            _initialize_inferred_database_privileges(
+                target_settings,
+                dbname=dbname,
+                rw_role=rw_role,
+                ro_role=ro_role,
+            )
+        except (DatabaseConnectionError, PsycopgError) as exc:
+            target_errors.append(exc)
+            continue
+        return
+    final_error = target_errors[-1]
+    first_error = f"\nFirst attempt: {target_errors[0]}" if len(target_errors) > 1 else ""
+    config_guidance = (
+        " Saved pci-index config stores the generated non-superuser PCI_DATABASE_ADMIN_* role. "
+        "Legacy tables owned by another PostgreSQL role require that table owner or a PostgreSQL admin "
+        "credential for one-time repair; add PCI_POSTGRES_ADMIN_USER/PCI_POSTGRES_ADMIN_PASSWORD to the "
+        "private pci-index config or run with those variables set."
+        if len(target_settings_candidates) == 1
+        else ""
+    )
+    raise DatabaseConnectionError(
+        "Could not initialize privileges for inferred PostgreSQL database "
+        + repr(dbname)
+        + " using "
+        + connection_hint(target_settings_candidates[0])
+        + ". The admin credentials must be able to use pgvector in new project databases. Run "
+        "pci-doctor --init-postgres with real PostgreSQL admin credentials to install pgvector in template1, "
+        "or use a database admin role that can run CREATE EXTENSION vector. If this inferred database was "
+        "already created before template1 had pgvector, drop and recreate it with pci-index --reset ."
+        + config_guidance
+        + first_error
+        + "\n"
+        + str(final_error)
+    ) from final_error
+
+
+def bootstrap_inferred_database(
+    settings: DatabaseSettings, *, target_fallback_settings: Sequence[DatabaseSettings] = ()
+) -> DatabaseBootstrapResult:
     dbname = _ensure_inferred_database_target(settings, operation="bootstrap")
     rw_role_name = project_database_role_name(dbname, "rw")
     ro_role_name = project_database_role_name(dbname, "ro")
@@ -471,27 +575,17 @@ def bootstrap_inferred_database(settings: DatabaseSettings) -> DatabaseBootstrap
             "to an existing database.\n" + str(exc)
         ) from exc
 
-    target_admin_settings = settings_for_database(bootstrap_settings, dbname)
-    try:
-        with connect(readonly=False, settings=target_admin_settings) as conn:
-            _ = ensure_vector_extension(conn)
-            if rw_role is not None and ro_role is not None:
-                grant_project_database_access_privileges(
-                    conn, dbname=dbname, rw_role=rw_role_name, ro_role=ro_role_name
-                )
-                reassign_project_database_objects_to_rw_role(conn, rw_role_name)
-            conn.commit()
-    except (DatabaseConnectionError, PsycopgError) as exc:
-        raise DatabaseConnectionError(
-            "Could not initialize privileges for inferred PostgreSQL database "
-            + repr(dbname)
-            + " using "
-            + connection_hint(target_admin_settings)
-            + ". The admin credentials must be able to use pgvector in new project databases. Run "
-            "pci-doctor --init-postgres with real PostgreSQL admin credentials to install pgvector in template1, "
-            "or use a database admin role that can run CREATE EXTENSION vector. If this inferred database was "
-            "already created before template1 had pgvector, drop and recreate it with pci-index --reset .\n" + str(exc)
-        ) from exc
+    _initialize_inferred_database_privileges_with_fallbacks(
+        _target_database_init_candidates(
+            settings,
+            bootstrap_settings,
+            dbname=dbname,
+            target_fallback_settings=target_fallback_settings,
+        ),
+        dbname=dbname,
+        rw_role=rw_role,
+        ro_role=ro_role,
+    )
 
     return DatabaseBootstrapResult(
         dbname=dbname,

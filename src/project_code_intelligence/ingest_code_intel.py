@@ -901,6 +901,17 @@ def apply_bootstrap_writer_credentials(
     return writer_settings
 
 
+def postgres_admin_target_fallback_settings() -> list[config.DatabaseSettings]:
+    settings = config.DatabaseSettings.from_env(admin_scope="postgres")
+    if bool(settings.admin_user) != bool(settings.admin_password):
+        raise db.DatabaseConnectionError(
+            "Set both PCI_POSTGRES_ADMIN_USER and PCI_POSTGRES_ADMIN_PASSWORD, or set neither."
+        )
+    if not settings.admin_user or not settings.admin_password:
+        return []
+    return [db.settings_with_credentials(settings, settings.admin_user, settings.admin_password)]
+
+
 def database_bootstrap_report(bootstrap: db.DatabaseBootstrapResult | None) -> JsonObject:
     if bootstrap is None:
         return {}
@@ -1241,7 +1252,9 @@ def prepare_writable_database(args: CliArgs, *, embedding_requested: bool) -> db
         preflight_embedding_endpoint(args.embedding_endpoint, args.embedding_endpoint_model)
     bootstrap = None
     if settings.database_inferred:
-        bootstrap = db.bootstrap_inferred_database(settings)
+        bootstrap = db.bootstrap_inferred_database(
+            settings, target_fallback_settings=postgres_admin_target_fallback_settings()
+        )
         settings = apply_bootstrap_writer_credentials(settings, bootstrap)
     with db.connect(readonly=False, settings=settings) as conn:
         ensure_schema(conn)
