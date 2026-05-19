@@ -419,17 +419,26 @@ def status_queryability(
     edge_types = sorted({
         str(row.get("edge_type")) for row in edges_by_type if row.get("edge_type") and positive_int(row.get("edges"))
     })
+    # Compact surface keeps only counts that suggest an action. `configured_embed_record_type_count`
+    # is purely descriptive (it only describes what was configured at indexing time) and moves
+    # behind `include_queryability`. `empty_embed_record_type_count` IS actionable — a non-zero
+    # value flags a freshness/coverage gap — so we keep it in compact, but only when non-zero
+    # (zero is silence, not signal). Both counts return unconditionally in the detailed surface
+    # so callers that introspect queryability programmatically see a stable shape.
+    empty_embed_record_type_count = len(empty_embed_record_types)
     queryability: dict[str, JsonValue] = {
         "text_record_type_count": len(text_record_types),
         "semantic_record_type_count": len(semantic_record_types),
         "text_only_record_type_count": len(set(text_record_types) - set(semantic_record_types)),
-        "configured_embed_record_type_count": len(configured_embed_record_types),
-        "empty_embed_record_type_count": len(empty_embed_record_types),
         "edge_type_count": len(edge_types),
         "has_text": bool(text_record_types),
         "has_semantic": bool(semantic_record_types),
         "has_edges": bool(edge_types),
     }
+    if empty_embed_record_type_count > 0 or include_details:
+        queryability["empty_embed_record_type_count"] = empty_embed_record_type_count
+    if include_details:
+        queryability["configured_embed_record_type_count"] = len(configured_embed_record_types)
     if file_dimensions is not None:
         languages = list(file_dimensions.get("language", []))
         file_roles = list(file_dimensions.get("file_role", []))

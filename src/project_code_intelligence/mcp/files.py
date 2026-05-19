@@ -131,7 +131,7 @@ LIST_CODE_INTEL_FILES_SELECT_SLIM = """
                     created_at
                 FROM record_backed_files
             )
-            SELECT f.id, f.source_path, f.size_bytes, f.language, f.file_role, f.content_class,
+            SELECT f.id, f.repo, f.source_path, f.size_bytes, f.language, f.file_role, f.content_class,
                    f.is_generated, f.is_vendor, f.is_test, f.is_source, f.is_build,
                    f.is_config, f.is_doc, f.skipped_reason
             FROM file_inventory f

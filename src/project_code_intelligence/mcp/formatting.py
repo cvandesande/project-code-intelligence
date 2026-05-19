@@ -5,12 +5,20 @@ constant across results in a single-snapshot query (snapshot_id, collection,
 repo, etc.), fields where the default value carries no signal (boolean False),
 and heavy metadata that would balloon responses. Verbose mode returns the full
 row.
+
+`repo_path` is injected into every record/edge/file shape (compact and verbose).
+It is the repo-relative form of `source_path` — what a consumer with cwd at the
+repo root passes to `Read`/`open`. `source_path` keeps the stored, workspace-
+relative form; the two coincide when the row's repo is "." or absent.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from typing import TYPE_CHECKING, cast
+
+from project_code_intelligence.common import repo_relative_path
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -59,7 +67,9 @@ _COMPACT_EDGE_KEYS = (
     "source_record_id",
     "target_record_id",
     "source_path",
+    "source_repo_path",
     "target_path",
+    "target_repo_path",
     "source_line_start",
     "source_line_end",
     "target_line_start",
@@ -101,6 +111,66 @@ def _is_compact_noise(key: str, value: object) -> bool:
     if value in ([], {}):
         return True
     return value is False and key in _STRIP_WHEN_FALSE
+
+
+def _row_str(row: Mapping[str, object], key: str) -> str | None:
+    value = row.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _inject_repo_path(out: dict[str, object], row: Mapping[str, object]) -> None:
+    """Add `repo_path` (repo-relative form of source_path) to a record/file dict."""
+    source_path = _row_str(row, "source_path")
+    if not source_path:
+        return
+    repo = _row_str(row, "repo")
+    rel = repo_relative_path(source_path, repo)
+    if rel:
+        out["repo_path"] = rel
+
+
+def _inject_similarity(out: dict[str, object], row: Mapping[str, object]) -> None:
+    """Add `similarity = 1 - distance` (cosine similarity) to a semantic-search record dict.
+
+    pgvector's `<=>` operator returns cosine distance (0 = identical direction, 1 = orthogonal,
+    2 = opposite); `1 - distance` is the corresponding cosine similarity, monotonic in confidence
+    and stable across queries. Higher = better, parallel to text search's `rank`. Skipped when
+    the row has no numeric `distance` (e.g. non-semantic record paths, NULL distance), and when
+    distance is NaN — emitting `similarity: 1.0` for those would be a meaningless strong signal.
+    """
+    distance = row.get("distance")
+    if not isinstance(distance, (int, float)) or isinstance(distance, bool):
+        return
+    distance_float = float(distance)
+    if math.isnan(distance_float):
+        return
+    out["similarity"] = 1.0 - distance_float
+
+
+def _inject_edge_repo_paths(out: dict[str, object], row: Mapping[str, object]) -> None:
+    """Add `source_repo_path` / `target_repo_path` to an edge dict."""
+    repo = _row_str(row, "repo")
+    source_path = _row_str(row, "source_path")
+    if source_path:
+        source_rel = repo_relative_path(source_path, repo)
+        if source_rel:
+            out["source_repo_path"] = source_rel
+    target_path = _row_str(row, "target_path")
+    if target_path:
+        target_rel = repo_relative_path(target_path, repo)
+        if target_rel:
+            out["target_repo_path"] = target_rel
+
+
+def verbose_record(row: Mapping[str, object]) -> dict[str, object]:
+    """Verbose record dict for get-record / batch fetch paths.
+
+    Mirrors `dict(row)` but injects `repo_path` so the verbose response is a
+    strict superset of the compact one. Shared by single-fetch and batch handlers.
+    """
+    out: dict[str, object] = dict(row)
+    _inject_repo_path(out, row)
+    return out
 
 
 def dedup_by_location(rows: list[db.DbRow]) -> list[db.DbRow]:
@@ -204,6 +274,8 @@ def compact_record(
         for k, v in row.items()
         if not _is_compact_noise(k, v) and k not in _COMPACT_RECORD_STRIP and k != "snippet_raw"
     }
+    _inject_repo_path(out, row)
+    _inject_similarity(out, row)
     if include_metadata is not False:
         metadata = out.get("metadata")
         if isinstance(metadata, dict):
@@ -230,13 +302,26 @@ def _verbose_record(
 ) -> dict[str, object]:
     snippet = _extract_snippet(_row_text(row, "snippet_raw"), snippet_length, snippet_terms)
     out = {k: v for k, v in row.items() if k not in {"snippet_raw", "match_score", "quality_penalty"}}
+    _inject_repo_path(out, row)
+    _inject_similarity(out, row)
     if snippet:
         out["snippet"] = snippet
     return out
 
 
 def compact_file(row: db.DbRow) -> dict[str, object]:
-    return {k: v for k, v in row.items() if not _is_compact_noise(k, v)}
+    # `repo` is selected so `_inject_repo_path` can strip the prefix; it's still
+    # redundant with the response envelope for compact output, so drop it after use.
+    out = {k: v for k, v in row.items() if not _is_compact_noise(k, v) and k != "repo"}
+    _inject_repo_path(out, row)
+    return out
+
+
+def verbose_file(row: db.DbRow) -> dict[str, object]:
+    """Verbose file dict for list_code_intel_files. Mirrors `dict(row)` plus `repo_path`."""
+    out: dict[str, object] = dict(row)
+    _inject_repo_path(out, row)
+    return out
 
 
 def format_records(
@@ -251,15 +336,25 @@ def format_records(
 
 
 def _compact_edge(row: Mapping[str, object]) -> dict[str, object]:
+    # _inject_edge_repo_paths writes into the source dict view we project from, so
+    # compute the derived keys first, then apply the compact projection.
+    derived: dict[str, object] = {}
+    _inject_edge_repo_paths(derived, row)
     out: dict[str, object] = {}
     for key in _COMPACT_EDGE_KEYS:
-        value = row.get(key)
+        value = derived.get(key) if key in derived else row.get(key)
         if value is not None and not _is_compact_noise(key, value):
             out[key] = value
     return out
 
 
+def _verbose_edge(row: Mapping[str, object]) -> dict[str, object]:
+    out: dict[str, object] = dict(row)
+    _inject_edge_repo_paths(out, row)
+    return out
+
+
 def format_edges(rows: Sequence[Mapping[str, object]], *, verbose: bool) -> list[dict[str, object]]:
     if verbose:
-        return [dict(row) for row in rows]
+        return [_verbose_edge(row) for row in rows]
     return [_compact_edge(row) for row in rows]

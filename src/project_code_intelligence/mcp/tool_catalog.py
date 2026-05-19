@@ -161,39 +161,23 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         },
     ),
     "get_code_intel_record": ToolDefinition(
-        "Fetch one record by record_id. Compact by default; include_content/include_metadata add body/metadata.",
+        "Fetch one or many records by record_id (string) or record_ids (array; "
+        "results preserve input order with missing IDs reported). "
+        "Compact by default; include_content/include_metadata add body/metadata.",
         {
             "type": "object",
             "properties": {
                 "record_id": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Stable record ID.",
+                    "description": "Stable record ID (single fetch).",
                 },
-                "collection": {"type": "string", "description": _COLLECTION_DESC},
-                "repo": {"type": "string"},
-                "snapshot_id": {"type": "integer", "minimum": 1},
-                "include_historical": {"type": "boolean"},
-                "include_content": {"type": "boolean"},
-                "include_metadata": {"type": "boolean"},
-                "verbose": {"type": "boolean"},
-            },
-            "required": ["record_id"],
-            "additionalProperties": False,
-        },
-    ),
-    "get_code_intel_records": ToolDefinition(
-        "Fetch records by record_ids in input order. "
-        "Compact by default; include_content/include_metadata add body/metadata.",
-        {
-            "type": "object",
-            "properties": {
                 "record_ids": {
                     "type": "array",
                     "items": {"type": "string", "minLength": 1},
                     "minItems": 1,
                     "maxItems": 100,
-                    "description": "Stable record IDs.",
+                    "description": "Stable record IDs (batch fetch; pass exactly one of record_id/record_ids).",
                 },
                 "collection": {"type": "string", "description": _COLLECTION_DESC},
                 "repo": {"type": "string"},
@@ -203,7 +187,6 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "include_metadata": {"type": "boolean"},
                 "verbose": {"type": "boolean"},
             },
-            "required": ["record_ids"],
             "additionalProperties": False,
         },
     ),
@@ -264,24 +247,6 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
             "additionalProperties": False,
         },
     ),
-    "list_code_intel_parser_failures": ToolDefinition(
-        "List files that failed to parse.",
-        {
-            "type": "object",
-            "properties": {
-                "limit": {"type": "integer", "minimum": 1, "maximum": 500, "description": _LIMIT_500_DESC},
-                "collection": {"type": "string", "description": _COLLECTION_DESC},
-                "repo": {"type": "string"},
-                "language": {"type": "string"},
-                "parser": {"type": "string"},
-                "source_path": {"type": "string", "description": _SOURCE_PATH_DESC},
-                "source_path_prefix": {"type": "string", "description": _SOURCE_PATH_PREFIX_DESC},
-                "snapshot_id": {"type": "integer", "minimum": 1},
-                "include_historical": {"type": "boolean"},
-            },
-            "additionalProperties": False,
-        },
-    ),
     "search_static_findings": ToolDefinition(
         "Search SARIF/static-analysis findings.",
         {
@@ -313,18 +278,6 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "include_code_flows": {"type": "boolean"},
             },
             "required": ["id"],
-            "additionalProperties": False,
-        },
-    ),
-    "get_static_code_flow": ToolDefinition(
-        "Fetch code-flow steps for a static finding.",
-        {
-            "type": "object",
-            "properties": {
-                "finding_id": {"type": "integer"},
-                "flow_index": {"type": "integer"},
-            },
-            "required": ["finding_id"],
             "additionalProperties": False,
         },
     ),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence import db
@@ -29,6 +30,8 @@ from project_code_intelligence.mcp.formatting import (
     dedup_by_location,
     format_edges,
     format_records,
+    verbose_file,
+    verbose_record,
 )
 from project_code_intelligence.mcp.protocol import (
     Json,
@@ -45,6 +48,7 @@ from project_code_intelligence.mcp.records import (
     get_record_ids_arg,
 )
 from project_code_intelligence.mcp.related import (
+    RelatedDirection,
     RelatedQueryContext,
     annotate_related_edges,
     related_base_edge_filters,
@@ -418,7 +422,8 @@ def tool_get_code_intel_record(args: Json) -> Json:
                 if missing_snapshot_warning is not None:
                     response["warnings"] = [missing_snapshot_warning]
                 return ok(response)
-            return ok({"result": dict(row) if verbose else compact_record(row, include_metadata=include_metadata)})
+            result = verbose_record(row) if verbose else compact_record(row, include_metadata=include_metadata)
+            return ok({"result": result})
         rows = cursor.fetchall()
     return ok(
         format_record_batch_response(
@@ -431,6 +436,110 @@ def tool_get_code_intel_record(args: Json) -> Json:
     )
 
 
+_RELATED_EDGES_SELECT = """
+            SELECT e.id, e.snapshot_id, e.collection, e.repo, e.commit_sha,
+                   e.source_record_id, e.target_record_id, e.edge_type,
+                   e.source_symbol, e.target_symbol, e.source_path, e.target_path,
+                   e.confidence_kind, e.metadata,
+                   tgt.id IS NOT NULL AS target_resolved,
+                   CASE WHEN tgt.id IS NOT NULL THEN 'project_symbol' ELSE 'unresolved' END AS target_kind,
+                   src.id AS source_record_db_id, src.title AS source_title,
+                   src.summary AS source_summary, src.record_type AS source_record_type,
+                   src.language AS source_language, src.line_start AS source_line_start,
+                   src.line_end AS source_line_end,
+                   tgt.id AS target_record_db_id, tgt.title AS target_title,
+                   tgt.summary AS target_summary, tgt.record_type AS target_record_type,
+                   tgt.language AS target_language, tgt.line_start AS target_line_start,
+                   tgt.line_end AS target_line_end
+            FROM project_code_intel_edges e
+            LEFT JOIN project_code_intel_records src
+                ON src.snapshot_id = e.snapshot_id AND src.record_id = e.source_record_id
+            LEFT JOIN project_code_intel_records tgt
+                ON tgt.snapshot_id = e.snapshot_id AND tgt.record_id = e.target_record_id
+            """
+
+
+@dataclass(frozen=True)
+class _RelatedEdgesQuerySpec:
+    """Per-direction inputs for `_run_related_edges_query`. Consolidated so the
+    handler can pass shared scope (scoped_record_ids/symbol/limit) once instead
+    of threading four parallel kwargs through every call.
+    """
+
+    direction: RelatedDirection
+    scoped_record_ids: list[str]
+    symbol: str | None
+    limit: int
+
+
+def _run_related_edges_query(
+    conn: db.DbConnection,
+    args: Json,
+    spec: _RelatedEdgesQuerySpec,
+) -> list[db.DbRow]:
+    clauses, params = related_base_edge_filters(args, spec.direction)
+    if spec.scoped_record_ids:
+        clauses.append(related_record_clause(spec.direction))
+        params.extend(related_clause_params(spec.direction, spec.scoped_record_ids))
+    order_clause, order_params = related_order_clause(
+        symbol=spec.symbol, scoped_record_ids=spec.scoped_record_ids, direction=spec.direction
+    )
+    params.extend(order_params)
+    params.append(spec.limit)
+    return conn.execute(
+        db.query_sql(
+            query_with_where(
+                _RELATED_EDGES_SELECT,
+                clauses,
+                f"""
+            ORDER BY {order_clause}
+            LIMIT %s
+            """,
+            )
+        ),
+        params,
+    ).fetchall()
+
+
+def _interleave_related_edges(
+    incoming: list[db.DbRow],
+    outgoing: list[db.DbRow],
+    *,
+    limit: int,
+) -> list[db.DbRow]:
+    """Balance per-direction results so neither side starves the other within `limit`.
+
+    Each input is pre-sorted resolved-first by the SQL ORDER BY. We alternate
+    incoming/outgoing for fairness, dedup by edge id (self-edges are excluded
+    by the base filter, but the same edge can surface in both queries when the
+    record_id appears as both source and target across resolved pairs), and trim
+    to the requested limit. When one side is exhausted, the other side fills the
+    remaining slots.
+    """
+    seen: set[object] = set()
+    merged: list[db.DbRow] = []
+    i, j = 0, 0
+    while len(merged) < limit and (i < len(incoming) or j < len(outgoing)):
+        for stream, index_box in ((incoming, [i]), (outgoing, [j])):
+            if len(merged) >= limit:
+                break
+            cursor = index_box[0]
+            while cursor < len(stream):
+                edge = stream[cursor]
+                cursor += 1
+                edge_id = edge.get("id")
+                if edge_id in seen:
+                    continue
+                seen.add(edge_id)
+                merged.append(edge)
+                break
+            if stream is incoming:
+                i = cursor
+            else:
+                j = cursor
+    return merged
+
+
 def tool_related_code_intel(args: Json) -> Json:
     record_id = optional_text(args, "record_id")
     symbol = optional_text(args, "symbol")
@@ -441,7 +550,7 @@ def tool_related_code_intel(args: Json) -> Json:
         # silently picking record_id (the historical behavior, which made symbol look ignored).
         raise McpProtocolError("provide exactly one of record_id or symbol")
     direction = related_direction(args)
-    clauses, params = related_base_edge_filters(args, direction)
+    requested_limit = require_int(args, "limit", 20, 1, 100)
 
     with mcp_db.connect() as conn:
         if not mcp_db.code_intel_tables_exist(conn):
@@ -465,48 +574,28 @@ def tool_related_code_intel(args: Json) -> Json:
                         *([missing_snapshot_warning] if missing_snapshot_warning is not None else []),
                     ],
                 })
-            clauses.append(related_record_clause(direction))
-            params.extend(related_clause_params(direction, scoped_record_ids))
-        order_clause, order_params = related_order_clause(
-            symbol=symbol,
-            scoped_record_ids=scoped_record_ids,
-            direction=direction,
-        )
-        params.extend(order_params)
-        params.append(require_int(args, "limit", 20, 1, 100))
-        edges = conn.execute(
-            db.query_sql(
-                query_with_where(
-                    """
-            SELECT e.id, e.snapshot_id, e.collection, e.repo, e.commit_sha,
-                   e.source_record_id, e.target_record_id, e.edge_type,
-                   e.source_symbol, e.target_symbol, e.source_path, e.target_path,
-                   e.confidence_kind, e.metadata,
-                   tgt.id IS NOT NULL AS target_resolved,
-                   CASE WHEN tgt.id IS NOT NULL THEN 'project_symbol' ELSE 'unresolved' END AS target_kind,
-                   src.id AS source_record_db_id, src.title AS source_title,
-                   src.summary AS source_summary, src.record_type AS source_record_type,
-                   src.language AS source_language, src.line_start AS source_line_start,
-                   src.line_end AS source_line_end,
-                   tgt.id AS target_record_db_id, tgt.title AS target_title,
-                   tgt.summary AS target_summary, tgt.record_type AS target_record_type,
-                   tgt.language AS target_language, tgt.line_start AS target_line_start,
-                   tgt.line_end AS target_line_end
-            FROM project_code_intel_edges e
-            LEFT JOIN project_code_intel_records src
-                ON src.snapshot_id = e.snapshot_id AND src.record_id = e.source_record_id
-            LEFT JOIN project_code_intel_records tgt
-                ON tgt.snapshot_id = e.snapshot_id AND tgt.record_id = e.target_record_id
-            """,
-                    clauses,
-                    f"""
-            ORDER BY {order_clause}
-            LIMIT %s
-            """,
-                )
-            ),
-            params,
-        ).fetchall()
+        if direction == "any":
+            # Run each direction at the full limit, then interleave + trim. Fetching at the full
+            # limit (rather than half) means a side with fewer matches doesn't artificially cap
+            # the other; the merge balances actively-populated sides and falls back to single-side
+            # output when only one direction has edges.
+            incoming_edges = _run_related_edges_query(
+                conn,
+                args,
+                _RelatedEdgesQuerySpec("incoming", scoped_record_ids, symbol, requested_limit),
+            )
+            outgoing_edges = _run_related_edges_query(
+                conn,
+                args,
+                _RelatedEdgesQuerySpec("outgoing", scoped_record_ids, symbol, requested_limit),
+            )
+            edges = _interleave_related_edges(incoming_edges, outgoing_edges, limit=requested_limit)
+        else:
+            edges = _run_related_edges_query(
+                conn,
+                args,
+                _RelatedEdgesQuerySpec(direction, scoped_record_ids, symbol, requested_limit),
+            )
     verbose = optional_bool(args, "verbose") or False
     annotated_edges = annotate_related_edges(
         edges,
@@ -687,55 +776,6 @@ def tool_get_static_finding(args: Json) -> Json:
     return ok(result)
 
 
-def tool_get_static_code_flow(args: Json) -> Json:
-    finding_id = args.get("finding_id")
-    if not isinstance(finding_id, int):
-        raise McpProtocolTypeError("finding_id must be an integer")
-    flow_index = args.get("flow_index")
-    collection = scoped_collection({})
-    clauses = ["cf.finding_id = %s"]
-    params: QueryParams = [finding_id]
-    if collection:
-        clauses.append("f.collection = %s")
-        params.append(collection)
-    if flow_index is not None:
-        if not isinstance(flow_index, int):
-            raise McpProtocolTypeError("flow_index must be an integer")
-        clauses.append("cf.flow_index = %s")
-        params.append(flow_index)
-    with mcp_db.connect() as conn:
-        if not mcp_db.table_regclass_exists(conn, "project_code_intel_static_code_flows"):
-            return ok({"error": "static-analysis schema is not initialized"})
-        finding_exists = (
-            conn.execute(
-                "SELECT 1 FROM project_code_intel_static_findings WHERE id = %s",
-                [finding_id],
-            ).fetchone()
-            is not None
-        )
-        if not finding_exists:
-            return ok({"found": False})
-        rows = conn.execute(
-            db.query_sql(
-                query_with_where(
-                    """
-            SELECT cf.id, cf.finding_id, cf.flow_index, cf.thread_index, cf.step_index,
-                   cf.source_path, cf.uri, cf.message, cf.line_start, cf.line_end,
-                   cf.column_start, cf.column_end, cf.importance, cf.properties
-            FROM project_code_intel_static_code_flows cf
-            JOIN project_code_intel_static_findings f ON f.id = cf.finding_id
-            """,
-                    clauses,
-                    """
-            ORDER BY cf.flow_index, cf.thread_index, cf.step_index, cf.id
-            """,
-                )
-            ),
-            params,
-        ).fetchall()
-    return ok({"found": True, "finding_id": finding_id, "flow_index": flow_index, "steps": rows})
-
-
 def tool_list_code_intel_files(args: Json) -> Json:
     limit = require_int(args, "limit", 50, 1, 500)
     clauses, params = scoped_collection_repo_clauses(args, "f")
@@ -787,7 +827,7 @@ def tool_list_code_intel_files(args: Json) -> Json:
         ).fetchall()
         if not rows:
             repo_exists = repo_scope_exists(conn, args)
-    files: list[object] = list(rows) if verbose else [compact_file(row) for row in rows]
+    files: list[object] = [verbose_file(row) for row in rows] if verbose else [compact_file(row) for row in rows]
     response: Json = {**snapshot_scope_response(args), "files": cast("JsonValue", files)}
     warnings = scope_filter_warnings(
         args, rows, repo_exists=repo_exists, missing_snapshot_warning=missing_snapshot_warning
@@ -795,54 +835,6 @@ def tool_list_code_intel_files(args: Json) -> Json:
     false_filter_warning = overconstrained_boolean_filter_warning(args, rows)
     if false_filter_warning:
         warnings.append(false_filter_warning)
-    if warnings:
-        response["warnings"] = warnings
-    return ok(response)
-
-
-def tool_list_code_intel_parser_failures(args: Json) -> Json:
-    limit = require_int(args, "limit", 50, 1, 500)
-    clauses, params = scoped_collection_repo_clauses(args, "pf")
-    for arg_name in ("language", "parser"):
-        value = optional_text(args, arg_name)
-        if value:
-            clauses.append(f"pf.{arg_name} = %s")
-            params.append(value)
-    path_clauses, path_params = source_path_clauses(args, "pf")
-    clauses.extend(path_clauses)
-    params.extend(path_params)
-    params.append(limit)
-
-    repo_exists: bool | None = None
-    missing_snapshot_warning: Json | None = None
-    with mcp_db.connect() as conn:
-        if not mcp_db.table_regclass_exists(conn, "project_code_intel_parser_failures"):
-            return ok({"error": "code intelligence schema is not initialized"})
-        missing_snapshot_warning = snapshot_scope_warning(conn, args)
-        rows = conn.execute(
-            db.query_sql(
-                query_with_where(
-                    """
-            SELECT pf.id, pf.snapshot_id, pf.collection, pf.repo, pf.commit_sha,
-                   pf.source_path, pf.language, pf.parser, pf.error, pf.metadata,
-                   pf.created_at
-            FROM project_code_intel_parser_failures pf
-            """,
-                    clauses,
-                    """
-            ORDER BY pf.source_path, pf.parser
-            LIMIT %s
-            """,
-                )
-            ),
-            params,
-        ).fetchall()
-        if not rows:
-            repo_exists = repo_scope_exists(conn, args)
-    response: Json = {**snapshot_scope_response(args), "parser_failures": cast("JsonValue", rows)}
-    warnings = scope_filter_warnings(
-        args, rows, repo_exists=repo_exists, missing_snapshot_warning=missing_snapshot_warning
-    )
     if warnings:
         response["warnings"] = warnings
     return ok(response)
@@ -857,16 +849,10 @@ TOOLS: ToolRegistry = {
     "search_code_intel_text": (TOOL_DEFINITIONS["search_code_intel_text"], tool_search_code_intel_text),
     "search_code_intel_semantic": (TOOL_DEFINITIONS["search_code_intel_semantic"], tool_search_code_intel_semantic),
     "get_code_intel_record": (TOOL_DEFINITIONS["get_code_intel_record"], tool_get_code_intel_record),
-    "get_code_intel_records": (TOOL_DEFINITIONS["get_code_intel_records"], tool_get_code_intel_record),
     "related_code_intel": (TOOL_DEFINITIONS["related_code_intel"], tool_related_code_intel),
     "list_code_intel_files": (TOOL_DEFINITIONS["list_code_intel_files"], tool_list_code_intel_files),
-    "list_code_intel_parser_failures": (
-        TOOL_DEFINITIONS["list_code_intel_parser_failures"],
-        tool_list_code_intel_parser_failures,
-    ),
     "search_static_findings": (TOOL_DEFINITIONS["search_static_findings"], tool_search_static_findings),
     "get_static_finding": (TOOL_DEFINITIONS["get_static_finding"], tool_get_static_finding),
-    "get_static_code_flow": (TOOL_DEFINITIONS["get_static_code_flow"], tool_get_static_code_flow),
 }
 
 
