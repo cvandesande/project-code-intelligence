@@ -17,6 +17,7 @@ venv/
 
 # Local agent/editor state.
 .agents/
+.claude/
 .codex/
 .vscode/
 .zed/
