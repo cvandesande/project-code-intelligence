@@ -50,6 +50,30 @@ class UserConfigTests(unittest.TestCase):
             self.assertEqual(env["PCI_DATABASE_ADMIN_PASSWORD"], "secret value")
             self.assertIn("PCI_DATABASE_ADMIN_USER", result.skipped if result else ())
 
+    def test_load_pci_index_user_config_accepts_postgres_admin_repair_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "project-code-intelligence" / "pci-index.env"
+            path.parent.mkdir()
+            _ = path.write_text(
+                "\n".join((
+                    "PCI_DATABASE_URL=postgresql://db.example.invalid:5432?sslmode=prefer",
+                    "PCI_DATABASE_ADMIN_USER=pci_index_admin",
+                    "PCI_DATABASE_ADMIN_PASSWORD=index-secret",
+                    "PCI_POSTGRES_ADMIN_USER=postgres",
+                    "PCI_POSTGRES_ADMIN_PASSWORD=postgres-secret",
+                    "",
+                )),
+                encoding="utf-8",
+            )
+            path.chmod(0o600)
+            env = {"XDG_CONFIG_HOME": directory}
+
+            result = config.load_pci_index_user_config(env)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(env["PCI_POSTGRES_ADMIN_USER"], "postgres")
+            self.assertEqual(env["PCI_POSTGRES_ADMIN_PASSWORD"], "postgres-secret")
+
     def test_load_pci_index_user_config_refuses_group_or_world_readable_file(self) -> None:
         credential = " ".join(("secret", "value"))
         with tempfile.TemporaryDirectory() as directory:

@@ -66,12 +66,14 @@ class _FakeRoleBootstrapConnection:
         extension_exists: bool = False,
         role_exists: bool = False,
         catalog: _FakePgCatalog | None = None,
+        fail_on: str | None = None,
     ) -> None:
         self.statements: list[str] = []
         self.database_exists = database_exists
         self.extension_exists = extension_exists
         self.role_exists = role_exists
         self.catalog = catalog or _FakePgCatalog()
+        self.fail_on = fail_on
 
     def __enter__(self) -> _FakeRoleBootstrapConnection:
         return self
@@ -86,6 +88,8 @@ class _FakeRoleBootstrapConnection:
         _ = params
         text = str(query)
         self.statements.append(text)
+        if self.fail_on is not None and self.fail_on in text:
+            raise DatabaseConnectionError("must be owner of table project_code_intel_snapshots")
         return self._cursor_for_query(text)
 
     def _cursor_for_query(self, text: str) -> _FakeCursor:
@@ -525,6 +529,131 @@ class DatabaseBootstrapTests(unittest.TestCase):
         maintenance_statements = "\n".join(maintenance_connection.statements)
         self.assertNotIn("ALTER ROLE", maintenance_statements)
         self.assertNotIn("CREATE ROLE", maintenance_statements)
+
+    def test_bootstrap_retries_target_init_with_runtime_credentials_for_legacy_owner(self) -> None:
+        settings = DatabaseSettings(
+            dsn="postgresql://db.example.invalid/pci_demo?sslmode=prefer",
+            dsn_user="legacy_owner",
+            dsn_password=self.TEST_CREDENTIAL,
+            dbname="pci_demo",
+            admin_user=DEFAULT_POSTGRES_INDEX_ADMIN_ROLE,
+            admin_password="-".join(("index", "credential")),
+            database_inferred=True,
+        )
+        catalog = _FakePgCatalog(tables=["project_code_intel_snapshots"])
+        maintenance_connection = _FakeRoleBootstrapConnection(role_exists=True)
+        admin_target_connection = _FakeRoleBootstrapConnection(
+            extension_exists=True,
+            catalog=catalog,
+            fail_on="ALTER TABLE public.project_code_intel_snapshots OWNER TO pci_demo_rw",
+        )
+        runtime_target_connection = _FakeRoleBootstrapConnection(extension_exists=True, catalog=catalog)
+        captured_target_users: list[str | None] = []
+
+        def fake_connect(
+            *, readonly: bool | None = None, settings: DatabaseSettings | None = None
+        ) -> _FakeRoleBootstrapConnection:
+            _ = readonly
+            self.assertIsNotNone(settings)
+            captured_target_users.append(settings.dsn_user if settings is not None else None)
+            if len(captured_target_users) == 1:
+                return admin_target_connection
+            return runtime_target_connection
+
+        with (
+            patch("project_code_intelligence.db.Connection.connect", return_value=maintenance_connection),
+            patch("project_code_intelligence.db.connect", side_effect=fake_connect),
+        ):
+            _ = db.bootstrap_inferred_database(settings)
+
+        self.assertEqual(captured_target_users, [DEFAULT_POSTGRES_INDEX_ADMIN_ROLE, "legacy_owner"])
+        self.assertIn(
+            "ALTER TABLE public.project_code_intel_snapshots OWNER TO pci_demo_rw",
+            "\n".join(runtime_target_connection.statements),
+        )
+
+    def test_bootstrap_retries_target_init_with_supplied_admin_fallback(self) -> None:
+        settings = DatabaseSettings(
+            dsn="postgresql://db.example.invalid/pci_demo?sslmode=prefer",
+            dbname="pci_demo",
+            admin_user=DEFAULT_POSTGRES_INDEX_ADMIN_ROLE,
+            admin_password="-".join(("index", "credential")),
+            database_inferred=True,
+        )
+        postgres_admin_settings = DatabaseSettings(
+            dsn="postgresql://db.example.invalid/pci_demo?sslmode=prefer",
+            dsn_user="postgres",
+            dsn_password=self.TEST_CREDENTIAL,
+            dbname="pci_demo",
+            database_inferred=True,
+        )
+        catalog = _FakePgCatalog(tables=["project_code_intel_snapshots"])
+        maintenance_connection = _FakeRoleBootstrapConnection(role_exists=True)
+        admin_target_connection = _FakeRoleBootstrapConnection(
+            extension_exists=True,
+            catalog=catalog,
+            fail_on="ALTER TABLE public.project_code_intel_snapshots OWNER TO pci_demo_rw",
+        )
+        postgres_target_connection = _FakeRoleBootstrapConnection(extension_exists=True, catalog=catalog)
+        captured_target_users: list[str | None] = []
+
+        def fake_connect(
+            *, readonly: bool | None = None, settings: DatabaseSettings | None = None
+        ) -> _FakeRoleBootstrapConnection:
+            _ = readonly
+            self.assertIsNotNone(settings)
+            captured_target_users.append(settings.dsn_user if settings is not None else None)
+            if len(captured_target_users) == 1:
+                return admin_target_connection
+            if settings is not None and settings.dsn_user is None:
+                raise DatabaseConnectionError("no password supplied")
+            return postgres_target_connection
+
+        with (
+            patch("project_code_intelligence.db.Connection.connect", return_value=maintenance_connection),
+            patch("project_code_intelligence.db.connect", side_effect=fake_connect),
+        ):
+            _ = db.bootstrap_inferred_database(settings, target_fallback_settings=[postgres_admin_settings])
+
+        self.assertEqual(captured_target_users, [DEFAULT_POSTGRES_INDEX_ADMIN_ROLE, "postgres"])
+        self.assertIn(
+            "ALTER TABLE public.project_code_intel_snapshots OWNER TO pci_demo_rw",
+            "\n".join(postgres_target_connection.statements),
+        )
+
+    def test_bootstrap_skips_credentialless_url_runtime_fallback(self) -> None:
+        settings = DatabaseSettings(
+            dsn="postgresql://db.example.invalid/pci_demo?sslmode=prefer",
+            dbname="pci_demo",
+            admin_user=DEFAULT_POSTGRES_INDEX_ADMIN_ROLE,
+            admin_password="-".join(("index", "credential")),
+            database_inferred=True,
+        )
+        maintenance_connection = _FakeRoleBootstrapConnection(role_exists=True)
+        admin_target_connection = _FakeRoleBootstrapConnection(
+            extension_exists=True,
+            catalog=_FakePgCatalog(tables=["project_code_intel_snapshots"]),
+            fail_on="ALTER TABLE public.project_code_intel_snapshots OWNER TO pci_demo_rw",
+        )
+        captured_target_users: list[str | None] = []
+
+        def fake_connect(
+            *, readonly: bool | None = None, settings: DatabaseSettings | None = None
+        ) -> _FakeRoleBootstrapConnection:
+            _ = readonly
+            self.assertIsNotNone(settings)
+            captured_target_users.append(settings.dsn_user if settings is not None else None)
+            return admin_target_connection
+
+        with (
+            patch("project_code_intelligence.db.Connection.connect", return_value=maintenance_connection),
+            patch("project_code_intelligence.db.connect", side_effect=fake_connect),
+            self.assertRaises(DatabaseConnectionError) as raised,
+        ):
+            _ = db.bootstrap_inferred_database(settings)
+
+        self.assertEqual(captured_target_users, [DEFAULT_POSTGRES_INDEX_ADMIN_ROLE])
+        self.assertIn("PCI_POSTGRES_ADMIN_USER/PCI_POSTGRES_ADMIN_PASSWORD", str(raised.exception))
 
     def test_bootstrap_creates_project_roles_from_writer_credentials_when_admin_missing(self) -> None:
         # Bundled-local scenario: PCI_PG_USER/PASS supply codeintel:codeintel and the user has
