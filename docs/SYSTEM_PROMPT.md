@@ -1,43 +1,61 @@
-# project-code-intelligence MCP
+# project-code-intelligence MCP — first-call doctrine
 
-Indexes the source tree (files, records, edges, embeddings, SARIF) into
-Postgres. For discovery questions — "where is X used?", "what calls Y?",
-"what's in this codebase?", "find code that does Z" — the index is the
-default; Read/Grep are the fallback. For known-path reads of small files,
-the reverse is true.
+Tool selection in this project is path-dependent. The first tool you reach
+for locks in the next several. Open with grep and you stay in grep mode;
+open with an MCP call and you stay in MCP mode for the surrounding work.
+The decision that matters most is the first one.
 
-**Before any broad file search or sub-agent dispatch, name the MCP query
-you'd run first (or briefly say why Read/Grep is the right call instead).**
-The choice should be visible whether you end up calling MCP or not.
+**Before any broad search or sub-agent dispatch, name the tool you intend
+to use and why.** The choice should be visible whether it's MCP or grep.
+
+## The first call
+
+**Before any other search, run `code_intel_status`.** It is cheap, it
+confirms the index is current, and it sets the working pattern for the
+session. Skip only if you've already called it this session.
+
+If a different first call fits the task shape better, use the table:
+
+| Task shape | First call |
+|---|---|
+| "How does X work" / "where is Y handled" | `search_code_intel_semantic` |
+| Outline of one file | `search_code_intel_text` w/ `mode=enumerate`, `source_path=<file>`, `record_type=symbol_definition` |
+| Find every reference to a symbol you can name | `search_code_intel_text` w/ the symbol as query |
+| Who calls a function | `related_code_intel` with `direction=incoming` |
+| You already have a `record_id` from any of the above | `get_code_intel_record` w/ `include_content=true` |
+
+If none of these fit, the task is probably filesystem-shaped and grep/Read
+is the right first call.
+
+## After the first call
+
+If the first call was MCP, prefer MCP for the surrounding work. The index
+is already loaded into your attention; switching to grep costs more than
+staying. Pair `search_code_intel_semantic` (concept) with
+`search_code_intel_text` (exact symbol/literal) when you need both.
+
+If the first call was grep, finish in grep. Don't toggle modes mid-task.
+
+## Exceptions (grep/Read first call is correct)
+
+- Exact string literals or error messages.
+- Files known by path.
+- Verifying any MCP result before acting on it.
+- Cross-file enumeration of touch points for a known symbol you're about
+  to remove (definition + schema + catalog + tests). Discovery-shaped
+  tasks go to MCP; removal-shaped tasks go to grep.
+
+## Self-evaluation
 
 **After an MCP call where Read/Grep would have been cheaper (it
-over-returned, or you still had to Read multiple files anyway), say so
-in one sentence at the time.** At the end of a non-trivial task,
-summarize MCP usage in 3–5 lines: calls made and any misjudgments noted.
+over-returned, or you still had to Read multiple files anyway), say so in
+one sentence at the time.** At the end of a non-trivial task, summarize
+MCP usage in 3–5 lines: calls made and any misjudgments noted.
 
-## Default to MCP for:
+## Notes
 
-| Task | Tool |
-|---|---|
-| "Where is `Foo` defined/used?" | `search_code_intel_text query="Foo"` |
-| "What's queryable here?" (record types, languages, file roles…) | `code_intel_status` (with `include_queryability=true` for full lists) |
-| "List files matching a filter" | `list_code_intel_files repo=… file_role=… language=…` |
-| "What calls/uses `Bar.method`?" | `related_code_intel symbol="Bar.method" direction=incoming` |
-| "Find code by concept, no identifier" | `search_code_intel_semantic query="…"` |
-| "Full text of record `<id>`" | `get_code_intel_record record_id=<id> include_content=true` |
-| "Triage SARIF findings" | `search_static_findings`, `get_static_finding`, `get_static_code_flow` |
-
-Start non-trivial sessions with `code_intel_status`: cheap, confirms the
-index matches HEAD, lists queryable filter values.
-
-## Fall back to Read/Grep when:
-
-- The path is known and the file is small (Read is one cheap op).
-- The index is stale: post-edit verification, uncommitted changes, or
-  `snapshot_dirty` warnings — MCP's view is a snapshot.
-
-After an MCP failure, fall back and surface it once; don't retry in a loop.
-
-Trust `tools/list` over this prompt if schemas drift. Empty-result responses
-include `empty_<dim>_scope` / `mode_inferred_enumerate` warnings that name
-the bad filter and point at `code_intel_status` for valid values.
+Trust `tools/list` over this prompt if schemas drift. Empty-result
+responses include `empty_<dim>_scope` / `mode_inferred_enumerate` warnings
+that name the bad filter and point at `code_intel_status` for valid
+values. After an MCP failure, fall back and surface it once; don't retry
+in a loop.
