@@ -1,4 +1,4 @@
-"""Metadata for common build/config DSLs seen in OpenWrt-style trees."""
+"""Metadata for common Unix build/config DSLs."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ YACC_TOKEN_RE = re.compile(r"(?m)^%token\s+(.+)$")
 YACC_RULE_RE = re.compile(r"(?m)^([A-Za-z_][A-Za-z0-9_]*)\s*:")
 BOOT_SKIP_COMMANDS = frozenset({"else", "fi", "if", "then"})
 
-OPENWRT_FORMAT_METADATA_KEYS = (
+UNIX_BUILD_FORMAT_METADATA_KEYS = (
     "autotools_macros",
     "autotools_definitions",
     "linker_sections",
@@ -84,7 +84,7 @@ def unix_dsl_metadata(path: str, text: str) -> JsonObject:
     return {}
 
 
-def openwrt_format_metadata(path: str, text: str) -> JsonObject:
+def unix_build_format_metadata(path: str, text: str) -> JsonObject:
     suffix = Path(path).suffix.lower()
     if suffix in {".m4", ".am", ".ac"}:
         return autotools_metadata(text)
@@ -95,9 +95,9 @@ def openwrt_format_metadata(path: str, text: str) -> JsonObject:
     return unix_dsl_metadata(path, text)
 
 
-OPENWRT_FORMAT_PROFILE = LanguageProfile(
-    name="openwrt-formats",
+UNIX_BUILD_FORMAT_PROFILE = LanguageProfile(
+    name="unix-build-formats",
     languages=frozenset({"autotools", "awk", "boot_script", "lex", "linker_script", "yacc"}),
-    metadata_keys=OPENWRT_FORMAT_METADATA_KEYS,
-    file_metadata=openwrt_format_metadata,
+    metadata_keys=UNIX_BUILD_FORMAT_METADATA_KEYS,
+    file_metadata=unix_build_format_metadata,
 )

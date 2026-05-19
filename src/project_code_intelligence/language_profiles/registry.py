@@ -18,7 +18,6 @@ from project_code_intelligence.language_profiles.javascript import JAVASCRIPT_PR
 from project_code_intelligence.language_profiles.jvm import JVM_PROFILE
 from project_code_intelligence.language_profiles.lua import LUA_PROFILE
 from project_code_intelligence.language_profiles.markup_data import MARKUP_DATA_PROFILE
-from project_code_intelligence.language_profiles.openwrt_formats import OPENWRT_FORMAT_PROFILE
 from project_code_intelligence.language_profiles.perl import PERL_PROFILE
 from project_code_intelligence.language_profiles.php import PHP_PROFILE
 from project_code_intelligence.language_profiles.powershell import POWERSHELL_PROFILE
@@ -29,6 +28,7 @@ from project_code_intelligence.language_profiles.rust import RUST_PROFILE
 from project_code_intelligence.language_profiles.scala import SCALA_PROFILE
 from project_code_intelligence.language_profiles.shell import SHELL_PROFILE
 from project_code_intelligence.language_profiles.swift import SWIFT_PROFILE
+from project_code_intelligence.language_profiles.unix_build_formats import UNIX_BUILD_FORMAT_PROFILE
 from project_code_intelligence.language_profiles.web import WEB_PROFILE
 from project_code_intelligence.language_profiles.zig import ZIG_PROFILE
 
@@ -51,7 +51,6 @@ LANGUAGE_PROFILES: tuple[LanguageProfile, ...] = (
     JVM_PROFILE,
     LUA_PROFILE,
     MARKUP_DATA_PROFILE,
-    OPENWRT_FORMAT_PROFILE,
     PERL_PROFILE,
     PHP_PROFILE,
     POWERSHELL_PROFILE,
@@ -62,6 +61,7 @@ LANGUAGE_PROFILES: tuple[LanguageProfile, ...] = (
     SCALA_PROFILE,
     SHELL_PROFILE,
     SWIFT_PROFILE,
+    UNIX_BUILD_FORMAT_PROFILE,
     WEB_PROFILE,
     ZIG_PROFILE,
 )
