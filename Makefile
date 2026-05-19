@@ -149,7 +149,7 @@ compose-check: ## Validate docker-compose.yml and bundled copy
 	fi
 
 tool-install: ## Install or upgrade the pci-* binaries with uv
-	uv tool install . --reinstall
+	uv tool install --python "$$(command -v python3)" . --reinstall
 	@bindir=$$(uv tool dir --bin 2>/dev/null) || bindir=""; \
 	if [ -z "$$bindir" ]; then exit 0; fi; \
 	case ":$$PATH:" in \
