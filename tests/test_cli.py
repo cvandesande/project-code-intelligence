@@ -113,12 +113,12 @@ class CliWrapperTests(unittest.TestCase):
     def test_single_repo_path_maps_to_parent_root_and_repo_name(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            repo = root / "openwrt"
+            repo = root / "service-api"
             repo.mkdir()
 
             args = cli.repo_paths_to_ingest_args([str(repo)])
 
-        self.assertEqual(args, ["--root", str(root.resolve()), "--repos", "openwrt"])
+        self.assertEqual(args, ["--root", str(root.resolve()), "--repos", "service-api"])
 
     def test_collection_is_inferred_from_repo_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -412,7 +412,7 @@ class CliWrapperTests(unittest.TestCase):
                     mcp_response({
                         "schema_present": True,
                         "snapshots": [
-                            {"repo": "openwrt", "id": 1},
+                            {"repo": "service-api", "id": 1},
                             {"repo": "ask-cmm", "id": 2},
                         ],
                     }),
@@ -436,10 +436,10 @@ class CliWrapperTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(calls[0], ("code_intel_status", {}, 1))
         probe_repos = [args["repo"] for tool, args, _request_id in calls[1:] if tool == "search_code_intel_text"]
-        self.assertEqual(probe_repos, ["openwrt", "ask-cmm"])
+        self.assertEqual(probe_repos, ["service-api", "ask-cmm"])
 
         payload = cast("dict[str, object]", json.loads(stdout.getvalue()))
-        self.assertEqual(payload["repos"], ["openwrt", "ask-cmm"])
+        self.assertEqual(payload["repos"], ["service-api", "ask-cmm"])
 
     def test_mcp_smoke_fails_on_status_payload_error(self) -> None:
         def fake_mcp_call(

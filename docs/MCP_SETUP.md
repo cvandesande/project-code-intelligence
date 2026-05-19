@@ -469,6 +469,6 @@ The important behavior for assistants is:
 2. Use the collection and repo keys reported by `code_intel_status`.
 3. For implementation questions, pass `file_role: source` when you want to
    exclude tests and docs rather than just rank source higher.
-4. Use repo filters such as `openwrt`, `ask-cmm`, or `fci`, not absolute paths.
+4. Use repo filters such as `service-api`, `web-ui`, or `shared-lib`, not absolute paths.
 5. Treat the MCP index as a navigation aid and verify important behavior
    against the working tree.

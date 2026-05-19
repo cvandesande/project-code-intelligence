@@ -198,7 +198,7 @@ class McpStaticFindingFilterTests(unittest.TestCase):
     def test_static_finding_source_path_accepts_repo_relative_paths(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             clauses, params = static_finding_clauses({
-                "repo": "openwrt",
+                "repo": "firmware",
                 "source_path": "build_dir/target-aarch64/ask-cmm-17.03.1/src/pppoe.c",
             })
 
@@ -207,14 +207,14 @@ class McpStaticFindingFilterTests(unittest.TestCase):
             params[1],
             [
                 "build_dir/target-aarch64/ask-cmm-17.03.1/src/pppoe.c",
-                "openwrt/build_dir/target-aarch64/ask-cmm-17.03.1/src/pppoe.c",
+                "firmware/build_dir/target-aarch64/ask-cmm-17.03.1/src/pppoe.c",
             ],
         )
 
     def test_static_finding_source_path_prefix_matches_repo_relative_subtree(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             clauses, params = static_finding_clauses({
-                "repo": "openwrt",
+                "repo": "firmware",
                 "source_path_prefix": "build_dir/target-aarch64/ask-cmm-17.03.1",
             })
 
@@ -223,7 +223,7 @@ class McpStaticFindingFilterTests(unittest.TestCase):
             params[1:3],
             [
                 "build\\_dir/target-aarch64/ask-cmm-17.03.1/%",
-                "openwrt/build\\_dir/target-aarch64/ask-cmm-17.03.1/%",
+                "firmware/build\\_dir/target-aarch64/ask-cmm-17.03.1/%",
             ],
         )
 

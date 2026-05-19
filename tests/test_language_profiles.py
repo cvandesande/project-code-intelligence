@@ -211,7 +211,7 @@ use warnings;
 use Getopt::Long;
 require "helpers.pl";
 
-package OpenWrt::Check;
+package Project::Check;
 
 sub run_check {
     return 1;
@@ -219,19 +219,19 @@ sub run_check {
 """,
         )
 
-        self.assertEqual(metadata["perl_packages"], ["OpenWrt::Check"])
+        self.assertEqual(metadata["perl_packages"], ["Project::Check"])
         self.assertEqual(metadata["perl_modules"], ["strict", "warnings", "Getopt::Long"])
         self.assertEqual(metadata["perl_requires"], ["helpers.pl"])
         self.assertEqual(metadata["perl_subroutines"], ["run_check"])
         self.assertTrue(metadata["perl_uses_strict"])
         self.assertTrue(metadata["perl_uses_warnings"])
 
-    def test_openwrt_format_metadata_extracts_build_dsl_facts(self) -> None:
+    def test_unix_build_format_metadata_extracts_build_dsl_facts(self) -> None:
         autotools = language_metadata_for_file(
             "src/aclocal.m4",
             "autotools",
             """
-AC_DEFUN([OPENWRT_CHECK], [AC_REQUIRE([AC_PROG_CC])])
+AC_DEFUN([PROJECT_CHECK], [AC_REQUIRE([AC_PROG_CC])])
 AM_INIT_AUTOMAKE
 """,
         )
@@ -250,7 +250,7 @@ SECTIONS {
             "image/board.bootscript",
             "boot_script",
             """
-bootcmd=run boot_openwrt
+bootcmd=run boot_project
 setenv bootargs console=ttyS0
 bootm ${kernel_addr}
 """,
@@ -262,7 +262,7 @@ bootm ${kernel_addr}
         )
 
         self.assertEqual(autotools["autotools_macros"], ["AC_DEFUN", "AC_REQUIRE", "AC_PROG_CC", "AM_INIT_AUTOMAKE"])
-        self.assertEqual(autotools["autotools_definitions"], ["OPENWRT_CHECK"])
+        self.assertEqual(autotools["autotools_definitions"], ["PROJECT_CHECK"])
         self.assertEqual(linker["linker_entry_symbols"], ["_start"])
         self.assertEqual(linker["linker_sections"], ["text"])
         self.assertEqual(linker["linker_provided_symbols"], ["end"])

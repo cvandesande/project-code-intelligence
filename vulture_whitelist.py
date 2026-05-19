@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from http.client import HTTPResponse
 
-from project_code_intelligence.code_profiles.openwrt import OpenWrtProfile
 from typing_extensions import LiteralString
 
 from project_code_intelligence.db import AutocommitConnect
@@ -38,7 +37,6 @@ _WHITELIST = (
     LiteralString,
     HTTPResponse,
     AutocommitConnect,
-    OpenWrtProfile,
     _apple_embed_server._AutoTokenizerClass,
     _FrameworkHooks.read_only,
     _FrameworkHooks.server_version,
