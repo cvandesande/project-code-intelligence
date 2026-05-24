@@ -12,6 +12,8 @@ import shutil
 
 # Centralized, shell-free subprocess boundary.
 import subprocess  # nosec B404
+import sys
+import tempfile
 from dataclasses import dataclass
 from importlib import resources as importlib_resources
 from pathlib import Path
@@ -187,6 +189,126 @@ def _audit_docker_args(args: Sequence[str]) -> None:
 
 
 _COMPOSE_FILE_ENV_VAR = "PCI_COMPOSE_FILE"
+_PACKAGE_NAME = "project_code_intelligence"
+_COMPOSE_RESOURCE = "docker-compose.yml"
+_COMPOSE_PROJECT_DIR_ENV_VAR = "PCI_COMPOSE_PROJECT_DIR"
+_COMPOSE_CACHE_DIR_ENV_VAR = "PCI_COMPOSE_CACHE_DIR"
+_APP_CACHE_DIR_NAME = "project-code-intelligence"
+_INIT_EXTENSIONS_RESOURCE = Path("docker/pgvector/init-extensions.sql")
+_COMPOSE_CONTEXT_PACKAGE_FILES = (
+    (Path("docker/build-context/pyproject.toml"), Path("pyproject.toml")),
+    (Path("docker/build-context/README.md"), Path("README.md")),
+    (Path("docker/build-context/LICENSE"), Path("LICENSE")),
+    (Path("docker/fastembed/Dockerfile"), Path("docker/fastembed/Dockerfile")),
+    (Path("docker/llamacpp-rocm/Dockerfile"), Path("docker/llamacpp-rocm/Dockerfile")),
+    (Path("docker/llamacpp-rocm/entrypoint.sh"), Path("docker/llamacpp-rocm/entrypoint.sh")),
+    (Path("docker/llamacpp-cuda/Dockerfile"), Path("docker/llamacpp-cuda/Dockerfile")),
+    (Path("docker/llamacpp-cuda/entrypoint.sh"), Path("docker/llamacpp-cuda/entrypoint.sh")),
+    (Path("scripts/select_llamacpp_rocm_bundle.py"), Path("scripts/select_llamacpp_rocm_bundle.py")),
+    (Path("bin/pci-embedding-server"), Path("pci-embedding-server")),
+)
+
+
+def _cache_root() -> Path:
+    override = os.environ.get(_COMPOSE_CACHE_DIR_ENV_VAR, "").strip()
+    if override:
+        return Path(override).expanduser()
+    xdg_cache_home = os.environ.get("XDG_CACHE_HOME", "").strip()
+    if xdg_cache_home:
+        return Path(xdg_cache_home).expanduser() / _APP_CACHE_DIR_NAME
+    home = os.environ.get("HOME", "").strip()
+    if home:
+        if sys.platform == "darwin":
+            return Path(home).expanduser() / "Library" / "Caches" / _APP_CACHE_DIR_NAME
+        return Path(home).expanduser() / ".cache" / _APP_CACHE_DIR_NAME
+    return Path(tempfile.gettempdir()) / _APP_CACHE_DIR_NAME
+
+
+def compose_cache_dir() -> Path:
+    """Return the directory used for materialized bundled Compose assets."""
+    return _cache_root()
+
+
+def _write_text_if_changed(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if path.read_text(encoding="utf-8") == content:
+            return
+    except OSError:
+        pass
+    _ = path.write_text(content, encoding="utf-8")
+
+
+def _copy_file_if_changed(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if target.exists() and target.read_bytes() == source.read_bytes():
+            return
+    except OSError:
+        pass
+    _ = shutil.copy2(source, target)
+
+
+def _copy_package_source(package_dir: Path, target_dir: Path) -> None:
+    def ignore(_dir: str, names: list[str]) -> set[str]:
+        return {name for name in names if name == "__pycache__" or name.endswith((".pyc", ".pyo", ".egg-info"))}
+
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    _ = shutil.copytree(package_dir, target_dir, dirs_exist_ok=True, ignore=ignore)
+
+
+def _copy_package_context_assets(package_dir: Path, context_dir: Path) -> None:
+    for package_relative, context_relative in _COMPOSE_CONTEXT_PACKAGE_FILES:
+        source = package_dir / package_relative
+        if source.is_file():
+            _copy_file_if_changed(source, context_dir / context_relative)
+
+
+def _package_dir() -> Path | None:
+    try:
+        ref = importlib_resources.files(_PACKAGE_NAME)
+    except (ModuleNotFoundError, TypeError, AttributeError):
+        return None
+    path = Path(str(ref))
+    return path if path.exists() else None
+
+
+def _source_checkout_root(package_dir: Path) -> Path | None:
+    candidate = package_dir.parent.parent
+    if (candidate / "pyproject.toml").is_file() and (candidate / "docker-compose.yml").is_file():
+        return candidate
+    return None
+
+
+def _materialize_installed_project_context(package_dir: Path, context_dir: Path) -> Path:
+    _copy_package_source(package_dir, context_dir / "src" / _PACKAGE_NAME)
+    _copy_package_context_assets(package_dir, context_dir)
+    (context_dir / "models").mkdir(parents=True, exist_ok=True)
+    return context_dir
+
+
+def _materialize_compose_file(package_dir: Path) -> tuple[Path, Path]:
+    override_project_dir = os.environ.get(_COMPOSE_PROJECT_DIR_ENV_VAR, "").strip()
+    if override_project_dir:
+        project_dir = Path(override_project_dir).expanduser()
+    elif source_root := _source_checkout_root(package_dir):
+        project_dir = source_root
+    else:
+        project_dir = _materialize_installed_project_context(package_dir, _cache_root() / "compose-context")
+
+    source_compose = package_dir / _COMPOSE_RESOURCE
+    compose_text = source_compose.read_text(encoding="utf-8")
+    init_extensions = project_dir / _INIT_EXTENSIONS_RESOURCE
+    if not init_extensions.is_file():
+        package_init_extensions = package_dir / _INIT_EXTENSIONS_RESOURCE
+        if package_init_extensions.is_file():
+            _copy_file_if_changed(package_init_extensions, init_extensions)
+    if init_extensions.is_file():
+        compose_text = compose_text.replace(f"./{_INIT_EXTENSIONS_RESOURCE.as_posix()}", str(init_extensions))
+
+    materialized = _cache_root() / "docker-compose.yml"
+    _write_text_if_changed(materialized, compose_text)
+    return materialized, project_dir
 
 
 def compose_file_args() -> list[str]:
@@ -195,19 +317,16 @@ def compose_file_args() -> list[str]:
     Resolution order:
     1. PCI_COMPOSE_FILE environment variable — use this to
        point at a customised compose file without modifying the installed package.
-    2. Bundled docker-compose.yml from installed package data.
+    2. Materialized bundled docker-compose.yml from installed package data.
     3. Empty list — callers degrade to CWD-based discovery.
     """
     override = os.environ.get(_COMPOSE_FILE_ENV_VAR, "").strip()
     if override:
         return ["-f", override]
-    try:
-        ref = importlib_resources.files("project_code_intelligence").joinpath("docker-compose.yml")
-        path = Path(str(ref))
-        if path.exists():
-            return ["-f", str(path)]
-    except (TypeError, AttributeError):
-        pass
+    package_dir = _package_dir()
+    if package_dir is not None and (package_dir / _COMPOSE_RESOURCE).is_file():
+        compose_path, project_dir = _materialize_compose_file(package_dir)
+        return ["--project-directory", str(project_dir), "-f", str(compose_path)]
     return []
 
 

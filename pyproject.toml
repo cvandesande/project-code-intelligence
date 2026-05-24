@@ -2,7 +2,7 @@
 python-preference = "only-system"
 
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -11,7 +11,8 @@ version = "0.1.0"
 description = "MCP server and ingestion toolkit for a Postgres/pgvector code-intelligence database."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
   { name = "project-code-intelligence contributors" },
 ]
@@ -25,7 +26,6 @@ keywords = [
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
@@ -82,7 +82,21 @@ where = ["src"]
 include = ["project_code_intelligence*"]
 
 [tool.setuptools.package-data]
-project_code_intelligence = ["schema.sql", "docker-compose.yml"]
+project_code_intelligence = [
+  "schema.sql",
+  "docker-compose.yml",
+  "bin/pci-embedding-server",
+  "docker/build-context/LICENSE",
+  "docker/build-context/README.md",
+  "docker/build-context/pyproject.toml",
+  "docker/fastembed/Dockerfile",
+  "docker/llamacpp-cuda/Dockerfile",
+  "docker/llamacpp-cuda/entrypoint.sh",
+  "docker/llamacpp-rocm/Dockerfile",
+  "docker/llamacpp-rocm/entrypoint.sh",
+  "docker/pgvector/init-extensions.sql",
+  "scripts/select_llamacpp_rocm_bundle.py",
+]
 
 [tool.basedpyright]
 include = ["src/project_code_intelligence", "scripts", "tests"]
