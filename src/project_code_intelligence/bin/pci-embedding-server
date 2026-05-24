@@ -1,0 +1,103 @@
+#!/bin/sh
+set -eu
+
+: "${PCI_LLAMA_MODEL:=}"
+: "${PCI_EMBEDDING_HOST:=127.0.0.1}"
+: "${PCI_EMBEDDING_PORT:=18081}"
+: "${PCI_LLAMA_CPP_DIR:=}"
+: "${PCI_LLAMA_SERVER:=llama-server}"
+: "${PCI_LLAMA_SERVER_CTX:=40960}"
+: "${PCI_LLAMA_SERVER_BATCH:=2048}"
+: "${PCI_LLAMA_SERVER_UBATCH:=1024}"
+: "${PCI_LLAMA_SERVER_PARALLEL:=8}"
+: "${PCI_LLAMA_SERVER_N_GPU_LAYERS:=}"
+: "${PCI_LLAMA_SERVER_KV_UNIFIED:=1}"
+: "${PCI_LLAMA_SERVER_CACHE_PROMPT:=0}"
+: "${PCI_LLAMA_SERVER_CACHE_RAM:=0}"
+: "${PCI_LLAMA_SERVER_CACHE_IDLE_SLOTS:=0}"
+: "${PCI_LLAMA_SERVER_WEBUI:=0}"
+: "${PCI_LLAMA_SERVER_LOG_VERBOSITY:=}"
+: "${PCI_LLAMA_SERVER_EXTRA_ARGS:=}"
+
+resolve_command() {
+	if command -v "$1" >/dev/null 2>&1; then
+		command -v "$1"
+	elif [ -x "$1" ]; then
+		printf '%s\n' "$1"
+	else
+		return 1
+	fi
+}
+
+if [ -n "$PCI_LLAMA_CPP_DIR" ] && [ "$PCI_LLAMA_SERVER" = "llama-server" ]; then
+	PCI_LLAMA_SERVER="$PCI_LLAMA_CPP_DIR/llama-server"
+fi
+
+if ! PCI_LLAMA_SERVER_RESOLVED=$(resolve_command "$PCI_LLAMA_SERVER"); then
+	cat >&2 <<EOF
+llama.cpp server binary was not found or is not executable:
+  $PCI_LLAMA_SERVER
+
+Put llama-server on PATH, source your shell config if PATH was just updated,
+or set PCI_LLAMA_SERVER=/path/to/llama-server.
+
+You can also set PCI_LLAMA_CPP_DIR=/path/to/llama.cpp/bin.
+EOF
+	exit 1
+fi
+
+if [ -z "$PCI_LLAMA_CPP_DIR" ]; then
+	PCI_LLAMA_CPP_DIR=$(dirname "$PCI_LLAMA_SERVER_RESOLVED")
+fi
+
+if [ -z "$PCI_LLAMA_MODEL" ] || [ ! -f "$PCI_LLAMA_MODEL" ]; then
+	cat >&2 <<EOF
+llama.cpp embedding model was not found:
+  ${PCI_LLAMA_MODEL:-<unset>}
+
+Set PCI_LLAMA_MODEL=/path/to/embedding-model.gguf.
+EOF
+	exit 1
+fi
+
+export LD_LIBRARY_PATH="$PCI_LLAMA_CPP_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+extra_args=""
+if [ -n "$PCI_LLAMA_SERVER_PARALLEL" ]; then
+	extra_args="$extra_args --parallel $PCI_LLAMA_SERVER_PARALLEL"
+fi
+if [ -n "$PCI_LLAMA_SERVER_N_GPU_LAYERS" ]; then
+	extra_args="$extra_args --n-gpu-layers $PCI_LLAMA_SERVER_N_GPU_LAYERS"
+fi
+if [ "$PCI_LLAMA_SERVER_KV_UNIFIED" = "1" ]; then
+	extra_args="$extra_args --kv-unified"
+fi
+if [ "$PCI_LLAMA_SERVER_CACHE_PROMPT" = "0" ]; then
+	extra_args="$extra_args --no-cache-prompt"
+fi
+if [ -n "$PCI_LLAMA_SERVER_CACHE_RAM" ]; then
+	extra_args="$extra_args --cache-ram $PCI_LLAMA_SERVER_CACHE_RAM"
+fi
+if [ "$PCI_LLAMA_SERVER_CACHE_IDLE_SLOTS" = "0" ]; then
+	extra_args="$extra_args --no-cache-idle-slots"
+fi
+if [ "$PCI_LLAMA_SERVER_WEBUI" = "0" ]; then
+	extra_args="$extra_args --no-webui"
+fi
+if [ -n "$PCI_LLAMA_SERVER_LOG_VERBOSITY" ]; then
+	extra_args="$extra_args --log-verbosity $PCI_LLAMA_SERVER_LOG_VERBOSITY"
+fi
+extra_args="$extra_args $PCI_LLAMA_SERVER_EXTRA_ARGS"
+
+# shellcheck disable=SC2086
+exec "$PCI_LLAMA_SERVER_RESOLVED" \
+	--embedding \
+	--model "$PCI_LLAMA_MODEL" \
+	--pooling last \
+	--host "$PCI_EMBEDDING_HOST" \
+	--port "$PCI_EMBEDDING_PORT" \
+	--ctx-size "$PCI_LLAMA_SERVER_CTX" \
+	--batch-size "$PCI_LLAMA_SERVER_BATCH" \
+	--ubatch-size "$PCI_LLAMA_SERVER_UBATCH" \
+	$extra_args \
+	--no-warmup

@@ -80,6 +80,57 @@ class _FakeMaintenanceConnection:
         })
 
 
+class DoctorCleanTests(unittest.TestCase):
+    def test_clean_all_removes_generated_compose_cache_after_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "compose-cache"
+            cache_dir.mkdir()
+            _ = (cache_dir / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+            user_config = Path(tmp) / "config" / "project-code-intelligence" / "pci-index.env"
+            user_config.parent.mkdir(parents=True)
+            _ = user_config.write_text("PCI_DATABASE_URL=postgresql://example\n", encoding="utf-8")
+
+            with (
+                patch.object(doctor_cli, "_database_summary", return_value=None),
+                patch.object(doctor_cli, "_confirm", return_value=True),
+                patch.object(doctor_cli, "stop_embedding_services", return_value=0),
+                patch("project_code_intelligence.config.pci_index_user_config_path", return_value=user_config),
+                patch("project_code_intelligence.process.compose_cache_dir", return_value=cache_dir),
+                patch("project_code_intelligence.process.compose_file_args", return_value=["-f", "compose.yml"]),
+                patch("project_code_intelligence.process.run_docker") as run_docker,
+            ):
+                result = doctor_cli.clean_all()
+
+            self.assertEqual(result, 0)
+            self.assertFalse(cache_dir.exists())
+            self.assertFalse(user_config.exists())
+            run_docker.assert_called_once()
+
+    def test_clean_all_keeps_compose_cache_when_confirmation_is_declined(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "compose-cache"
+            cache_dir.mkdir()
+            user_config = Path(tmp) / "config" / "project-code-intelligence" / "pci-index.env"
+            user_config.parent.mkdir(parents=True)
+            _ = user_config.write_text("PCI_DATABASE_URL=postgresql://example\n", encoding="utf-8")
+
+            with (
+                patch.object(doctor_cli, "_database_summary", return_value=None),
+                patch.object(doctor_cli, "_confirm", return_value=False),
+                patch("project_code_intelligence.config.pci_index_user_config_path", return_value=user_config),
+                patch("project_code_intelligence.process.compose_cache_dir", return_value=cache_dir),
+                patch.object(doctor_cli, "stop_embedding_services") as stop_embedding,
+                patch("project_code_intelligence.process.run_docker") as run_docker,
+            ):
+                result = doctor_cli.clean_all()
+
+            self.assertEqual(result, 1)
+            self.assertTrue(cache_dir.exists())
+            self.assertTrue(user_config.exists())
+            stop_embedding.assert_not_called()
+            run_docker.assert_not_called()
+
+
 class DoctorTests(unittest.TestCase):
     def test_human_bytes_formats_binary_units(self) -> None:
         self.assertEqual(human_bytes(None), "unknown")

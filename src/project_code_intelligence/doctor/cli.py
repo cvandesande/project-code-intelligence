@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import json
 import os
+import shutil
 import signal
 import sys
 from dataclasses import asdict
@@ -323,14 +324,19 @@ def _database_summary() -> str | None:
 
 
 def clean_all() -> int:
-    """Stop all services, remove containers/volumes/PID files after confirmation."""
+    """Stop all services and remove containers, volumes, PID files, and generated caches after confirmation."""
     # Gather what will be affected.
     summary = _database_summary()
+    compose_cache = process.compose_cache_dir()
+    user_config = config.pci_index_user_config_path()
     lines = [
         "This will:",
         "  - Stop all embedding services (Docker Compose and host-native)",
         "  - Stop and remove the pgvector database container and its volume",
+        f"  - Remove generated Compose cache at {compose_cache}",
     ]
+    if user_config is not None:
+        lines.append(f"  - Remove generated pci-index user config at {user_config}")
     if summary:
         lines.append(f"  - {summary.upper() if 'contains' in summary else summary}")
     write_stdout("\n".join(lines))
@@ -359,6 +365,16 @@ def clean_all() -> int:
         write_stdout("Removed Docker Compose containers and volumes.")
     except FileNotFoundError:
         write_stdout("docker not found; skipping Docker Compose removal.")
+
+    if compose_cache.exists():
+        shutil.rmtree(compose_cache)
+        write_stdout(f"Removed generated Compose cache at {compose_cache}.")
+
+    if user_config is not None and user_config.exists():
+        user_config.unlink()
+        with contextlib.suppress(OSError):
+            user_config.parent.rmdir()
+        write_stdout(f"Removed generated pci-index user config at {user_config}.")
 
     write_stdout("Clean complete.")
     return 0

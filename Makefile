@@ -30,6 +30,19 @@ SHELL_FILES := \
 	docker/llamacpp-cuda/entrypoint.sh \
 	docker/llamacpp-rocm/entrypoint.sh
 
+PACKAGED_COMPOSE_ASSETS := \
+	bin/pci-embedding-server:pci-embedding-server \
+	docker/build-context/LICENSE:docker/build-context/LICENSE \
+	docker/build-context/README.md:docker/build-context/README.md \
+	docker/build-context/pyproject.toml:docker/build-context/pyproject.toml \
+	docker/fastembed/Dockerfile:docker/fastembed/Dockerfile \
+	docker/llamacpp-cuda/Dockerfile:docker/llamacpp-cuda/Dockerfile \
+	docker/llamacpp-cuda/entrypoint.sh:docker/llamacpp-cuda/entrypoint.sh \
+	docker/llamacpp-rocm/Dockerfile:docker/llamacpp-rocm/Dockerfile \
+	docker/llamacpp-rocm/entrypoint.sh:docker/llamacpp-rocm/entrypoint.sh \
+	docker/pgvector/init-extensions.sql:docker/pgvector/init-extensions.sql \
+	scripts/select_llamacpp_rocm_bundle.py:scripts/select_llamacpp_rocm_bundle.py
+
 .PHONY: help check lint format-check format shellcheck shell-format-check shell-format test coverage dead-code dependency-check architecture-check semgrep-check quality-strict typecheck security security-audit deps-audit doctor integration-smoke scan scan-dry-run mcp-smoke embedding-bench amd-rocm-bundle compose-check tool-install tool-uninstall
 
 # Preserve the historical default (`make` runs the full quality gate); `help` is opt-in.
@@ -142,6 +155,16 @@ compose-check: ## Validate docker-compose.yml and bundled copy
 		diff docker-compose.yml src/project_code_intelligence/docker-compose.yml >&2; \
 		exit 1; \
 	fi
+	@for mapping in $(PACKAGED_COMPOSE_ASSETS); do \
+		package_path=$${mapping%%:*}; \
+		root_path=$${mapping#*:}; \
+		bundled_path="src/project_code_intelligence/$$package_path"; \
+		if ! diff -q "$$root_path" "$$bundled_path" >/dev/null 2>&1; then \
+			echo "error: $$root_path and $$bundled_path are out of sync" >&2; \
+			diff "$$root_path" "$$bundled_path" >&2; \
+			exit 1; \
+		fi; \
+	done
 	@if [ -n "$(DOCKER)" ] && $(DOCKER) compose version >/dev/null 2>&1; then \
 		$(DOCKER) compose config --quiet; \
 	else \
@@ -167,5 +190,13 @@ tool-install: ## Install or upgrade the pci-* binaries with uv
 	  printf '  Run `uv tool update-shell` (or add it to PATH manually) so the pci-* commands are found.\n' >&2; \
 	fi
 
-tool-uninstall: ## Uninstall the pci-* binaries
-	-uv tool uninstall project-code-intelligence
+tool-uninstall: ## Clean local services/cache and uninstall the pci-* binaries
+	@bindir=$$(uv tool dir --bin 2>/dev/null) || bindir=""; \
+	doctor=$$(command -v pci-doctor 2>/dev/null) || doctor=""; \
+	if [ -z "$$doctor" ] && [ -n "$$bindir" ] && [ -x "$$bindir/pci-doctor" ]; then doctor="$$bindir/pci-doctor"; fi; \
+	if [ -n "$$doctor" ]; then \
+	  "$$doctor" --clean; \
+	else \
+	  printf 'warning: pci-doctor not found; skipping local service/cache cleanup before uninstall\n' >&2; \
+	fi
+	uv tool uninstall project-code-intelligence

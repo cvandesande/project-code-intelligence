@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
+import tomllib
+
 from project_code_intelligence import process
 from project_code_intelligence.process import (
     PopenOptions,
@@ -31,6 +33,36 @@ from project_code_intelligence.process import (
     run,
     run_docker,
 )
+
+
+class PackageDataTests(unittest.TestCase):
+    def test_docker_build_context_pyproject_matches_runtime_package_metadata(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        context = tomllib.loads((root / "docker" / "build-context" / "pyproject.toml").read_text(encoding="utf-8"))
+
+        self.assertEqual(context["build-system"], project["build-system"])
+        self.assertEqual(context["project"]["name"], project["project"]["name"])
+        self.assertEqual(context["project"]["version"], project["project"]["version"])
+        self.assertEqual(context["project"]["requires-python"], project["project"]["requires-python"])
+        self.assertEqual(context["project"]["dependencies"], project["project"]["dependencies"])
+        self.assertEqual(context["project"]["scripts"], project["project"]["scripts"])
+        self.assertEqual(
+            context["project"]["optional-dependencies"]["local-embeddings"],
+            project["project"]["optional-dependencies"]["local-embeddings"],
+        )
+
+    def test_declared_project_code_intelligence_package_data_exists(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        package_data = pyproject["tool"]["setuptools"]["package-data"]["project_code_intelligence"]
+        missing = [
+            relative_path
+            for relative_path in package_data
+            if not (root / "src" / "project_code_intelligence" / relative_path).is_file()
+        ]
+
+        self.assertEqual(missing, [])
 
 
 class RunCommandValidationTests(unittest.TestCase):
@@ -285,11 +317,103 @@ class ComposeFileArgsTests(unittest.TestCase):
         with patch.dict(os.environ, {"PCI_COMPOSE_FILE": "/custom/docker-compose.yml"}, clear=False):
             self.assertEqual(compose_file_args(), ["-f", "/custom/docker-compose.yml"])
 
+    def test_bundled_compose_is_materialized_with_source_checkout_project_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as cache_dir:
+            env = {
+                "PCI_COMPOSE_FILE": "   ",
+                "PCI_COMPOSE_CACHE_DIR": cache_dir,
+                "PCI_COMPOSE_PROJECT_DIR": "",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                result = compose_file_args()
+
+            self.assertEqual(result[:2], ["--project-directory", str(Path.cwd())])
+            self.assertEqual(result[2], "-f")
+            compose_path = Path(result[3])
+            self.assertEqual(compose_path.parent, Path(cache_dir))
+            compose_text = compose_path.read_text(encoding="utf-8")
+            self.assertIn(str(Path.cwd() / "docker" / "pgvector" / "init-extensions.sql"), compose_text)
+
+    def test_bundled_compose_can_materialize_installed_package_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package_dir = root / "site-packages" / "project_code_intelligence"
+            package_dir.mkdir(parents=True)
+            _ = (package_dir / "__init__.py").write_text("", encoding="utf-8")
+            _ = (package_dir / "docker-compose.yml").write_text(
+                "services:\n"
+                "  pgvector:\n"
+                "    volumes:\n"
+                "      - ./docker/pgvector/init-extensions.sql:/docker-entrypoint-initdb.d/init-extensions.sql:ro\n",
+                encoding="utf-8",
+            )
+            init_sql = package_dir / "docker" / "pgvector" / "init-extensions.sql"
+            init_sql.parent.mkdir(parents=True)
+            _ = init_sql.write_text("CREATE EXTENSION IF NOT EXISTS vector;\n", encoding="utf-8")
+            package_assets = {
+                "docker/build-context/pyproject.toml": '[project]\nname = "project-code-intelligence"\n',
+                "docker/build-context/README.md": "# packaged context\n",
+                "docker/build-context/LICENSE": "test license\n",
+                "docker/fastembed/Dockerfile": "FROM python:3.13-slim\n",
+                "docker/llamacpp-rocm/Dockerfile": "FROM debian:stable-slim\n",
+                "docker/llamacpp-rocm/entrypoint.sh": "#!/bin/sh\n",
+                "docker/llamacpp-cuda/Dockerfile": "FROM ghcr.io/ggml-org/llama.cpp:server-cuda\n",
+                "docker/llamacpp-cuda/entrypoint.sh": "#!/bin/sh\n",
+                "scripts/select_llamacpp_rocm_bundle.py": "#!/usr/bin/env python3\n",
+                "bin/pci-embedding-server": "#!/bin/sh\n",
+            }
+            for relative_path, content in package_assets.items():
+                asset_path = package_dir / relative_path
+                asset_path.parent.mkdir(parents=True, exist_ok=True)
+                _ = asset_path.write_text(content, encoding="utf-8")
+            cache_dir = root / "cache"
+            env = {
+                "PCI_COMPOSE_FILE": "",
+                "PCI_COMPOSE_CACHE_DIR": str(cache_dir),
+                "PCI_COMPOSE_PROJECT_DIR": "",
+            }
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(process, "_package_dir", return_value=package_dir),
+            ):
+                result = compose_file_args()
+
+            project_dir = cache_dir / "compose-context"
+            self.assertEqual(
+                result,
+                ["--project-directory", str(project_dir), "-f", str(cache_dir / "docker-compose.yml")],
+            )
+            self.assertEqual(
+                (project_dir / "pyproject.toml").read_text(encoding="utf-8"),
+                '[project]\nname = "project-code-intelligence"\n',
+            )
+            self.assertEqual((project_dir / "README.md").read_text(encoding="utf-8"), "# packaged context\n")
+            self.assertEqual((project_dir / "LICENSE").read_text(encoding="utf-8"), "test license\n")
+            self.assertTrue((project_dir / "src" / "project_code_intelligence" / "__init__.py").is_file())
+            self.assertTrue((project_dir / "docker" / "fastembed" / "Dockerfile").is_file())
+            self.assertTrue((project_dir / "docker" / "llamacpp-rocm" / "Dockerfile").is_file())
+            self.assertTrue((project_dir / "docker" / "llamacpp-rocm" / "entrypoint.sh").is_file())
+            self.assertTrue((project_dir / "docker" / "llamacpp-cuda" / "Dockerfile").is_file())
+            self.assertTrue((project_dir / "docker" / "llamacpp-cuda" / "entrypoint.sh").is_file())
+            self.assertTrue((project_dir / "scripts" / "select_llamacpp_rocm_bundle.py").is_file())
+            self.assertTrue((project_dir / "pci-embedding-server").is_file())
+            self.assertTrue((project_dir / "models").is_dir())
+            self.assertIn(
+                str(project_dir / "docker" / "pgvector" / "init-extensions.sql"),
+                (cache_dir / "docker-compose.yml").read_text(encoding="utf-8"),
+            )
+
     def test_pci_compose_file_whitespace_only_is_treated_as_unset(self) -> None:
-        with patch.dict(os.environ, {"PCI_COMPOSE_FILE": "   "}, clear=False):
-            result = compose_file_args()
+        with tempfile.TemporaryDirectory() as cache_dir:
+            env = {
+                "PCI_COMPOSE_FILE": "   ",
+                "PCI_COMPOSE_CACHE_DIR": cache_dir,
+                "PCI_COMPOSE_PROJECT_DIR": "",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                result = compose_file_args()
         # Either the bundled file resolves, or the empty fallback is returned.
-        self.assertIn(result[:1], ([], ["-f"]))
+        self.assertIn(result[:1], ([], ["--project-directory"]))
 
 
 if __name__ == "__main__":
