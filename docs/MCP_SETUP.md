@@ -202,7 +202,9 @@ Set `PCI_PG_DB` only when you want to disable database-name inference and use
 a fixed database name.
 
 `pci-index --reset .` drops only the inferred PCI-managed database for that
-repo/workspace scope. Use `pci-doctor --clean` for broad local cleanup.
+repo/workspace scope. Use `pci-doctor --clean` for broad local runtime cleanup
+while keeping the CLI installed. Use `make tool-uninstall` to run that cleanup
+and then remove the installed `pci-*` binaries.
 
 Do not commit real database credentials or private export files. Generated
 project-scoped snippets for Codex, Claude Code, OpenCode, and VS Code Copilot

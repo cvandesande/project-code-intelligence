@@ -102,9 +102,11 @@ The install isn't paying off if, over a few non-trivial sessions:
 - The cost of keeping the embedding service warm exceeds whatever
   discovery savings you observe.
 
-In those cases, `pci-doctor --clean` removes the install cleanly.
-Re-installing later is `make tool-install` plus, for non-bundled
-Postgres, `pci-doctor --init-postgres`.
+In those cases, `make tool-uninstall` runs `pci-doctor --clean` first, then
+removes the installed `pci-*` binaries. Use `pci-doctor --clean` directly when
+you only want to stop local services and remove generated runtime state while
+keeping the CLI installed. Re-installing later is `make tool-install` plus, for
+non-bundled Postgres, `pci-doctor --init-postgres`.
 
 The honest framing: this tool earns its keep on large, unfamiliar, or
 code-graph-heavy work. On a small, well-known repo, the answer might
