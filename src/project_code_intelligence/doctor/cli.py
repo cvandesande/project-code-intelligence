@@ -105,7 +105,19 @@ class DoctorArgs(argparse.Namespace):
 
 
 def parser() -> argparse.ArgumentParser:
-    argument_parser = argparse.ArgumentParser(description="Check local database and embedding configuration.")
+    argument_parser = argparse.ArgumentParser(
+        description="Check local database and embedding configuration.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  PCI_DATABASE_URL='postgresql://codeintel:codeintel@127.0.0.1:5433/codeintel?sslmode=prefer' "
+            "pci-doctor\n"
+            "  PCI_ALLOW_REMOTE_EMBEDDING=1 "
+            "PCI_EMBEDDING_ENDPOINT='https://api.openai.com/v1/embeddings' "
+            "PCI_EMBEDDING_ENDPOINT_MODEL='text-embedding-3-small' pci-doctor\n"
+            "  pci-doctor --start-db\n"
+        ),
+    )
     _ = argument_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON results.")
     _ = argument_parser.add_argument("--verbose", action="store_true", help="Print every diagnostic check.")
     _ = argument_parser.add_argument(
@@ -302,6 +314,18 @@ def _confirm(prompt: str) -> bool:
     return answer.strip().lower() == "y"
 
 
+def _database_content_summary(conn: db.DbConnection) -> str:
+    if not table_exists(conn, "project_code_intel_records"):
+        return "schema not initialized (no data)"
+    snapshot_row = conn.execute("SELECT count(*) AS cnt FROM project_code_intel_snapshots").fetchone()
+    record_row = conn.execute("SELECT count(*) AS cnt FROM project_code_intel_records").fetchone()
+    snapshots = int(row_text(snapshot_row, "cnt")) if snapshot_row else 0
+    records = int(row_text(record_row, "cnt")) if record_row else 0
+    if snapshots == 0 and records == 0:
+        return "database is empty"
+    return f"database contains {snapshots} snapshot(s) and {records} record(s)"
+
+
 def _database_summary() -> str | None:
     """Return a short summary of database content, or None if unavailable."""
     try:
@@ -310,15 +334,7 @@ def _database_summary() -> str | None:
         return None
     try:
         with db.connect(settings=settings) as conn:
-            if not table_exists(conn, "project_code_intel_records"):
-                return "schema not initialized (no data)"
-            snapshot_row = conn.execute("SELECT count(*) AS cnt FROM project_code_intel_snapshots").fetchone()
-            record_row = conn.execute("SELECT count(*) AS cnt FROM project_code_intel_records").fetchone()
-            snapshots = int(row_text(snapshot_row, "cnt")) if snapshot_row else 0
-            records = int(row_text(record_row, "cnt")) if record_row else 0
-            if snapshots == 0 and records == 0:
-                return "database is empty"
-            return f"database contains {snapshots} snapshot(s) and {records} record(s)"
+            return _database_content_summary(conn)
     except db.DatabaseConnectionError:
         return None
 
