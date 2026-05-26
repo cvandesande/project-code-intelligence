@@ -134,6 +134,28 @@ python -m venv .venv
 python -m pip install -e .
 ```
 
+On NixOS, or on another Linux host with Nix flakes enabled, build or run the
+core CLI package directly:
+
+```sh
+nix build
+nix run .#pci-doctor -- --skip-db --embedding skip
+nix develop
+```
+
+The Nix package intentionally follows the core install path: it includes the
+CLI/MCP/indexing commands and Python runtime dependencies, but does not add a
+local embedding backend. On low-power machines, index text-only with
+`pci-index --no-embed .`, or configure an OpenAI-compatible remote embedding
+endpoint explicitly:
+
+```sh
+export PCI_ALLOW_REMOTE_EMBEDDING=1
+export PCI_EMBEDDING_ENDPOINT=https://api.openai.com/v1/embeddings
+export PCI_EMBEDDING_ENDPOINT_MODEL=text-embedding-3-small
+export OPENAI_API_KEY=...
+```
+
 The full list of installed commands lives in [docs/PUBLIC_API.md](docs/PUBLIC_API.md).
 
 ## MCP Setup
