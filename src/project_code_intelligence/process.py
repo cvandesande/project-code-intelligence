@@ -7,6 +7,7 @@ argument-vector commands only.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 
@@ -207,6 +208,19 @@ _COMPOSE_CONTEXT_PACKAGE_FILES = (
     (Path("scripts/select_llamacpp_rocm_bundle.py"), Path("scripts/select_llamacpp_rocm_bundle.py")),
     (Path("bin/pci-embedding-server"), Path("pci-embedding-server")),
 )
+_COMPOSE_CONTEXT_PACKAGE_SOURCE_FILES = (
+    Path("__init__.py"),
+    Path("common.py"),
+    Path("config.py"),
+    Path("exceptions.py"),
+    Path("http_client.py"),
+    Path("process.py"),
+    Path("rocm_bundles.py"),
+    Path("runtime.py"),
+    Path("embedding/__init__.py"),
+    Path("embedding/fastembed_server.py"),
+    Path("embedding/http_common.py"),
+)
 
 
 def _cache_root() -> Path:
@@ -231,30 +245,61 @@ def compose_cache_dir() -> Path:
 
 def _write_text_if_changed(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        path.parent.chmod(0o700)
     try:
         if path.read_text(encoding="utf-8") == content:
             return
     except OSError:
         pass
+    if path.exists():
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)
     _ = path.write_text(content, encoding="utf-8")
+    with contextlib.suppress(OSError):
+        path.chmod(0o600)
 
 
 def _copy_file_if_changed(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        target.parent.chmod(0o700)
     try:
         if target.exists() and target.read_bytes() == source.read_bytes():
             return
     except OSError:
         pass
-    _ = shutil.copy2(source, target)
+    if target.exists():
+        with contextlib.suppress(OSError):
+            target.chmod(0o600)
+    _ = shutil.copyfile(source, target)
+    with contextlib.suppress(OSError):
+        target.chmod(0o600)
 
 
-def _copy_package_source(package_dir: Path, target_dir: Path) -> None:
-    def ignore(_dir: str, names: list[str]) -> set[str]:
-        return {name for name in names if name == "__pycache__" or name.endswith((".pyc", ".pyo", ".egg-info"))}
+def _remove_generated_tree(path: Path) -> None:
+    if not path.exists():
+        return
+    for current_dir, dir_names, file_names in os.walk(path):
+        current_path = Path(current_dir)
+        with contextlib.suppress(OSError):
+            current_path.chmod(0o700)
+        for name in dir_names:
+            with contextlib.suppress(OSError):
+                (current_path / name).chmod(0o700)
+        for name in file_names:
+            with contextlib.suppress(OSError):
+                (current_path / name).chmod(0o600)
+    shutil.rmtree(path)
 
+
+def _copy_minimal_package_source(package_dir: Path, target_dir: Path) -> None:
+    _remove_generated_tree(target_dir)
     target_dir.parent.mkdir(parents=True, exist_ok=True)
-    _ = shutil.copytree(package_dir, target_dir, dirs_exist_ok=True, ignore=ignore)
+    for relative_path in _COMPOSE_CONTEXT_PACKAGE_SOURCE_FILES:
+        source = package_dir / relative_path
+        if source.is_file():
+            _copy_file_if_changed(source, target_dir / relative_path)
 
 
 def _copy_package_context_assets(package_dir: Path, context_dir: Path) -> None:
@@ -281,7 +326,7 @@ def _source_checkout_root(package_dir: Path) -> Path | None:
 
 
 def _materialize_installed_project_context(package_dir: Path, context_dir: Path) -> Path:
-    _copy_package_source(package_dir, context_dir / "src" / _PACKAGE_NAME)
+    _copy_minimal_package_source(package_dir, context_dir / "src" / _PACKAGE_NAME)
     _copy_package_context_assets(package_dir, context_dir)
     (context_dir / "models").mkdir(parents=True, exist_ok=True)
     return context_dir

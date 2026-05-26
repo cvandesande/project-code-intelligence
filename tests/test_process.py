@@ -13,6 +13,7 @@ contract:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import tempfile
 import unittest
@@ -20,7 +21,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
-import tomllib
+import tomli
 
 from project_code_intelligence import process
 from project_code_intelligence.process import (
@@ -34,31 +35,56 @@ from project_code_intelligence.process import (
     run_docker,
 )
 
+TomlTable = dict[str, object]
+
+
+def load_toml(path: Path) -> TomlTable:
+    return cast("TomlTable", tomli.loads(path.read_text(encoding="utf-8")))
+
+
+def toml_table(value: object) -> TomlTable:
+    return cast("TomlTable", value)
+
+
+def toml_string_list(value: object) -> list[str]:
+    return cast("list[str]", value)
+
 
 class PackageDataTests(unittest.TestCase):
     def test_docker_build_context_pyproject_matches_runtime_package_metadata(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-        context = tomllib.loads((root / "docker" / "build-context" / "pyproject.toml").read_text(encoding="utf-8"))
+        project = load_toml(root / "pyproject.toml")
+        context = load_toml(root / "docker" / "build-context" / "pyproject.toml")
+        project_metadata = toml_table(project["project"])
+        context_metadata = toml_table(context["project"])
+        project_scripts = toml_table(project_metadata["scripts"])
+        context_optional_dependencies = toml_table(context_metadata["optional-dependencies"])
+        project_optional_dependencies = toml_table(project_metadata["optional-dependencies"])
 
         self.assertEqual(context["build-system"], project["build-system"])
-        self.assertEqual(context["project"]["name"], project["project"]["name"])
-        self.assertEqual(context["project"]["version"], project["project"]["version"])
-        self.assertEqual(context["project"]["requires-python"], project["project"]["requires-python"])
-        self.assertEqual(context["project"]["dependencies"], project["project"]["dependencies"])
-        self.assertEqual(context["project"]["scripts"], project["project"]["scripts"])
+        self.assertEqual(context_metadata["name"], project_metadata["name"])
+        self.assertEqual(context_metadata["version"], project_metadata["version"])
+        self.assertEqual(context_metadata["requires-python"], project_metadata["requires-python"])
+        self.assertEqual(context_metadata["dependencies"], [])
         self.assertEqual(
-            context["project"]["optional-dependencies"]["local-embeddings"],
-            project["project"]["optional-dependencies"]["local-embeddings"],
+            context_metadata["scripts"],
+            {"pci-fastembed-server": project_scripts["pci-fastembed-server"]},
+        )
+        self.assertEqual(
+            context_optional_dependencies["local-embeddings"],
+            project_optional_dependencies["local-embeddings"],
         )
 
     def test_declared_project_code_intelligence_package_data_exists(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-        package_data = pyproject["tool"]["setuptools"]["package-data"]["project_code_intelligence"]
+        pyproject = load_toml(root / "pyproject.toml")
+        tool = toml_table(pyproject["tool"])
+        setuptools = toml_table(tool["setuptools"])
+        package_data = toml_table(setuptools["package-data"])
+        project_code_intelligence_data = toml_string_list(package_data["project_code_intelligence"])
         missing = [
             relative_path
-            for relative_path in package_data
+            for relative_path in project_code_intelligence_data
             if not (root / "src" / "project_code_intelligence" / relative_path).is_file()
         ]
 
@@ -339,7 +365,23 @@ class ComposeFileArgsTests(unittest.TestCase):
             root = Path(tmp)
             package_dir = root / "site-packages" / "project_code_intelligence"
             package_dir.mkdir(parents=True)
-            _ = (package_dir / "__init__.py").write_text("", encoding="utf-8")
+            package_source = {
+                "__init__.py": "",
+                "common.py": "def default_database_name(path):\n    return 'codeintel'\n",
+                "config.py": "",
+                "exceptions.py": "",
+                "http_client.py": "",
+                "process.py": "",
+                "rocm_bundles.py": "",
+                "runtime.py": "",
+                "embedding/__init__.py": "",
+                "embedding/fastembed_server.py": "",
+                "embedding/http_common.py": "",
+            }
+            for relative_path, content in package_source.items():
+                source_path = package_dir / relative_path
+                source_path.parent.mkdir(parents=True, exist_ok=True)
+                _ = source_path.write_text(content, encoding="utf-8")
             _ = (package_dir / "docker-compose.yml").write_text(
                 "services:\n"
                 "  pgvector:\n"
@@ -390,6 +432,11 @@ class ComposeFileArgsTests(unittest.TestCase):
             self.assertEqual((project_dir / "README.md").read_text(encoding="utf-8"), "# packaged context\n")
             self.assertEqual((project_dir / "LICENSE").read_text(encoding="utf-8"), "test license\n")
             self.assertTrue((project_dir / "src" / "project_code_intelligence" / "__init__.py").is_file())
+            self.assertTrue((project_dir / "src" / "project_code_intelligence" / "config.py").is_file())
+            self.assertTrue(
+                (project_dir / "src" / "project_code_intelligence" / "embedding" / "fastembed_server.py").is_file()
+            )
+            self.assertFalse((project_dir / "src" / "project_code_intelligence" / "doctor").exists())
             self.assertTrue((project_dir / "docker" / "fastembed" / "Dockerfile").is_file())
             self.assertTrue((project_dir / "docker" / "llamacpp-rocm" / "Dockerfile").is_file())
             self.assertTrue((project_dir / "docker" / "llamacpp-rocm" / "entrypoint.sh").is_file())
@@ -402,6 +449,46 @@ class ComposeFileArgsTests(unittest.TestCase):
                 str(project_dir / "docker" / "pgvector" / "init-extensions.sql"),
                 (cache_dir / "docker-compose.yml").read_text(encoding="utf-8"),
             )
+
+    def test_installed_package_context_replaces_stale_read_only_source_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package_dir = root / "site-packages" / "project_code_intelligence"
+            package_dir.mkdir(parents=True)
+            _ = (package_dir / "__init__.py").write_text("", encoding="utf-8")
+            _ = (package_dir / "config.py").write_text("", encoding="utf-8")
+            _ = (package_dir / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+            cache_dir = root / "cache"
+            stale_package_dir = cache_dir / "compose-context" / "src" / "project_code_intelligence"
+            stale_doctor_dir = stale_package_dir / "doctor"
+            stale_doctor_dir.mkdir(parents=True)
+            stale_file = stale_doctor_dir / "cli.py"
+            _ = stale_file.write_text("stale\n", encoding="utf-8")
+            stale_file.chmod(0o400)
+            stale_doctor_dir.chmod(0o500)
+            stale_package_dir.chmod(0o500)
+            env = {
+                "PCI_COMPOSE_FILE": "",
+                "PCI_COMPOSE_CACHE_DIR": str(cache_dir),
+                "PCI_COMPOSE_PROJECT_DIR": "",
+            }
+            try:
+                with (
+                    patch.dict(os.environ, env, clear=False),
+                    patch.object(process, "_package_dir", return_value=package_dir),
+                ):
+                    result = compose_file_args()
+            finally:
+                with contextlib.suppress(OSError):
+                    stale_package_dir.chmod(0o700)
+
+            project_dir = cache_dir / "compose-context"
+            self.assertEqual(
+                result,
+                ["--project-directory", str(project_dir), "-f", str(cache_dir / "docker-compose.yml")],
+            )
+            self.assertFalse(stale_doctor_dir.exists())
+            self.assertTrue((stale_package_dir / "config.py").is_file())
 
     def test_pci_compose_file_whitespace_only_is_treated_as_unset(self) -> None:
         with tempfile.TemporaryDirectory() as cache_dir:
