@@ -481,13 +481,13 @@ class PciIndexShowParserFailuresFlagTests(unittest.TestCase):
         return status, forwarded
 
     def test_flag_is_forwarded_when_set(self) -> None:
-        status, forwarded = self._run_with_capture(["--show-parser-failures", "."])
+        status, forwarded = self._run_with_capture(["--show-parser-failures", "--dry-run", "."])
         self.assertEqual(status, 0)
         self.assertIn("--show-parser-failures", cli.index_parser().format_help())
         self.assertIn("--show-parser-failures", forwarded)
 
     def test_flag_is_omitted_by_default(self) -> None:
-        status, forwarded = self._run_with_capture(["."])
+        status, forwarded = self._run_with_capture(["--dry-run", "."])
         self.assertEqual(status, 0)
         self.assertNotIn("--show-parser-failures", forwarded)
 

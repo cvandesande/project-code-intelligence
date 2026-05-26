@@ -438,7 +438,6 @@ def _next_steps(
     by_name: Mapping[str, CheckResult],
     issues: Sequence[CheckResult],
 ) -> list[tuple[str, str]]:
-    engine = process.container_engine_name()
     server_db_names = {"database", "database-config"}
     project_db_names = {"pgvector", "schema", "schema-version"}
     embedding_names = {"embedding-endpoint", "embedding-config", "embedding", "apple-metal", "apple-metal-model"}
@@ -448,21 +447,16 @@ def _next_steps(
         is_local = _target_is_local_postgres()
         if is_local is True:
             steps.extend((
-                ("Start a local database", f"{engine} compose up -d pgvector"),
-                ("Index a repo and bootstrap its inferred database", "pci-index ."),
-                ("Use a remote Postgres instead", "set PCI_DATABASE_URL"),
+                ("Start the bundled local database", "pci-doctor --start-db"),
+                ("Use an existing Postgres instead", "set PCI_DATABASE_URL"),
             ))
         elif is_local is False:
-            steps.extend((
-                ("Bootstrap a remote Postgres", "pci-doctor --init-postgres"),
-                ("Index a repo and bootstrap its inferred database", "pci-index ."),
-            ))
+            steps.append(("Bootstrap a remote Postgres", "pci-doctor --init-postgres"))
         else:
             steps.extend((
-                ("Start a local database", f"{engine} compose up -d pgvector"),
+                ("Start the bundled local database", "pci-doctor --start-db"),
                 ("Bootstrap a remote Postgres", "pci-doctor --init-postgres"),
-                ("Index a repo and bootstrap its inferred database", "pci-index ."),
-                ("Use a remote Postgres instead", "set PCI_DATABASE_URL"),
+                ("Use an existing Postgres instead", "set PCI_DATABASE_URL"),
             ))
     elif issue_names & project_db_names:
         steps.append(("Index a repo and bootstrap its inferred database", "pci-index ."))

@@ -131,6 +131,20 @@ class DoctorCleanTests(unittest.TestCase):
             run_docker.assert_not_called()
 
 
+class DoctorHelpTests(unittest.TestCase):
+    def test_doctor_help_shows_database_and_embedding_examples(self) -> None:
+        help_text = doctor_cli.parser().format_help()
+
+        self.assertIn(
+            "PCI_DATABASE_URL='postgresql://codeintel:codeintel@127.0.0.1:5433/codeintel?sslmode=prefer'",
+            help_text,
+        )
+        self.assertIn("PCI_ALLOW_REMOTE_EMBEDDING=1", help_text)
+        self.assertIn("PCI_EMBEDDING_ENDPOINT='https://api.openai.com/v1/embeddings'", help_text)
+        self.assertIn("PCI_EMBEDDING_ENDPOINT_MODEL='text-embedding-3-small'", help_text)
+        self.assertIn("pci-doctor --start-db", help_text)
+
+
 class DoctorTests(unittest.TestCase):
     def test_human_bytes_formats_binary_units(self) -> None:
         self.assertEqual(human_bytes(None), "unknown")
@@ -319,10 +333,12 @@ class DoctorTests(unittest.TestCase):
                 color=False,
             )
 
-        self.assertIn("Start a local database", output)
-        self.assertIn("docker compose up -d pgvector", output)
-        self.assertIn("Index a repo and bootstrap its inferred database", output)
-        self.assertIn("Use a remote Postgres instead", output)
+        self.assertIn("Start the bundled local database", output)
+        self.assertIn("pci-doctor --start-db", output)
+        self.assertNotIn("docker compose up -d pgvector", output)
+        self.assertNotIn("Index a repo and bootstrap its inferred database", output)
+        self.assertNotIn("pci-index .", output)
+        self.assertIn("Use an existing Postgres instead", output)
         self.assertNotIn("Bootstrap a remote Postgres", output)
         self.assertNotIn("pci-doctor --init-postgres", output)
         self.assertNotIn("Prepare Postgres roles", output)
@@ -348,7 +364,8 @@ class DoctorTests(unittest.TestCase):
 
         self.assertIn("Bootstrap a remote Postgres", output)
         self.assertIn("pci-doctor --init-postgres", output)
-        self.assertIn("Index a repo and bootstrap its inferred database", output)
+        self.assertNotIn("Index a repo and bootstrap its inferred database", output)
+        self.assertNotIn("pci-index .", output)
         self.assertNotIn("Start a local database", output)
         self.assertNotIn("docker compose up -d pgvector", output)
         self.assertNotIn("Use a remote Postgres instead", output)
