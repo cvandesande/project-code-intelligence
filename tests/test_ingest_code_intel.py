@@ -83,6 +83,22 @@ from project_code_intelligence.sarif import (
 from project_code_intelligence.server import query_embedding
 
 
+class ActiveTestProfile:
+    def __init__(self, profile_name: str) -> None:
+        self.profile_name = profile_name
+        self.previous_profile = profile_context.active_profile
+
+    def __enter__(self) -> None:
+        profile_context.set_active_profile(load_profile(self.profile_name))
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        profile_context.set_active_profile(self.previous_profile)
+
+
+def active_test_profile(profile_name: str) -> ActiveTestProfile:
+    return ActiveTestProfile(profile_name)
+
+
 class FakeFastEmbedModel:
     def embed(self, documents: list[str]) -> list[list[float]]:
         return [[float(index), float(len(text))] for index, text in enumerate(documents)]
@@ -1710,12 +1726,8 @@ class ParserAndRuntimeTests(unittest.TestCase):
             "  TITLE:=ASK CDX driver",
             "endef",
         ])
-        previous_profile = profile_context.active_profile
-        try:
-            profile_context.set_active_profile(load_profile("generic"))
+        with active_test_profile("generic"):
             records, _edges = make_records(fixture_file("package/kernel/ask-cdx/Makefile", "make"), text, 2400, 0)
-        finally:
-            profile_context.set_active_profile(previous_profile)
 
         source_version_records = [
             record
@@ -1738,11 +1750,12 @@ class ParserAndRuntimeTests(unittest.TestCase):
             validate_args(args, embedding_requested=False)
 
     def test_scan_workers_auto_stays_serial_for_small_scans(self) -> None:
-        self.assertEqual(resolve_scan_workers(0, 1), 1)
-        self.assertEqual(resolve_scan_workers(0, 63), 1)
-        self.assertGreaterEqual(resolve_scan_workers(0, 64), 1)
-        self.assertEqual(resolve_scan_workers(8, 3), 3)
-        self.assertEqual(resolve_scan_workers(0, 10_000), 8)
+        with patch("project_code_intelligence.ingest_code_intel.os.cpu_count", return_value=16):
+            self.assertEqual(resolve_scan_workers(0, 1), 1)
+            self.assertEqual(resolve_scan_workers(0, 63), 1)
+            self.assertGreaterEqual(resolve_scan_workers(0, 64), 1)
+            self.assertEqual(resolve_scan_workers(8, 3), 3)
+            self.assertEqual(resolve_scan_workers(0, 10_000), 8)
 
     def test_reset_only_requires_reset_flag(self) -> None:
         with self.assertRaises(ValueError):
@@ -1844,9 +1857,7 @@ class McpQueryTests(unittest.TestCase):
 
 class SarifTests(unittest.TestCase):
     def test_generic_profile_discovers_sarif_under_selected_repos(self) -> None:
-        previous_profile = profile_context.active_profile
-        try:
-            profile_context.set_active_profile(load_profile("generic"))
+        with active_test_profile("generic"):
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 selected = root / "repo-a" / "codeql-results"
@@ -1872,8 +1883,6 @@ class SarifTests(unittest.TestCase):
 
             self.assertEqual(discovered, [selected_sarif.resolve()])
             self.assertEqual(set(explicit_discovered), {selected_sarif.resolve(), fixture_sarif.resolve()})
-        finally:
-            profile_context.set_active_profile(previous_profile)
 
     def test_build_plan_defers_sarif_discovery_until_scan_phase(self) -> None:
         args = cli_args(root=Path(), repos="repo-a")

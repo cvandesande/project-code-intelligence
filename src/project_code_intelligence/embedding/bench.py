@@ -148,6 +148,15 @@ class BenchmarkResult:
     power_measurements: list[power.PowerMeasurement]
 
 
+@dataclass
+class BenchmarkAccumulator:
+    vector_dimensions: int | None = None
+    response_model: str | None = None
+    response_bytes: int = 0
+    total_texts: int = 0
+    total_chars: int = 0
+
+
 @dataclass(frozen=True)
 class BenchmarkConfig:
     endpoint: str
@@ -424,11 +433,7 @@ def run_benchmark(benchmark: BenchmarkConfig) -> BenchmarkResult:
         )
 
     request_seconds: list[float] = []
-    vector_dimensions: int | None = None
-    response_model: str | None = None
-    response_bytes = 0
-    total_texts = 0
-    total_chars = 0
+    accumulator = BenchmarkAccumulator()
     power_monitor = None
     if benchmark.power_sensors:
         power_monitor = power.PowerMonitor(benchmark.power_sensors, benchmark.power_sample_interval)
@@ -436,30 +441,22 @@ def run_benchmark(benchmark: BenchmarkConfig) -> BenchmarkResult:
         power_monitor.start()
     total_started = time.perf_counter()
     try:
-        while (
-            len(request_seconds) < benchmark.runs
-            or time.perf_counter() - total_started < benchmark.min_duration_seconds
-        ):
-            texts = batch_for_run(text_input.texts, benchmark.batch_size, len(request_seconds))
-            result = request_embeddings(benchmark.endpoint, benchmark.model, texts, benchmark.timeout)
-            if vector_dimensions is None:
-                vector_dimensions = result.dimensions
-            elif result.dimensions != vector_dimensions:
-                raise ValueError("endpoint returned inconsistent vector dimensions between runs")
-            response_model = result.response_model or response_model
-            response_bytes += result.response_bytes
-            request_seconds.append(result.seconds)
-            total_texts += len(texts)
-            total_chars += sum(len(text) for text in texts)
+        _collect_benchmark_requests(
+            benchmark,
+            text_input,
+            total_started=total_started,
+            request_seconds=request_seconds,
+            accumulator=accumulator,
+        )
     finally:
         total_seconds = time.perf_counter() - total_started
         power_measurements = power_monitor.stop() if power_monitor is not None else []
-    if vector_dimensions is None:
+    if accumulator.vector_dimensions is None:
         raise ValueError("benchmark did not run")
     return BenchmarkResult(
         endpoint=benchmark.endpoint,
         model=benchmark.model,
-        response_model=response_model,
+        response_model=accumulator.response_model,
         input_source=text_input.source,
         input_stats=text_stats(text_input.texts),
         min_duration_seconds=benchmark.min_duration_seconds,
@@ -467,14 +464,36 @@ def run_benchmark(benchmark: BenchmarkConfig) -> BenchmarkResult:
         runs=len(request_seconds),
         warmup=benchmark.warmup,
         text_chars=benchmark.text_chars,
-        total_texts=total_texts,
-        total_chars=total_chars,
+        total_texts=accumulator.total_texts,
+        total_chars=accumulator.total_chars,
         total_seconds=total_seconds,
         request_seconds=request_seconds,
-        vector_dimensions=vector_dimensions,
-        response_bytes=response_bytes,
+        vector_dimensions=accumulator.vector_dimensions,
+        response_bytes=accumulator.response_bytes,
         power_measurements=power_measurements,
     )
+
+
+def _collect_benchmark_requests(
+    benchmark: BenchmarkConfig,
+    text_input: TextInput,
+    *,
+    total_started: float,
+    request_seconds: list[float],
+    accumulator: BenchmarkAccumulator,
+) -> None:
+    while len(request_seconds) < benchmark.runs or time.perf_counter() - total_started < benchmark.min_duration_seconds:
+        texts = batch_for_run(text_input.texts, benchmark.batch_size, len(request_seconds))
+        result = request_embeddings(benchmark.endpoint, benchmark.model, texts, benchmark.timeout)
+        if accumulator.vector_dimensions is None:
+            accumulator.vector_dimensions = result.dimensions
+        elif result.dimensions != accumulator.vector_dimensions:
+            raise ValueError("endpoint returned inconsistent vector dimensions between runs")
+        accumulator.response_model = result.response_model or accumulator.response_model
+        accumulator.response_bytes += result.response_bytes
+        request_seconds.append(result.seconds)
+        accumulator.total_texts += len(texts)
+        accumulator.total_chars += sum(len(text) for text in texts)
 
 
 def result_json(result: BenchmarkResult) -> JsonObject:

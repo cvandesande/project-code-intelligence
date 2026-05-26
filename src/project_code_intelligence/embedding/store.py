@@ -330,51 +330,61 @@ def update_embedding_batch(
     def operation() -> None:
         started = time.monotonic()
         try:
-            with db.connect(readonly=False) as conn:
-                validate_embedding_compatibility(
-                    conn,
-                    snapshot_id,
-                    run_config=run_config,
-                    embeddings=[embedding for _row, embedding in embedded],
-                )
-                for row, embedding in embedded:
-                    _ = conn.execute(
-                        """
-                        UPDATE project_code_intel_records
-                        SET embedding = %s::vector,
-                            metadata = coalesce(metadata, '{}'::jsonb) || %s::jsonb
-                        WHERE id = %s AND snapshot_id = %s
-                        """,
-                        [
-                            embedding,
-                            json.dumps(
-                                embedding_metadata(run_config, embedding),
-                                sort_keys=True,
-                                separators=(",", ":"),
-                            ),
-                            row["id"],
-                            snapshot_id,
-                        ],
-                    )
-                for item in skipped:
-                    metadata = {
-                        "embedding_skipped": True,
-                        "embedding_skip_reason": item.reason[:500],
-                        "embedding_skip_max_chars": item.max_chars,
-                    }
-                    _ = conn.execute(
-                        """
-                        UPDATE project_code_intel_records
-                        SET metadata = coalesce(metadata, '{}'::jsonb) || %s::jsonb
-                        WHERE id = %s AND snapshot_id = %s
-                        """,
-                        [json.dumps(metadata, sort_keys=True, separators=(",", ":")), item.row["id"], snapshot_id],
-                    )
-                conn.commit()
+            _write_embedding_batch(snapshot_id, embedded=embedded, skipped=skipped, run_config=run_config)
         finally:
             runtime_state.active_metrics.add("embedding_db_update_seconds", time.monotonic() - started)
 
     run_database_operation("update embedding batch", operation)
+
+
+def _write_embedding_batch(
+    snapshot_id: int,
+    *,
+    embedded: list[tuple[EmbeddingRow, str]],
+    skipped: list[SkippedEmbeddingRow],
+    run_config: EmbeddingRunConfig,
+) -> None:
+    with db.connect(readonly=False) as conn:
+        validate_embedding_compatibility(
+            conn,
+            snapshot_id,
+            run_config=run_config,
+            embeddings=[embedding for _row, embedding in embedded],
+        )
+        for row, embedding in embedded:
+            _ = conn.execute(
+                """
+                UPDATE project_code_intel_records
+                SET embedding = %s::vector,
+                    metadata = coalesce(metadata, '{}'::jsonb) || %s::jsonb
+                WHERE id = %s AND snapshot_id = %s
+                """,
+                [
+                    embedding,
+                    json.dumps(embedding_metadata(run_config, embedding), sort_keys=True, separators=(",", ":")),
+                    row["id"],
+                    snapshot_id,
+                ],
+            )
+        for item in skipped:
+            _mark_embedding_skipped(conn, item, snapshot_id=snapshot_id)
+        conn.commit()
+
+
+def _mark_embedding_skipped(conn: db.DbConnection, item: SkippedEmbeddingRow, *, snapshot_id: int) -> None:
+    metadata = {
+        "embedding_skipped": True,
+        "embedding_skip_reason": item.reason[:500],
+        "embedding_skip_max_chars": item.max_chars,
+    }
+    _ = conn.execute(
+        """
+        UPDATE project_code_intel_records
+        SET metadata = coalesce(metadata, '{}'::jsonb) || %s::jsonb
+        WHERE id = %s AND snapshot_id = %s
+        """,
+        [json.dumps(metadata, sort_keys=True, separators=(",", ":")), item.row["id"], snapshot_id],
+    )
 
 
 def embed_db_records(

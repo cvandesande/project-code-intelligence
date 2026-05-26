@@ -1519,40 +1519,44 @@ def merge_sarif_into_ingests(plan: IngestPlan, ingests: list[RepoIngest], sarif_
 
 def scan_sarif(plan: IngestPlan, ingests: list[RepoIngest]) -> SarifIngest:
     started = time.monotonic()
-    sarif_ingest = SarifIngest(runs=[], records_by_repo={}, failures=[])
     try:
-        sarif_files = discover_plan_sarif_files(plan)
-        emit_sarif_discovery(plan, sarif_files)
-        if not sarif_files:
-            return sarif_ingest
-        runtime_state.active_metrics.add_phase_total(len(sarif_files))
-        file_by_source_path = {file.source_path: file for ingest in ingests for file in ingest.files}
-        sarif_ingest = ingest_sarif(
-            SarifIngestContext(
-                root=plan.root,
-                repos=plan.repos,
-                collection=plan.collection,
-                file_by_source_path=file_by_source_path,
-                max_bytes=plan.args.sarif_max_bytes,
-            ),
-            sarif_files,
-        )
-        runtime_state.active_metrics.add_phase_done(len(sarif_files))
-        merge_sarif_into_ingests(plan, ingests, sarif_ingest)
-        sarif_ingest.warnings.extend(sarif_freshness_warnings(plan, ingests, sarif_ingest))
-        attach_sarif_warnings_to_runs(sarif_ingest)
-        progress_event(
-            "code_intel_sarif_parsed",
-            files=len(sarif_files),
-            runs=len(sarif_ingest.runs),
-            findings=sum(len(run.findings) for run in sarif_ingest.runs),
-            records=sum(len(records) for records in sarif_ingest.records_by_repo.values()),
-            parser_failures=len(sarif_ingest.failures),
-            warnings=len(sarif_ingest.warnings),
-        )
-        return sarif_ingest
+        return _scan_sarif(plan, ingests)
     finally:
         runtime_state.active_metrics.add("scan_sarif_seconds", time.monotonic() - started)
+
+
+def _scan_sarif(plan: IngestPlan, ingests: list[RepoIngest]) -> SarifIngest:
+    sarif_ingest = SarifIngest(runs=[], records_by_repo={}, failures=[])
+    sarif_files = discover_plan_sarif_files(plan)
+    emit_sarif_discovery(plan, sarif_files)
+    if not sarif_files:
+        return sarif_ingest
+    runtime_state.active_metrics.add_phase_total(len(sarif_files))
+    file_by_source_path = {file.source_path: file for ingest in ingests for file in ingest.files}
+    sarif_ingest = ingest_sarif(
+        SarifIngestContext(
+            root=plan.root,
+            repos=plan.repos,
+            collection=plan.collection,
+            file_by_source_path=file_by_source_path,
+            max_bytes=plan.args.sarif_max_bytes,
+        ),
+        sarif_files,
+    )
+    runtime_state.active_metrics.add_phase_done(len(sarif_files))
+    merge_sarif_into_ingests(plan, ingests, sarif_ingest)
+    sarif_ingest.warnings.extend(sarif_freshness_warnings(plan, ingests, sarif_ingest))
+    attach_sarif_warnings_to_runs(sarif_ingest)
+    progress_event(
+        "code_intel_sarif_parsed",
+        files=len(sarif_files),
+        runs=len(sarif_ingest.runs),
+        findings=sum(len(run.findings) for run in sarif_ingest.runs),
+        records=sum(len(records) for records in sarif_ingest.records_by_repo.values()),
+        parser_failures=len(sarif_ingest.failures),
+        warnings=len(sarif_ingest.warnings),
+    )
+    return sarif_ingest
 
 
 def parse_sarif_warning_datetime(value: object) -> datetime | None:
@@ -1887,19 +1891,28 @@ def upload_ingests(plan: IngestPlan, ingests: list[RepoIngest], sarif_ingest: Sa
     summary = DbUploadSummary()
     runtime_state.active_metrics.begin_phase("db_upload", total=db_upload_total(ingests))
     try:
-        with db.connect(readonly=False) as conn:
-            ensure_schema(conn)
-            replace_repos_for_full_ingests(conn, plan, ingests)
-            indexes = StaticSnapshotIndexes()
-            for ingest in ingests:
-                upload_repo_ingest(conn, plan, ingest, summary, indexes)
-            insert_static_analysis(conn, sarif_ingest, indexes.snapshot_ids_by_repo, indexes.snapshot_by_repo, summary)
-            runtime_state.active_metrics.set("db_write_op", "committing")
-            conn.commit()
-            runtime_state.active_metrics.set("db_write_op", None)
+        _upload_ingests(plan, ingests, sarif_ingest, summary)
     finally:
         runtime_state.active_metrics.end_phase("db_upload", "db_upload_seconds")
     return summary
+
+
+def _upload_ingests(
+    plan: IngestPlan,
+    ingests: list[RepoIngest],
+    sarif_ingest: SarifIngest,
+    summary: DbUploadSummary,
+) -> None:
+    with db.connect(readonly=False) as conn:
+        ensure_schema(conn)
+        replace_repos_for_full_ingests(conn, plan, ingests)
+        indexes = StaticSnapshotIndexes()
+        for ingest in ingests:
+            upload_repo_ingest(conn, plan, ingest, summary, indexes)
+        insert_static_analysis(conn, sarif_ingest, indexes.snapshot_ids_by_repo, indexes.snapshot_by_repo, summary)
+        runtime_state.active_metrics.set("db_write_op", "committing")
+        conn.commit()
+        runtime_state.active_metrics.set("db_write_op", None)
 
 
 def replace_repos_for_full_ingests(conn: db.DbConnection, plan: IngestPlan, ingests: list[RepoIngest]) -> None:

@@ -56,6 +56,24 @@ def snapshot_fixture() -> Snapshot:
     )
 
 
+def snapshot_compatibility_with_generic_profile() -> tuple[bool, bool, bool]:
+    previous_profile = profile_context.active_profile
+    try:
+        profile_context.set_active_profile(GenericProfile())
+        return _snapshot_compatibility_results()
+    finally:
+        profile_context.set_active_profile(previous_profile)
+
+
+def _snapshot_compatibility_results() -> tuple[bool, bool, bool]:
+    compatible = snapshot_versions_compatible(snapshot_fixture().metadata)
+    incompatible: JsonObject = dict(snapshot_fixture().metadata)
+    incompatible["profile_version"] = "old"
+    old_profile_compatible = snapshot_versions_compatible(incompatible)
+    missing_metadata_compatible = snapshot_versions_compatible(None)
+    return compatible, old_profile_compatible, missing_metadata_compatible
+
+
 def file_fixture(
     *,
     file_sha256: str | None = "filesha",
@@ -166,16 +184,11 @@ class StorageContractTests(unittest.TestCase):
             _ = row_int(cast("db.DbRow", {"count": "12.5"}), "count")
 
     def test_snapshot_versions_compatible_matches_schema_parser_and_profile(self) -> None:
-        previous_profile = profile_context.active_profile
-        try:
-            profile_context.set_active_profile(GenericProfile())
-            self.assertTrue(snapshot_versions_compatible(snapshot_fixture().metadata))
-            incompatible: JsonObject = dict(snapshot_fixture().metadata)
-            incompatible["profile_version"] = "old"
-            self.assertFalse(snapshot_versions_compatible(incompatible))
-            self.assertFalse(snapshot_versions_compatible(None))
-        finally:
-            profile_context.set_active_profile(previous_profile)
+        compatible, old_profile_compatible, missing_metadata_compatible = snapshot_compatibility_with_generic_profile()
+
+        self.assertTrue(compatible)
+        self.assertFalse(old_profile_compatible)
+        self.assertFalse(missing_metadata_compatible)
 
     def test_parser_failure_metadata_removes_promoted_columns(self) -> None:
         metadata = parser_failure_metadata({

@@ -53,6 +53,14 @@ class DatabaseRole:
 
 
 @dataclass(frozen=True)
+class InferredDatabaseCreateContext:
+    dbname: str
+    rw_role_name: str
+    ro_role_name: str
+    create_project_roles: bool
+
+
+@dataclass(frozen=True)
 class DatabaseBootstrapResult:
     dbname: str
     database_created: bool = False
@@ -554,15 +562,14 @@ def bootstrap_inferred_database(
     bootstrap_settings = _bootstrap_connection_settings(settings)
     maintenance_settings = maintenance_database_settings(settings)
     create_project_roles = bool(settings.admin_user and settings.admin_password)
-    connect_autocommit = cast("AutocommitConnect", Connection[DictRow].connect)
     try:
-        with connect_autocommit(conninfo(maintenance_settings), autocommit=True, row_factory=DICT_ROW_FACTORY) as conn:
-            rw_role = _ensure_login_role(conn, settings, rw_role_name) if create_project_roles else None
-            ro_role = _ensure_login_role(conn, settings, ro_role_name) if create_project_roles else None
-            database_created = False
-            if not _database_exists(conn, dbname):
-                _ = conn.execute(create_database_sql(dbname))
-                database_created = True
+        create_context = InferredDatabaseCreateContext(
+            dbname=dbname,
+            rw_role_name=rw_role_name,
+            ro_role_name=ro_role_name,
+            create_project_roles=create_project_roles,
+        )
+        database_created, rw_role, ro_role = _create_inferred_database(settings, maintenance_settings, create_context)
     except (DatabaseConnectionError, PsycopgError) as exc:
         raise DatabaseConnectionError(
             "Could not bootstrap inferred PostgreSQL database "
@@ -593,6 +600,30 @@ def bootstrap_inferred_database(
         rw_role=rw_role,
         ro_role=ro_role,
     )
+
+
+def _create_inferred_database(
+    settings: DatabaseSettings,
+    maintenance_settings: DatabaseSettings,
+    create_context: InferredDatabaseCreateContext,
+) -> tuple[bool, DatabaseRole | None, DatabaseRole | None]:
+    connect_autocommit = cast("AutocommitConnect", Connection[DictRow].connect)
+    with connect_autocommit(conninfo(maintenance_settings), autocommit=True, row_factory=DICT_ROW_FACTORY) as conn:
+        rw_role = (
+            _ensure_login_role(conn, settings, create_context.rw_role_name)
+            if create_context.create_project_roles
+            else None
+        )
+        ro_role = (
+            _ensure_login_role(conn, settings, create_context.ro_role_name)
+            if create_context.create_project_roles
+            else None
+        )
+        database_created = False
+        if not _database_exists(conn, create_context.dbname):
+            _ = conn.execute(create_database_sql(create_context.dbname))
+            database_created = True
+    return database_created, rw_role, ro_role
 
 
 def bootstrap_postgres_roles(
