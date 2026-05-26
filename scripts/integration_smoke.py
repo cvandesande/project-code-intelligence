@@ -150,24 +150,29 @@ def smoke_env(collection: str) -> dict[str, str]:
 def parse_mcp_tool_response(stdout: str, tool_name: str) -> dict[str, object]:
     try:
         rpc_response_value = cast("object", json.loads(stdout))
-        if not isinstance(rpc_response_value, dict):
-            fail("MCP smoke response was not an object")
-        rpc_response = cast("dict[str, object]", rpc_response_value)
-        if "error" in rpc_response:
-            fail(f"{tool_name} returned an MCP error: {rpc_response['error']}")
+    except json.JSONDecodeError as exc:
+        fail(f"unexpected {tool_name} response: {exc}")
+    if not isinstance(rpc_response_value, dict):
+        fail("MCP smoke response was not an object")
+    rpc_response = cast("dict[str, object]", rpc_response_value)
+    if "error" in rpc_response:
+        fail(f"{tool_name} returned an MCP error: {rpc_response['error']}")
+    try:
         result_value = rpc_response["result"]
-        if not isinstance(result_value, dict):
-            fail("MCP result was not an object")
-        result = cast("dict[str, object]", result_value)
-        content_value = result["content"]
-        if not isinstance(content_value, list) or not content_value or not isinstance(content_value[0], dict):
-            fail("MCP result content was not a non-empty list")
-        content_item = cast("dict[str, object]", content_value[0])
+        content_value = cast("dict[str, object]", result_value)["content"]
+        content_item = cast("dict[str, object]", cast("list[object]", content_value)[0])
         text = content_item["text"]
-        if not isinstance(text, str):
-            fail(f"{tool_name} result text was not a string")
+    except (KeyError, IndexError, TypeError) as exc:
+        fail(f"unexpected {tool_name} response: {exc}")
+    if not isinstance(result_value, dict):
+        fail("MCP result was not an object")
+    if not isinstance(content_value, list) or not content_value or not isinstance(content_value[0], dict):
+        fail("MCP result content was not a non-empty list")
+    if not isinstance(text, str):
+        fail(f"{tool_name} result text was not a string")
+    try:
         tool_value = cast("object", json.loads(text))
-    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+    except json.JSONDecodeError as exc:
         fail(f"unexpected {tool_name} response: {exc}")
     if not isinstance(tool_value, dict):
         fail(f"{tool_name} response was not an object")

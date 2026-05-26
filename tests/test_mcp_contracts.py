@@ -128,6 +128,16 @@ def mcp_text_payload(response: object) -> dict[str, object]:
     return cast("dict[str, object]", payload)
 
 
+def _mcp_defaults_for_empty_env() -> tuple[str, str, str]:
+    with patch.dict(os.environ, {}, clear=True):
+        set_mcp_environment_defaults()
+        return (
+            os.environ["PCI_COLLECTION"],
+            os.environ[config.DATABASE_SCOPE_PATH_ENV],
+            os.environ["PCI_COLLECTION_DEFAULTED"],
+        )
+
+
 class McpTextSearchTests(unittest.TestCase):
     def test_text_search_terms_extract_code_identifiers(self) -> None:
         self.assertEqual(
@@ -1637,16 +1647,12 @@ class McpContractTests(unittest.TestCase):
             workspace.mkdir()
             try:
                 os.chdir(workspace)
-                with patch.dict(os.environ, {}, clear=True):
-                    set_mcp_environment_defaults()
-                    self.assertEqual(
-                        os.environ["PCI_COLLECTION"],
-                        "project-code-intelligence",
-                    )
-                    self.assertEqual(os.environ[config.DATABASE_SCOPE_PATH_ENV], str(workspace.resolve()))
-                    self.assertEqual(os.environ["PCI_COLLECTION_DEFAULTED"], "1")
+                collection, scope_path, defaulted = _mcp_defaults_for_empty_env()
             finally:
                 os.chdir(old_cwd)
+        self.assertEqual(collection, "project-code-intelligence")
+        self.assertEqual(scope_path, str(workspace.resolve()))
+        self.assertEqual(defaulted, "1")
 
     def test_mcp_keeps_explicit_collection_override(self) -> None:
         with patch.dict(os.environ, {"PCI_COLLECTION": "configured"}, clear=True):
