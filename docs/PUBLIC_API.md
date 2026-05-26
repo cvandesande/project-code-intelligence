@@ -15,7 +15,7 @@ Installed console scripts are public:
 | --- | --- |
 | `pci-index` | Main indexing command. Requires one or more repository paths, such as `pci-index .`. Can emit MCP client snippets and required environment exports with `--mcp-config {env,codex,claude,opencode,vscode,copilot,cline,zed}`. |
 | `pci-ingest-code` | Lower-level ingest command used by `pci-index`; useful for advanced scripting. |
-| `pci-doctor` | Detects database, embedding endpoint, CPU, GPU, and NPU readiness. |
+| `pci-doctor` | Detects database, embedding endpoint, CPU, GPU, and NPU readiness. Also starts/stops bundled local services with `--start`, `--start-db`, `--start-embedding`, `--stop`, and `--clean`. |
 | `pci-mcp` | stdio MCP server entry point. |
 | `pci-mcp-smoke` | Basic MCP status and tool smoke check. Requires one or more repo paths, such as `pci-mcp-smoke .`. |
 | `pci-fastembed-server` | Small OpenAI-compatible FastEmbed server for local CPU embeddings. |
@@ -105,6 +105,17 @@ deterministic HMAC-derived passwords keyed on the writer password). The
 bundled local pgvector container ships with a writer that has CREATEROLE, so
 this works out of the box; for a remote Postgres whose writer lacks CREATEROLE
 the role-creation SQL fails with guidance to run `pci-doctor --init-postgres`.
+
+For the bundled local database, `pci-doctor --start-db` starts only the
+pgvector container. `pci-doctor --start` starts the database plus the best local
+embedding service it can run on the host. Use `--start-db` when embeddings are
+remote or intentionally skipped.
+
+Installed packages materialize bundled Compose assets into the user cache. Set
+`PCI_COMPOSE_FILE` to use a customized Compose file without editing the
+installed package or Nix store path. `pci-doctor --clean` removes generated
+Compose cache files in addition to stopping local services and removing the
+bundled database volume.
 
 `PCI_COLLECTION` remains a supported override, but normal
 CLI/MCP use should not need it. Prefer `pci-index --collection NAME` for index

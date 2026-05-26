@@ -111,6 +111,18 @@ pci-index --init-db .
 pci-index .
 ```
 
+For the bundled local database, no Postgres admin bootstrap is needed:
+
+```sh
+pci-doctor --start-db
+pci-doctor
+```
+
+When `pci-doctor` cannot reach a database, fix the database first by setting
+`PCI_DATABASE_URL`, running `pci-doctor --start-db`, or running
+`pci-doctor --init-postgres` for a non-bundled Postgres cluster. Indexing only
+makes sense after the database is reachable.
+
 Use `pci-doctor --init-postgres --no-write-config` when you want only printed
 exports and no user config file.
 
@@ -205,6 +217,18 @@ a fixed database name.
 repo/workspace scope. Use `pci-doctor --clean` for broad local runtime cleanup
 while keeping the CLI installed. Use `make tool-uninstall` to run that cleanup
 and then remove the installed `pci-*` binaries.
+
+Installed packages use bundled Compose assets. If you need to customize the
+Compose file, copy `docker-compose.yml` and point PCI at that copy:
+
+```sh
+PCI_COMPOSE_FILE=/path/to/docker-compose.yml pci-doctor --start-db
+```
+
+Do not edit files inside a Nix store path or an installed wheel. Re-running
+`uv tool install --reinstall` or `make tool-install` replaces the installed
+package, but `PCI_COMPOSE_FILE` keeps your Compose customization outside the
+package lifecycle.
 
 Do not commit real database credentials or private export files. Generated
 project-scoped snippets for Codex, Claude Code, OpenCode, and VS Code Copilot
