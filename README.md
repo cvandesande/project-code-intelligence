@@ -77,7 +77,9 @@ whether the install is earning its keep.
 
 ## Quick Start
 
-Install the CLI tools and start the local services that fit the machine:
+Install the CLI tools, then choose the startup path that fits the machine.
+For a local all-in-one setup with a bundled pgvector database and a local
+embedding service:
 
 ```sh
 uv tool install /path/to/project-code-intelligence
@@ -85,11 +87,31 @@ pci-doctor --start
 pci-doctor
 ```
 
-When `pci-doctor` reports `Status: ok ready`, index a repository:
+On low-power machines, or when embeddings should run elsewhere, start only the
+bundled database and point PCI at an OpenAI-compatible embedding endpoint:
+
+```sh
+uv tool install /path/to/project-code-intelligence
+pci-doctor --start-db
+export PCI_ALLOW_REMOTE_EMBEDDING=1
+export PCI_EMBEDDING_ENDPOINT=https://api.openai.com/v1/embeddings
+export PCI_EMBEDDING_ENDPOINT_MODEL=text-embedding-3-small
+export OPENAI_API_KEY=...
+pci-doctor
+```
+
+When `pci-doctor` reports the database and embedding endpoint are ready, index a
+repository:
 
 ```sh
 cd /path/to/repo
 pci-index .
+```
+
+For lexical search only, skip embeddings explicitly:
+
+```sh
+pci-index --no-embed .
 ```
 
 Then point your MCP client at `pci-mcp`. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md)
@@ -135,7 +157,7 @@ python -m pip install -e .
 ```
 
 On NixOS, or on another Linux host with Nix flakes enabled, build or run the
-core CLI package directly:
+core CLI package directly from a checkout:
 
 ```sh
 nix build
@@ -143,11 +165,25 @@ nix run .#pci-doctor -- --skip-db --embedding skip
 nix develop
 ```
 
-The Nix package intentionally follows the core install path: it includes the
-CLI/MCP/indexing commands and Python runtime dependencies, but does not add a
-local embedding backend. On low-power machines, index text-only with
-`pci-index --no-embed .`, or configure an OpenAI-compatible remote embedding
-endpoint explicitly:
+To install the commands persistently into your user profile:
+
+```sh
+nix profile install .#project-code-intelligence
+```
+
+To uninstall that profile entry later:
+
+```sh
+nix profile list
+nix profile remove <index>
+```
+
+The Nix package intentionally keeps the Nix closure focused on the
+CLI/MCP/indexing commands, Python runtime dependencies, and bundled Compose
+assets. Heavy embedding runtimes are not added as host-native Nix dependencies.
+Use `pci-doctor --start-db` for the bundled database, then either index
+text-only with `pci-index --no-embed .` or configure a trusted
+OpenAI-compatible remote embedding endpoint explicitly:
 
 ```sh
 export PCI_ALLOW_REMOTE_EMBEDDING=1
@@ -155,6 +191,21 @@ export PCI_EMBEDDING_ENDPOINT=https://api.openai.com/v1/embeddings
 export PCI_EMBEDDING_ENDPOINT_MODEL=text-embedding-3-small
 export OPENAI_API_KEY=...
 ```
+
+The bundled Compose file is materialized from installed package data when the
+project is installed through `uv tool` or Nix. To customize Compose behavior,
+copy the repo's `docker-compose.yml` and point PCI at your copy instead of
+editing installed package files:
+
+```sh
+export PCI_COMPOSE_FILE=/path/to/docker-compose.yml
+pci-doctor --start-db
+```
+
+`pci-doctor --clean` stops local services, removes the bundled database volume,
+removes generated Compose cache files, and removes the generated `pci-index`
+user config. `make tool-uninstall` runs that cleanup first, then uninstalls the
+`uv tool` command shims.
 
 The full list of installed commands lives in [docs/PUBLIC_API.md](docs/PUBLIC_API.md).
 
@@ -209,8 +260,11 @@ For advanced flags, see `pci-index --help`.
 
 Embeddings power semantic search. Local CPU, NPU, and GPU embedding services all
 publish the same default endpoint at `http://127.0.0.1:18081/v1/embeddings`.
-Run only one local embedding service at a time. `pci-doctor --start` picks the
-best available local path, and default models download on first run.
+Run only one local embedding service at a time. `pci-doctor --start` starts the
+bundled database and picks the best available local embedding path.
+`pci-doctor --start-db` starts only the bundled pgvector database, which is the
+better default when embeddings come from a remote provider or should be skipped.
+Default local models download on first run.
 
 Remote embedding endpoints receive source-derived text. Set
 `PCI_ALLOW_REMOTE_EMBEDDING=1` only when that is
