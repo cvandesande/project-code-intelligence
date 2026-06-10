@@ -489,7 +489,8 @@ def _collect_benchmark_requests(
             accumulator.vector_dimensions = result.dimensions
         elif result.dimensions != accumulator.vector_dimensions:
             raise ValueError("endpoint returned inconsistent vector dimensions between runs")
-        accumulator.response_model = result.response_model or accumulator.response_model
+        if result.response_model is not None:
+            accumulator.response_model = result.response_model
         accumulator.response_bytes += result.response_bytes
         request_seconds.append(result.seconds)
         accumulator.total_texts += len(texts)

@@ -243,53 +243,58 @@ def compose_cache_dir() -> Path:
     return _cache_root()
 
 
+def _chmod_quiet(path: Path, mode: int) -> None:
+    """Best-effort chmod; ownership/filesystem restrictions are not fatal here."""
+    with contextlib.suppress(OSError):
+        path.chmod(mode)
+
+
 def _write_text_if_changed(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with contextlib.suppress(OSError):
-        path.parent.chmod(0o700)
+    _chmod_quiet(path.parent, 0o700)
     try:
         if path.read_text(encoding="utf-8") == content:
             return
     except OSError:
         pass
     if path.exists():
-        with contextlib.suppress(OSError):
-            path.chmod(0o600)
+        _chmod_quiet(path, 0o600)
     _ = path.write_text(content, encoding="utf-8")
-    with contextlib.suppress(OSError):
-        path.chmod(0o600)
+    _chmod_quiet(path, 0o600)
 
 
 def _copy_file_if_changed(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    with contextlib.suppress(OSError):
-        target.parent.chmod(0o700)
+    _chmod_quiet(target.parent, 0o700)
     try:
         if target.exists() and target.read_bytes() == source.read_bytes():
             return
     except OSError:
         pass
     if target.exists():
-        with contextlib.suppress(OSError):
-            target.chmod(0o600)
+        _chmod_quiet(target, 0o600)
     _ = shutil.copyfile(source, target)
-    with contextlib.suppress(OSError):
-        target.chmod(0o600)
+    _chmod_quiet(target, 0o600)
 
 
 def _remove_generated_tree(path: Path) -> None:
     if not path.exists():
         return
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        pass
+    else:
+        return
+    # Recovery path: restrictive permissions blocked deletion. Make the tree
+    # owner-writable and retry once; a second failure propagates.
     for current_dir, dir_names, file_names in os.walk(path):
         current_path = Path(current_dir)
-        with contextlib.suppress(OSError):
-            current_path.chmod(0o700)
+        _chmod_quiet(current_path, 0o700)
         for name in dir_names:
-            with contextlib.suppress(OSError):
-                (current_path / name).chmod(0o700)
+            _chmod_quiet(current_path / name, 0o700)
         for name in file_names:
-            with contextlib.suppress(OSError):
-                (current_path / name).chmod(0o600)
+            _chmod_quiet(current_path / name, 0o600)
     shutil.rmtree(path)
 
 

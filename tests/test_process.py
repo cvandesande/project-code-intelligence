@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
+import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -89,6 +92,49 @@ class PackageDataTests(unittest.TestCase):
         ]
 
         self.assertEqual(missing, [])
+
+    def test_compose_context_package_source_whitelist_is_import_sufficient(self) -> None:
+        """A tree containing only the whitelisted files must satisfy the container's imports.
+
+        The materialized Compose context copies only
+        `_COMPOSE_CONTEXT_PACKAGE_SOURCE_FILES`; if `fastembed_server`'s
+        transitive runtime imports outgrow that whitelist, the container
+        fails with ModuleNotFoundError at runtime. Catch the drift here.
+        """
+        package_dir = Path(process.__file__).resolve().parent
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target_dir = root / "src" / "project_code_intelligence"
+            for relative_path in process._COMPOSE_CONTEXT_PACKAGE_SOURCE_FILES:  # pyright: ignore[reportPrivateUsage]
+                destination = target_dir / relative_path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                _ = shutil.copyfile(package_dir / relative_path, destination)
+            result = run(
+                [sys.executable, "-c", "import project_code_intelligence.embedding.fastembed_server"],
+                RunOptions(
+                    capture_output=True,
+                    cwd=root,
+                    env={**os.environ, "PYTHONPATH": str(root / "src")},
+                ),
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_flake_python_dependencies_match_pyproject(self) -> None:
+        """flake.nix hand-lists runtime deps; fail when pyproject.toml drifts."""
+        root = Path(__file__).resolve().parents[1]
+        flake_text = (root / "flake.nix").read_text(encoding="utf-8")
+        project = load_toml(root / "pyproject.toml")
+        project_metadata = toml_table(project["project"])
+        for dependency in toml_string_list(project_metadata["dependencies"]):
+            if ";" in dependency:
+                continue  # platform-marked deps (e.g. mlx-lm on darwin) are not in the flake
+            name = re.split(r"[\s<>=!\[]", dependency, maxsplit=1)[0]
+            self.assertIn(
+                f"pythonPackages.{name}",
+                flake_text,
+                f"runtime dependency {name!r} from pyproject.toml is missing from flake.nix",
+            )
 
 
 class RunCommandValidationTests(unittest.TestCase):
