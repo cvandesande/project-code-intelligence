@@ -84,15 +84,19 @@ def index_parser() -> argparse.ArgumentParser:
     )
     _ = parser.add_argument(
         "--prune-snapshots",
-        action="store_true",
-        help="Delete old snapshots, keeping only the N most recent per repo (see --prune-keep).",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "After a successful index, delete old snapshots per repo, keeping only the N most recent "
+            "(see --prune-keep). Enabled by default; pass --no-prune-snapshots to keep every snapshot."
+        ),
     )
     _ = parser.add_argument(
         "--prune-keep",
         type=int,
         default=5,
         metavar="N",
-        help="Number of recent snapshots to keep when --prune-snapshots is set (default: 5).",
+        help="Number of recent snapshots to keep per repo when pruning (default: 5).",
     )
     _ = parser.add_argument(
         "--show-parser-failures",
@@ -268,6 +272,8 @@ def forwarded_index_args(parsed: IndexNamespace, passthrough: list[str]) -> list
         os.environ["PCI_ALLOW_WRITES"] = "1"
     if parsed.prune_snapshots:
         forwarded = [*forwarded, "--prune-snapshots", "--prune-keep", str(parsed.prune_keep)]
+    else:
+        forwarded = [*forwarded, "--no-prune-snapshots"]
     if parsed.show_parser_failures:
         forwarded = [*forwarded, "--show-parser-failures"]
     return forwarded
