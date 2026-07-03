@@ -492,6 +492,38 @@ class PciIndexShowParserFailuresFlagTests(unittest.TestCase):
         self.assertNotIn("--show-parser-failures", forwarded)
 
 
+class PciIndexPruneSnapshotsFlagTests(unittest.TestCase):
+    """Forwarding contract for `pci-index --prune-snapshots` (default on)."""
+
+    @staticmethod
+    def _run_with_capture(argv: list[str]) -> tuple[int, list[str]]:
+        forwarded: list[str] = []
+
+        def fake_ingest_main(args: list[str]) -> int:
+            forwarded.extend(args)
+            return 0
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("project_code_intelligence.cli.ingest_code_intel.cli_main", side_effect=fake_ingest_main),
+        ):
+            status = cli.index_main(argv)
+        return status, forwarded
+
+    def test_pruning_is_forwarded_by_default(self) -> None:
+        status, forwarded = self._run_with_capture(["--dry-run", "."])
+        self.assertEqual(status, 0)
+        self.assertIn("--prune-snapshots", forwarded)
+        self.assertNotIn("--no-prune-snapshots", forwarded)
+        self.assertEqual(forwarded[forwarded.index("--prune-keep") + 1], "5")
+
+    def test_no_prune_snapshots_opts_out(self) -> None:
+        status, forwarded = self._run_with_capture(["--no-prune-snapshots", "--dry-run", "."])
+        self.assertEqual(status, 0)
+        self.assertIn("--no-prune-snapshots", forwarded)
+        self.assertNotIn("--prune-snapshots", forwarded)
+
+
 class IndexUserConfigTests(unittest.TestCase):
     def test_pci_index_loads_pci_doctor_user_config(self) -> None:
         captured_env: dict[str, str | None] = {}

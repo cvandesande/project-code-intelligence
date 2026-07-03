@@ -670,15 +670,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _ = parser.add_argument(
         "--prune-snapshots",
-        action="store_true",
-        help="Delete old snapshots, keeping only the N most recent per repo (see --prune-keep).",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "After a successful ingest, delete old snapshots per repo, keeping only the N most recent "
+            "(see --prune-keep). Enabled by default; pass --no-prune-snapshots to keep every snapshot."
+        ),
     )
     _ = parser.add_argument(
         "--prune-keep",
         type=int,
         default=5,
         metavar="N",
-        help="Number of recent snapshots to keep when --prune-snapshots is set (default: 5).",
+        help="Number of recent snapshots to keep per repo when pruning (default: 5).",
     )
     _ = parser.add_argument(
         "--mcp-config",
