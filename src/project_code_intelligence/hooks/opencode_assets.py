@@ -103,13 +103,14 @@ export const PciEvidence = async ({ directory }) => {
 }
 """
 
-REINDEX_JS = r"""// PCI background reindex hook (debounced, non-blocking).
+REINDEX_JS = r"""// PCI background reindex hook (debounced, opt-in).
 //
-// On each edit/write to a source file it (re)arms a debounce timer; once the
-// writes go quiet it asks `pci-hook run --behavior reindex` to refresh the
-// index in the background. `pci-hook` serialises runs with a lock, so a write
-// that lands mid-run triggers exactly one more pass. Tunable:
-// PCI_REINDEX_DEBOUNCE_MS (5000). Timers fire only while the session lives.
+// Default reindex is the git post-commit hook (indexes the clean committed
+// tree). This per-edit reindex is opt-in for power users who want working-tree
+// freshness between commits; enable with PCI_REINDEX_ON_EDIT=1. On each
+// edit/write to a source file it (re)arms a debounce timer, then asks
+// `pci-hook run --behavior reindex` to refresh in the background; pci-hook
+// serialises runs with a lock. Tunable: PCI_REINDEX_DEBOUNCE_MS (5000).
 
 import { spawn } from "node:child_process"
 import { SOURCE_EXT, hookBin } from "../lib/pci-evidence-logic.js"
@@ -118,6 +119,8 @@ const DEBOUNCE_MS = Number(process.env.PCI_REINDEX_DEBOUNCE_MS) || 5000
 const WRITE_TOOLS = new Set(["edit", "write"])
 
 export const PciReindex = async ({ directory }) => {
+  // Opt-in: default reindex path is the git post-commit hook.
+  if (!process.env.PCI_REINDEX_ON_EDIT) return {}
   const bin = hookBin(directory)
   let timer = null
   let running = false

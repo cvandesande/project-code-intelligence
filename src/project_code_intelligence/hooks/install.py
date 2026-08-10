@@ -1,8 +1,12 @@
 """Install / remove the pci hooks in an agent's configuration.
 
 opencode: write the plugin + lib files under ``<project>/.opencode``.
-Claude Code: merge a ``PostToolUse`` (evidence) and ``Stop`` (reindex) handler
-into ``settings.json`` (project or user scope).
+Claude Code: merge a ``PreToolUse`` evidence handler into ``settings.json``.
+git: write a ``post-commit`` hook that reindexes the clean committed tree.
+
+Reindex is a git ``post-commit`` concern, not a per-edit one: indexing runs
+once per commit against the committed tree (no dirty snapshots), which matches
+the snapshot-per-commit model. Evidence stays agent-specific.
 
 Both operations are idempotent and reversible (``--uninstall``).
 """
@@ -18,12 +22,14 @@ from typing import cast
 
 from project_code_intelligence.hooks.opencode_assets import OPENCODE_FILES
 
-# Claude Code hook wiring. Evidence fires PreToolUse so the agent sees the blast
-# radius before the delete lands (preventive), not just after.
+# Claude evidence fires PreToolUse (preventive); reindex is on the git post-commit hook, not here.
 _MIN_PCI_ARGS = 4  # run --agent <name> ...
 _CLAUDE_EDIT_MATCHER = "Edit|Write"
 _EVIDENCE_ARGS = ["run", "--agent", "claude", "--behavior", "evidence"]
-_REINDEX_ARGS = ["run", "--agent", "claude", "--behavior", "reindex", "--repo", "${CLAUDE_PROJECT_DIR}"]
+
+# Managed block markers so post-commit edits never clobber a user's own script.
+_POSTCOMMIT_BEGIN = "# >>> pci-hook reindex (managed) >>>"
+_POSTCOMMIT_END = "# <<< pci-hook reindex (managed) <<<"
 
 
 @dataclass
@@ -126,10 +132,6 @@ def _evidence_group(command: str) -> dict[str, object]:
     }
 
 
-def _reindex_group(command: str) -> dict[str, object]:
-    return {"hooks": [{"type": "command", "command": command, "args": list(_REINDEX_ARGS), "async": True}]}
-
-
 def _load_settings(path: Path) -> dict[str, object]:
     if not path.exists():
         return {}
@@ -150,25 +152,20 @@ def install_claude(settings_path: Path, *, uninstall: bool, dry_run: bool) -> In
         for handler in _as_list(_as_object(group).get("hooks"))
     )
 
-    # Strip our handlers from both events: evidence now lives on PreToolUse, so
-    # this also migrates away any legacy PostToolUse evidence handler.
+    # Strip our handlers from every event; this also migrates away legacy
+    # PostToolUse evidence and Stop reindex handlers from older installs.
     pre = _strip_pci_groups(_as_list(hooks.get("PreToolUse")))
     post = _strip_pci_groups(_as_list(hooks.get("PostToolUse")))
     stop = _strip_pci_groups(_as_list(hooks.get("Stop")))
 
     if uninstall:
         action = "removed" if existed else "unchanged"
-        rows = [("PreToolUse", "evidence"), ("Stop", "reindex")] if existed else [("state", "no pci hooks present")]
+        rows = [("PreToolUse", "evidence")] if existed else [("state", "no pci hooks present")]
     else:
         command = _hook_command()
         pre.append(_evidence_group(command))
-        stop.append(_reindex_group(command))
         action = "updated" if existed else "installed"
-        rows = [
-            ("PreToolUse", f"{_CLAUDE_EDIT_MATCHER} -> evidence"),
-            ("Stop", "reindex (async)"),
-            ("command", command),
-        ]
+        rows = [("PreToolUse", f"{_CLAUDE_EDIT_MATCHER} -> evidence"), ("command", command)]
 
     _assign_event(hooks, "PreToolUse", pre)
     _assign_event(hooks, "PostToolUse", post)
@@ -189,3 +186,65 @@ def _assign_event(hooks: dict[str, object], event: str, groups: list[object]) ->
         hooks[event] = groups
     else:
         _ = hooks.pop(event, None)
+
+
+# --- git post-commit ------------------------------------------------------------
+
+
+def _strip_managed_block(text: str) -> str:
+    out: list[str] = []
+    skip = False
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped == _POSTCOMMIT_BEGIN:
+            skip = True
+            continue
+        if stripped == _POSTCOMMIT_END:
+            skip = False
+            continue
+        if not skip:
+            out.append(line)
+    return "".join(out)
+
+
+def install_git(repo: Path, *, uninstall: bool, dry_run: bool) -> InstallOutcome:
+    hook_path = repo / ".git" / "hooks" / "post-commit"
+    existing = hook_path.read_text(encoding="utf-8") if hook_path.exists() else ""
+    had_block = _POSTCOMMIT_BEGIN in existing
+    base = _strip_managed_block(existing)
+
+    if uninstall:
+        action = "removed" if had_block else "unchanged"
+        rows = [("post-commit", str(hook_path))] if had_block else [("state", "no pci post-commit hook present")]
+        # Drop a file that was only ever ours; keep any pre-existing user script.
+        leftover_is_ours = base.strip() in {"", "#!/bin/sh"}
+        if not dry_run:
+            if had_block and leftover_is_ours:
+                hook_path.unlink(missing_ok=True)
+            elif had_block:
+                _ = hook_path.write_text(base, encoding="utf-8")
+        return InstallOutcome("git", action, str(hook_path), rows)
+
+    command = _hook_command()
+    if not base.strip():
+        base = "#!/bin/sh\n"
+    elif not base.startswith("#!"):
+        base = "#!/bin/sh\n" + base
+    if not base.endswith("\n"):
+        base += "\n"
+    # Background it so `git commit` returns immediately; pci-hook serialises with a lock.
+    block = (
+        f"{_POSTCOMMIT_BEGIN}\n"
+        f'{command} run --agent git --behavior reindex --repo "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 &\n'
+        f"{_POSTCOMMIT_END}\n"
+    )
+    if not dry_run:
+        hook_path.parent.mkdir(parents=True, exist_ok=True)
+        _ = hook_path.write_text(base + block, encoding="utf-8")
+        hook_path.chmod(0o755)
+    return InstallOutcome(
+        "git",
+        "updated" if had_block else "installed",
+        str(hook_path),
+        [("post-commit", str(hook_path)), ("command", command)],
+    )

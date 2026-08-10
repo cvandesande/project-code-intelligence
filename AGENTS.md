@@ -11,6 +11,13 @@ live callers in source before finalizing the cut. The evidence hook injects the
 same bundle on an edit-delete as a backstop, but pulling it up front is
 cheaper than undoing a bad removal.
 
+Before you add a new function or class, semantic-search the index first
+(`search_code_intel_semantic`) for an existing equivalent, and reuse or extend
+it rather than duplicating. `blast_radius` guards removals; this guards
+additions (anti-slop). Additions have no push hook by design -- the pull check
+is cheaper than embedding every edit, and you are already reasoning about the
+code you are about to write.
+
 This repository builds `project-code-intelligence`: an MCP server that gives
 coding agents structured access to indexed Git repositories — semantic
 search, lexical search, a candidate-edge graph, and static-analysis findings

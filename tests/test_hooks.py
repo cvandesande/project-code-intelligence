@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -135,8 +136,8 @@ class InstallClaudeTests(unittest.TestCase):
             data = _read_json_file(settings)
             hooks = cast("dict[str, object]", data["hooks"])
             self.assertEqual(len(cast("list[object]", hooks["PreToolUse"])), 1)
-            self.assertEqual(len(cast("list[object]", hooks["Stop"])), 1)
             self.assertNotIn("PostToolUse", hooks)  # evidence is preventive now
+            self.assertNotIn("Stop", hooks)  # reindex moved to the git post-commit hook
 
     def test_install_preserves_foreign_hooks(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -168,6 +169,54 @@ class InstallClaudeTests(unittest.TestCase):
             settings = Path(tmp) / ".claude" / "settings.json"
             outcome = install.install_claude(settings, uninstall=True, dry_run=False)
             self.assertEqual(outcome.action, "unchanged")
+
+
+def _post_commit_path(repo: Path) -> Path:
+    return repo / ".git" / "hooks" / "post-commit"
+
+
+class InstallGitTests(unittest.TestCase):
+    def test_install_writes_executable_managed_block(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            outcome = install.install_git(repo, uninstall=False, dry_run=False)
+            self.assertEqual(outcome.action, "installed")
+            hook = _post_commit_path(repo)
+            text = hook.read_text(encoding="utf-8")
+            self.assertIn("pci-hook reindex (managed)", text)
+            self.assertIn("--behavior reindex", text)
+            self.assertTrue(os.access(hook, os.X_OK))
+
+    def test_install_is_idempotent(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            _ = install.install_git(repo, uninstall=False, dry_run=False)
+            again = install.install_git(repo, uninstall=False, dry_run=False)
+            self.assertEqual(again.action, "updated")
+            text = _post_commit_path(repo).read_text(encoding="utf-8")
+            self.assertEqual(text.count(">>> pci-hook reindex (managed) >>>"), 1)
+
+    def test_uninstall_keeps_user_script(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            hook = _post_commit_path(repo)
+            hook.parent.mkdir(parents=True)
+            _ = hook.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+            _ = install.install_git(repo, uninstall=False, dry_run=False)
+            self.assertIn("echo mine", hook.read_text(encoding="utf-8"))
+            removed = install.install_git(repo, uninstall=True, dry_run=False)
+            self.assertEqual(removed.action, "removed")
+            surviving = hook.read_text(encoding="utf-8")
+            self.assertIn("echo mine", surviving)
+            self.assertNotIn("managed", surviving)
+
+    def test_uninstall_deletes_when_only_ours(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            _ = install.install_git(repo, uninstall=False, dry_run=False)
+            self.assertTrue(_post_commit_path(repo).exists())
+            _ = install.install_git(repo, uninstall=True, dry_run=False)
+            self.assertFalse(_post_commit_path(repo).exists())
 
 
 if __name__ == "__main__":
