@@ -16,6 +16,7 @@ def _node(symbol: str, path: str, line: int, callees: list[str]) -> FunctionNode
         line_start=line,
         line_end=line + 20,
         callee_roles=analyze.role_set(callees),
+        callee_symbols=frozenset(callees),
     )
 
 
@@ -133,7 +134,7 @@ class ClusteringTests(unittest.TestCase):
 
 
 class GroupBuildingTests(unittest.TestCase):
-    def test_build_group_computes_common_shape_and_score(self) -> None:
+    def test_build_group_computes_common_shape_and_net_value(self) -> None:
         members = [
             _node("create_user", "svc/user.py", 10, ["validate_user", "convert_user", "repo.insert", "map_error"]),
             _node("create_team", "svc/team.py", 10, ["validate_team", "convert_team", "repo.insert", "map_error"]),
@@ -142,8 +143,13 @@ class GroupBuildingTests(unittest.TestCase):
         self.assertEqual(group.common_roles, ("convert", "insert", "map", "validate"))
         self.assertEqual(group.avg_structural, 1.0)
         self.assertEqual(group.avg_semantic, 0.9)
-        self.assertEqual(group.score, 1.0)
-        self.assertEqual(group.label, "medium")
+        # Unweighted: shared core = 4 roles, no residual, one module -> cost = base 1.0.
+        # removed = (2-1) * 4 * 1.0 = 4.0; net = 4.0 - 1.0 = 3.0.
+        self.assertEqual(group.redundancy_removed, 4.0)
+        self.assertEqual(group.abstraction_cost, 1.0)
+        self.assertEqual(group.net_value, 3.0)
+        self.assertEqual(group.recommendation, "worth-collapsing")
+        self.assertEqual(group.residual_roles, ())
         # _node() gives every member 21 LOC; keep one, fold the rest.
         self.assertEqual(group.estimated_loc_removed, 21)
 
@@ -160,14 +166,71 @@ class GroupBuildingTests(unittest.TestCase):
         group = analyze.build_group([known, unknown], avg_semantic=None)
         self.assertIsNone(group.estimated_loc_removed)
 
-    def test_high_label_needs_three_strong_members(self) -> None:
+    def test_cross_module_spread_raises_cost(self) -> None:
+        roles = ["validate_x", "convert_x", "repo.insert", "map_error"]
+        same = analyze.build_group(
+            [_node("a", "svc/one.py", 10, roles), _node("b", "svc/two.py", 10, roles)],
+            avg_semantic=None,
+        )
+        spread = analyze.build_group(
+            [_node("a", "svc/one.py", 10, roles), _node("b", "api/two.py", 10, roles)],
+            avg_semantic=None,
+        )
+        self.assertEqual(same.spread_penalty, 0.0)
+        self.assertGreater(spread.spread_penalty, 0.0)
+        self.assertLess(spread.net_value, same.net_value)
+
+
+class NetValueTests(unittest.TestCase):
+    def test_recommendation_branches(self) -> None:
+        # existing helper wins regardless of value.
+        self.assertEqual(analyze.recommendation(5.0, 4.0, 0.0, has_helper=True), "already-abstracted")
+        # non-positive value -> leave it alone.
+        self.assertEqual(analyze.recommendation(0.0, 4.0, 0.0, has_helper=False), "leave-as-is")
+        self.assertEqual(analyze.recommendation(-2.0, 4.0, 0.0, has_helper=False), "leave-as-is")
+        # positive value but residual heavier than the shared core -> leaky.
+        self.assertEqual(analyze.recommendation(1.0, 3.0, 4.0, has_helper=False), "parameterize-carefully")
+        # positive value, low residual -> collapse.
+        self.assertEqual(analyze.recommendation(3.0, 4.0, 0.0, has_helper=False), "worth-collapsing")
+
+    def test_net_value_damped_when_helper_present(self) -> None:
+        undamped = analyze.net_value(4.0, 1.0, has_helper=False)
+        self.assertEqual(undamped, 3.0)
+        # Positive value is damped toward zero so already-abstracted groups rank low.
+        damped = analyze.net_value(4.0, 1.0, has_helper=True)
+        self.assertGreater(damped, 0.0)
+        self.assertLess(damped, undamped)
+        # A negative value is not "improved" by the damping.
+        self.assertEqual(analyze.net_value(1.0, 5.0, has_helper=True), -4.0)
+
+    def test_existing_helper_detects_shared_internal_callee(self) -> None:
         members = [
-            _node("create_user", "u.py", 10, ["validate_user", "convert_user", "repo.insert", "map_error"]),
-            _node("create_team", "t.py", 10, ["validate_team", "convert_team", "repo.insert", "map_error"]),
-            _node("create_app", "a.py", 10, ["validate_app", "convert_app", "repo.insert", "map_error"]),
+            _node("create_user", "svc/user.py", 10, ["validate_user", "compact_json", "repo.insert", "map_error"]),
+            _node("create_team", "svc/team.py", 10, ["validate_team", "compact_json", "repo.insert", "map_error"]),
         ]
-        group = analyze.build_group(members, avg_semantic=None)
-        self.assertEqual(group.label, "high")
+        helper = analyze.existing_helper(members, frozenset({"compact_json"}))
+        self.assertEqual(helper, ("compact_json",))
+        # Nothing internal known -> no helper claimed.
+        self.assertEqual(analyze.existing_helper(members, frozenset()), ())
+
+    def test_existing_helper_excludes_member_symbols(self) -> None:
+        # Mutual calls between members must not read as a shared external helper.
+        members = [
+            _node("alpha", "m.py", 10, ["beta", "validate_x", "convert_x"]),
+            _node("beta", "m.py", 40, ["beta", "validate_y", "convert_y"]),
+        ]
+        self.assertEqual(analyze.existing_helper(members, frozenset({"alpha", "beta"})), ())
+
+    def test_build_group_flags_already_abstracted(self) -> None:
+        members = [
+            _node("create_user", "svc/user.py", 10, ["validate_user", "compact_json", "repo.insert", "map_error"]),
+            _node("create_team", "svc/team.py", 10, ["validate_team", "compact_json", "repo.insert", "map_error"]),
+        ]
+        group = analyze.build_group(members, avg_semantic=None, function_symbols=frozenset({"compact_json"}))
+        self.assertEqual(group.shared_helper, ("compact_json",))
+        self.assertEqual(group.recommendation, "already-abstracted")
+        # net value damped below the un-damped 3.0 so it ranks low.
+        self.assertLess(group.net_value, 3.0)
 
 
 def _sample_results() -> list[analyze.SnapshotResult]:
@@ -193,14 +256,20 @@ class RenderingTests(unittest.TestCase):
         self.assertEqual(groups[0]["common_shape"], ["convert", "insert", "map", "validate"])
         self.assertEqual(groups[0]["graph_similarity"], 1.0)
         self.assertEqual(groups[0]["semantic_similarity"], 0.87)
-        self.assertEqual(groups[0]["estimated_compression"], "medium")
-        self.assertEqual(groups[0]["estimated_loc_removed"], 21)
+        self.assertEqual(groups[0]["recommendation"], "worth-collapsing")
+        self.assertEqual(groups[0]["net_value"], 3.0)
+        evidence = cast("dict[str, object]", groups[0]["evidence"])
+        self.assertEqual(evidence["redundancy_removed"], 4.0)
+        self.assertEqual(evidence["abstraction_cost"], 1.0)
+        self.assertEqual(evidence["estimated_loc_removed"], 21)
 
     def test_text_render_mentions_members_and_shape(self) -> None:
         text = analyze.render_text(_sample_results())
         self.assertIn("Motif 1", text)
         self.assertIn("create_user", text)
         self.assertIn("validate", text)
+        self.assertIn("worth-collapsing", text)
+        self.assertIn("Why:", text)
         self.assertIn("2 functions analyzed, 0 exact clones folded", text)
 
     def test_empty_results_render_without_error(self) -> None:

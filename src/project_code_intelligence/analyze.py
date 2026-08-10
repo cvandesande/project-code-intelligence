@@ -38,9 +38,19 @@ DEFAULT_MIN_ROLES = 3
 DEFAULT_MIN_MEMBERS = 2
 DEFAULT_LIMIT = 20
 _MAJORITY = 0.5
-_HIGH_MEMBERS = 3
-_HIGH_STRUCTURAL = 0.8
-_MEDIUM_STRUCTURAL = 0.65
+
+# --- net-value tuning constants (advisory; MDL-flavored, all in role-weight units) ---
+# Cost to name and wire any new abstraction, so tiny groups do not get an
+# infinite value ratio. One "unit" is roughly one distinctive shared role.
+_ABSTRACTION_BASE = 1.0
+# Extra cost per additional module a shared abstraction must reach across
+# (a new import/dependency edge). In-module groups pay nothing.
+_SPREAD_UNIT = 0.5
+# When members already share an internal helper, positive net value is damped
+# toward zero so "already abstracted" groups rank low, not high.
+_EXISTING_HELPER_FACTOR = 0.1
+# Residual (parameterization) heavier than the shared core => a leaky abstraction.
+_LEAKY_RATIO = 1.0
 
 _TOKEN_SPLIT = re.compile(r"[^0-9A-Za-z]+")
 _CAMEL_SPLIT = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
@@ -56,6 +66,7 @@ class FunctionNode:
     line_start: int | None
     line_end: int | None
     callee_roles: frozenset[str]
+    callee_symbols: frozenset[str] = frozenset()
 
     @property
     def loc(self) -> int | None:
@@ -66,21 +77,32 @@ class FunctionNode:
 
 @dataclass(frozen=True)
 class MotifGroup:
-    """A cluster of structurally similar functions and its supporting evidence."""
+    """A cluster of structurally similar functions and its net-value evidence.
+
+    ``net_value`` is the MDL-flavored rank key: structural complexity removed by
+    a shared abstraction minus the complexity that abstraction introduces. It is
+    advisory. ``recommendation`` turns the number into a verdict — one of
+    ``worth-collapsing``, ``parameterize-carefully``, ``already-abstracted`` or
+    ``leave-as-is`` — and the cost breakdown fields explain why.
+    """
 
     members: tuple[FunctionNode, ...]
     common_roles: tuple[str, ...]
     avg_structural: float
     avg_semantic: float | None
-    score: float
+    net_value: float
+    value_ratio: float
+    redundancy_removed: float
+    abstraction_cost: float
+    residual_cost: float
+    spread_penalty: float
+    shared_helper: tuple[str, ...]
+    recommendation: str
 
     @property
-    def label(self) -> str:
-        if len(self.members) >= _HIGH_MEMBERS and self.avg_structural >= _HIGH_STRUCTURAL:
-            return "high"
-        if len(self.members) >= DEFAULT_MIN_MEMBERS and self.avg_structural >= _MEDIUM_STRUCTURAL:
-            return "medium"
-        return "low"
+    def residual_roles(self) -> tuple[str, ...]:
+        """Roles that vary across members (evidence for the residual cost)."""
+        return tuple(sorted(residual_role_union(self.members, self.common_roles)))
 
     @property
     def estimated_loc_removed(self) -> int | None:
@@ -252,20 +274,137 @@ def average_structural_similarity(members: Sequence[FunctionNode], weights: Mapp
     return sum(pairs) / len(pairs)
 
 
+# --- net-value (MDL-flavored) scoring -------------------------------------------
+
+
+def _last_component(name: str) -> str:
+    """Final dotted component of a callee/symbol name (``repo.insert`` -> ``insert``)."""
+    return name.rsplit(".", 1)[-1].strip()
+
+
+def core_shared_weight(core_roles: Sequence[str], weights: Mapping[str, float] | None) -> float:
+    """Information content of the repeated skeleton, in IDF role-weight units."""
+    return sum(_weight(weights, role) for role in core_roles)
+
+
+def residual_role_union(members: Sequence[FunctionNode], core_roles: Sequence[str]) -> frozenset[str]:
+    """Roles any member carries beyond the shared core — the part that varies."""
+    core = frozenset(core_roles)
+    union: set[str] = set()
+    for member in members:
+        union |= member.callee_roles - core
+    return frozenset(union)
+
+
+def residual_cost(
+    members: Sequence[FunctionNode], core_roles: Sequence[str], weights: Mapping[str, float] | None
+) -> float:
+    """Parameterization the abstraction must carry: weight of the residual role union.
+
+    This is the "type-parameter variability" term. Identical call shapes give an
+    empty residual (cheap abstraction); members that each do different extra work
+    give a large residual (a leaky, heavily parameterized abstraction).
+    """
+    return sum(_weight(weights, role) for role in residual_role_union(members, core_roles))
+
+
+def spread_penalty(members: Sequence[FunctionNode]) -> float:
+    """Cost of reaching across modules: each extra directory is a new dependency edge."""
+    directories = {member.source_path.rsplit("/", 1)[0] for member in members}
+    return max(len(directories) - 1, 0) * _SPREAD_UNIT
+
+
+def abstraction_cost(
+    members: Sequence[FunctionNode], core_roles: Sequence[str], weights: Mapping[str, float] | None
+) -> float:
+    """Complexity introduced by the abstraction: base + residual + cross-module spread."""
+    return _ABSTRACTION_BASE + residual_cost(members, core_roles, weights) + spread_penalty(members)
+
+
+def redundancy_removed(
+    members: Sequence[FunctionNode],
+    core_roles: Sequence[str],
+    avg_structural: float,
+    weights: Mapping[str, float] | None,
+) -> float:
+    """Structural complexity removed: (K-1) redundant copies of the shared core,
+    discounted by how tightly the members actually agree."""
+    return (len(members) - 1) * core_shared_weight(core_roles, weights) * avg_structural
+
+
+def existing_helper(members: Sequence[FunctionNode], function_symbols: frozenset[str]) -> tuple[str, ...]:
+    """Internal helper(s) every member already calls — evidence the motif is
+    already abstracted. Members' own symbols are excluded so mutual recursion is
+    not mistaken for a shared helper. Returns names sorted for stable output."""
+    if not members:
+        return ()
+    member_names = {_last_component(member.symbol) for member in members}
+    shared: set[str] | None = None
+    for member in members:
+        concrete = {_last_component(callee) for callee in member.callee_symbols}
+        shared = concrete if shared is None else (shared & concrete)
+    if not shared:
+        return ()
+    internal = {name for name in shared if name in function_symbols and name not in member_names}
+    return tuple(sorted(internal))
+
+
+def net_value(redundancy: float, cost: float, *, has_helper: bool) -> float:
+    """Rank key: bits saved (removed - introduced). Positive value is damped when
+    an existing helper already realizes the motif, so such groups rank low."""
+    base = redundancy - cost
+    if has_helper and base > 0.0:
+        return base * _EXISTING_HELPER_FACTOR
+    return base
+
+
+def value_ratio(redundancy: float, cost: float) -> float:
+    """Secondary evidence: the issue's literal "removed / introduced" reading."""
+    if cost <= 0.0:
+        return 0.0
+    return redundancy / cost
+
+
+def recommendation(value: float, shared: float, residual: float, *, has_helper: bool) -> str:
+    """Advisory verdict — explains, does not assert. See module docstring."""
+    if has_helper:
+        return "already-abstracted"
+    if value <= 0.0:
+        return "leave-as-is"
+    if residual > shared * _LEAKY_RATIO:
+        return "parameterize-carefully"
+    return "worth-collapsing"
+
+
 def build_group(
     members: Sequence[FunctionNode],
     avg_semantic: float | None,
     weights: Mapping[str, float] | None = None,
+    function_symbols: frozenset[str] = frozenset(),
 ) -> MotifGroup:
     ordered = tuple(sorted(members, key=lambda node: (node.source_path, node.line_start or 0, node.symbol)))
     avg_structural = average_structural_similarity(ordered, weights)
-    score = (len(ordered) - 1) * avg_structural
+    core = common_roles(ordered, weights)
+    shared = core_shared_weight(core, weights)
+    residual = residual_cost(ordered, core, weights)
+    spread = spread_penalty(ordered)
+    cost = _ABSTRACTION_BASE + residual + spread
+    removed = redundancy_removed(ordered, core, avg_structural, weights)
+    helper = existing_helper(ordered, function_symbols)
+    value = net_value(removed, cost, has_helper=bool(helper))
     return MotifGroup(
         members=ordered,
-        common_roles=common_roles(ordered, weights),
+        common_roles=core,
         avg_structural=avg_structural,
         avg_semantic=avg_semantic,
-        score=score,
+        net_value=value,
+        value_ratio=value_ratio(removed, cost),
+        redundancy_removed=removed,
+        abstraction_cost=cost,
+        residual_cost=residual,
+        spread_penalty=spread,
+        shared_helper=helper,
+        recommendation=recommendation(value, shared, residual, has_helper=bool(helper)),
     )
 
 
@@ -354,6 +493,7 @@ def load_function_nodes(conn: db.DbConnection, snapshot_id: int) -> list[Functio
         source_path = _coerce_str(row["source_path"])
         if record_id is None or symbol is None or source_path is None:
             continue
+        raw_callees = callees.get(record_id, [])
         out.append(
             FunctionNode(
                 record_id=record_id,
@@ -361,7 +501,8 @@ def load_function_nodes(conn: db.DbConnection, snapshot_id: int) -> list[Functio
                 source_path=source_path,
                 line_start=_coerce_int(row["line_start"]),
                 line_end=_coerce_int(row["line_end"]),
-                callee_roles=role_set(callees.get(record_id, [])),
+                callee_roles=role_set(raw_callees),
+                callee_symbols=frozenset(callee for callee in raw_callees if callee),
             )
         )
     return out
@@ -412,16 +553,22 @@ def analyze_snapshot(conn: db.DbConnection, snapshot: SnapshotRef, options: Anal
     nodes = load_function_nodes(conn, snapshot.snapshot_id)
     unique, folded = dedupe_clones(nodes)
     weights = role_weights(unique)
+    function_symbols = frozenset(_last_component(node.symbol) for node in unique)
     clusters = cluster_functions(unique, options, weights)
     groups = [
         build_group(
             members,
             group_semantic_similarity(conn, snapshot.snapshot_id, [member.record_id for member in members]),
             weights,
+            function_symbols,
         )
         for members in clusters
     ]
-    groups.sort(key=lambda group: (group.score, len(group.members)), reverse=True)
+    # Rank by net value; LOC removed is only a tiebreak, never the target.
+    groups.sort(
+        key=lambda group: (group.net_value, len(group.members), group.estimated_loc_removed or 0),
+        reverse=True,
+    )
     return SnapshotResult(
         label=f"{snapshot.collection}/{snapshot.repo}",
         groups=tuple(groups[: options.limit]),
@@ -449,9 +596,18 @@ def _group_to_json(group: MotifGroup) -> dict[str, object]:
         "common_shape": list(group.common_roles),
         "graph_similarity": round(group.avg_structural, 4),
         "semantic_similarity": None if group.avg_semantic is None else round(group.avg_semantic, 4),
-        "score": round(group.score, 4),
-        "estimated_compression": group.label,
-        "estimated_loc_removed": group.estimated_loc_removed,
+        "recommendation": group.recommendation,
+        "net_value": round(group.net_value, 4),
+        "evidence": {
+            "redundancy_removed": round(group.redundancy_removed, 4),
+            "abstraction_cost": round(group.abstraction_cost, 4),
+            "residual_cost": round(group.residual_cost, 4),
+            "spread_penalty": round(group.spread_penalty, 4),
+            "value_ratio": round(group.value_ratio, 4),
+            "residual_roles": list(group.residual_roles),
+            "shared_helper": list(group.shared_helper),
+            "estimated_loc_removed": group.estimated_loc_removed,
+        },
     }
 
 
@@ -472,18 +628,35 @@ def _render_member_line(member: FunctionNode) -> str:
     return f"    {member.symbol:<28} {member.source_path}:{member.line_start} ({loc})"
 
 
+def _why(group: MotifGroup) -> str:
+    """One-line rationale for the recommendation — explain, do not assert."""
+    if group.recommendation == "already-abstracted":
+        return f"members already share internal helper(s): {', '.join(group.shared_helper)}"
+    if group.recommendation == "leave-as-is":
+        return "abstraction cost meets or exceeds the redundancy it would remove"
+    if group.recommendation == "parameterize-carefully":
+        return (
+            f"varying roles ({', '.join(group.residual_roles) or 'none'}) rival the shared core; abstraction would leak"
+        )
+    return "shared shape outweighs abstraction cost with little variation"
+
+
 def _render_group(group: MotifGroup, ordinal: int) -> list[str]:
     semantic = "n/a" if group.avg_semantic is None else f"{group.avg_semantic:.2f}"
     loc_removed = "n/a" if group.estimated_loc_removed is None else str(group.estimated_loc_removed)
+    cost_breakdown = f"base + residual {group.residual_cost:.2f} + spread {group.spread_penalty:.2f}"
     return [
-        f"Motif {ordinal}: {len(group.members)} instances — estimated compression: {group.label}",
+        f"Motif {ordinal}: {len(group.members)} instances — {group.recommendation} (net value {group.net_value:.2f})",
+        f"  Why: {_why(group)}",
         "  Common shape:",
         *(f"    {role}" for role in group.common_roles),
         "  Instances:",
         *(_render_member_line(member) for member in group.members),
         f"  Graph similarity:    {group.avg_structural:.2f}",
         f"  Semantic similarity: {semantic}",
-        f"  Est. LOC removed:    {loc_removed} (advisory upper bound; not a merge recommendation)",
+        f"  Redundancy removed:  {group.redundancy_removed:.2f}  (weight units)",
+        f"  Abstraction cost:    {group.abstraction_cost:.2f}  ({cost_breakdown})",
+        f"  Est. LOC removed:    {loc_removed} (advisory; LOC is evidence, not the target)",
         "",
     ]
 
