@@ -203,6 +203,32 @@ MCP tools (`find_structurally_similar_code`, `find_repeated_code_motifs`,
 `get_code_subgraph`) come later via the four-file recipe, once the analysis
 produces stable data. CLI first is the cheapest way to reach Gate A.
 
+### Net-value scoring (implemented)
+
+Gate A now ranks each motif group by an MDL-flavored **net value**, not by size
+alone, so output separates "collapse these functions (worth it)" from "the
+shared shape is fine, leave them". All terms are in IDF role-weight units, so
+the score does not optimize for LOC (LOC stays evidence and a tiebreak).
+
+- `redundancy_removed = (members - 1) * weight(core_roles) * avg_structural` —
+  the repeated skeleton, discounted by how tightly members agree.
+- `abstraction_cost = base + residual_cost + spread_penalty`, where
+  `residual_cost` is the IDF weight of roles that vary across members (the
+  "type-parameter variability" an abstraction must carry) and `spread_penalty`
+  charges for reaching across modules.
+- `net_value = redundancy_removed - abstraction_cost` (rank key);
+  `value_ratio` is reported as secondary evidence.
+- Dedupe against existing abstractions: if members already share an internal
+  helper realizing the motif, net value is damped and the group is labelled
+  `already-abstracted` — the `compact_json` dogfood lesson, so the tool does not
+  propose re-abstracting what is already factored.
+- Advisory verdicts: `worth-collapsing`, `parameterize-carefully`,
+  `already-abstracted`, `leave-as-is`, each with an evidence breakdown.
+
+Deferred (extractor-dependent, Gate C): parameter/return-type divergence. It
+needs real signatures; approximating it from the heuristic graph would assert
+more than the data supports.
+
 ### Gate A success criterion
 
 The prototype produces non-obvious, source-verifiable candidate groups when
