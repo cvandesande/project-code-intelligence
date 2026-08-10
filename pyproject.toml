@@ -47,6 +47,7 @@ dependencies = [
 [project.scripts]
 pci-index = "project_code_intelligence.cli:index_main"
 pci-analyze = "project_code_intelligence.analyze:main"
+pci-evidence = "project_code_intelligence.evidence:main"
 pci-context = "project_code_intelligence.context:main"
 pci-ingest-code = "project_code_intelligence.ingest_code_intel:cli_main"
 pci-llama-embed = "project_code_intelligence.embedding.llama:main"
