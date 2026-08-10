@@ -16,7 +16,7 @@ import tempfile
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote, unquote, urlsplit, urlunsplit
+from urllib.parse import SplitResult, quote, unquote, urlsplit, urlunsplit
 
 from project_code_intelligence.common import default_database_name
 from project_code_intelligence.exceptions import ConfigError
@@ -300,62 +300,72 @@ def mask_database_dsn(dsn: str) -> str:
     return urlunsplit((parts.scheme, f"{user}{host}{port}", parts.path, query, ""))
 
 
-def database_url_dbname(dsn: str) -> str | None:
+def _split_pg_dsn(dsn: str) -> SplitResult | None:
+    """Parse a Postgres DSN, returning None when the scheme is not postgres(ql).
+
+    Callers use the None result to pass the original DSN (or a scheme-specific
+    default) through unchanged. Extracted from the ``database_url_*`` family,
+    which all repeated this scheme guard verbatim.
+    """
     parts = urlsplit(dsn)
     if parts.scheme not in {"postgres", "postgresql"}:
+        return None
+    return parts
+
+
+def _bracketed_netloc(parts: SplitResult) -> str:
+    """Host and port of a netloc with no credentials, bracketing IPv6 hosts."""
+    host = parts.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    port = f":{parts.port}" if parts.port else ""
+    return f"{host}{port}"
+
+
+def database_url_dbname(dsn: str) -> str | None:
+    parts = _split_pg_dsn(dsn)
+    if parts is None:
         return None
     dbname = unquote(parts.path.lstrip("/"))
     return dbname or None
 
 
 def database_url_defines_database(dsn: str) -> bool:
-    parts = urlsplit(dsn)
-    if parts.scheme not in {"postgres", "postgresql"}:
+    parts = _split_pg_dsn(dsn)
+    if parts is None:
         return True
     return bool(unquote(parts.path.lstrip("/")))
 
 
 def database_url_with_dbname(dsn: str, dbname: str) -> str:
-    parts = urlsplit(dsn)
-    if parts.scheme not in {"postgres", "postgresql"}:
+    parts = _split_pg_dsn(dsn)
+    if parts is None:
         return dsn
     return urlunsplit((parts.scheme, parts.netloc, "/" + quote(dbname, safe=""), parts.query, parts.fragment))
 
 
 def database_url_without_credentials_or_dbname(dsn: str) -> str:
-    parts = urlsplit(dsn)
-    if parts.scheme not in {"postgres", "postgresql"}:
+    parts = _split_pg_dsn(dsn)
+    if parts is None:
         return dsn
-    host = parts.hostname or ""
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    port = f":{parts.port}" if parts.port else ""
-    return urlunsplit((parts.scheme, f"{host}{port}", "", parts.query, parts.fragment))
+    return urlunsplit((parts.scheme, _bracketed_netloc(parts), "", parts.query, parts.fragment))
 
 
 def database_url_without_credentials(dsn: str) -> str:
-    parts = urlsplit(dsn)
-    if parts.scheme not in {"postgres", "postgresql"}:
+    parts = _split_pg_dsn(dsn)
+    if parts is None:
         return dsn
-    host = parts.hostname or ""
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    port = f":{parts.port}" if parts.port else ""
-    return urlunsplit((parts.scheme, f"{host}{port}", parts.path, parts.query, parts.fragment))
+    return urlunsplit((parts.scheme, _bracketed_netloc(parts), parts.path, parts.query, parts.fragment))
 
 
 def database_url_with_credentials(dsn: str, user: str, password: str | None = None) -> str:
-    parts = urlsplit(dsn)
-    if parts.scheme not in {"postgres", "postgresql"}:
+    parts = _split_pg_dsn(dsn)
+    if parts is None:
         return dsn
-    host = parts.hostname or ""
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    port = f":{parts.port}" if parts.port else ""
     userinfo = quote(user, safe="")
     if password is not None:
         userinfo += ":" + quote(password, safe="")
-    return urlunsplit((parts.scheme, f"{userinfo}@{host}{port}", parts.path, parts.query, parts.fragment))
+    return urlunsplit((parts.scheme, f"{userinfo}@{_bracketed_netloc(parts)}", parts.path, parts.query, parts.fragment))
 
 
 def configured_database_scope_path(env: Env | None = None) -> Path:
