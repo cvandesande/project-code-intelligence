@@ -24,7 +24,7 @@ from project_code_intelligence.hooks import runtime
 if TYPE_CHECKING:
     from project_code_intelligence.console_ui import PillKind
 
-_AGENTS = ("opencode", "claude")
+_AGENTS = ("opencode", "claude", "git")
 _BEHAVIORS = ("evidence", "reindex")
 _COLOR_FORCE: dict[str, bool | None] = {"auto": None, "always": True, "never": False}
 
@@ -83,16 +83,19 @@ def _render_outcome(outcome: install_mod.InstallOutcome, *, dry_run: bool, color
 
 
 def _run_install(parsed: HookNamespace) -> int:
+    if parsed.user and parsed.agent != "claude":
+        _ = sys.stderr.write("pci-hook: --user applies to Claude only\n")
+        return 2
     if parsed.agent == "claude":
         if parsed.user:
             settings = Path.home() / ".claude" / "settings.json"
         else:
             settings = Path(parsed.project or ".").resolve() / ".claude" / "settings.json"
         outcome = install_mod.install_claude(settings, uninstall=parsed.uninstall, dry_run=parsed.dry_run)
+    elif parsed.agent == "git":
+        repo = Path(parsed.project or ".").resolve()
+        outcome = install_mod.install_git(repo, uninstall=parsed.uninstall, dry_run=parsed.dry_run)
     else:
-        if parsed.user:
-            _ = sys.stderr.write("pci-hook: --user applies to Claude only\n")
-            return 2
         project = Path(parsed.project or ".").resolve()
         outcome = install_mod.install_opencode(project, uninstall=parsed.uninstall, dry_run=parsed.dry_run)
     color = console_ui.should_emit_pretty(sys.stdout, force=_COLOR_FORCE[parsed.color])
