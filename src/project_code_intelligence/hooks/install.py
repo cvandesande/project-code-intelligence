@@ -18,9 +18,10 @@ from typing import cast
 
 from project_code_intelligence.hooks.opencode_assets import OPENCODE_FILES
 
-# Claude Code hook wiring.
+# Claude Code hook wiring. Evidence fires PreToolUse so the agent sees the blast
+# radius before the delete lands (preventive), not just after.
 _MIN_PCI_ARGS = 4  # run --agent <name> ...
-_CLAUDE_POST_MATCHER = "Edit|Write"
+_CLAUDE_EDIT_MATCHER = "Edit|Write"
 _EVIDENCE_ARGS = ["run", "--agent", "claude", "--behavior", "evidence"]
 _REINDEX_ARGS = ["run", "--agent", "claude", "--behavior", "reindex", "--repo", "${CLAUDE_PROJECT_DIR}"]
 
@@ -120,7 +121,7 @@ def _strip_pci_groups(groups: list[object]) -> list[object]:
 
 def _evidence_group(command: str) -> dict[str, object]:
     return {
-        "matcher": _CLAUDE_POST_MATCHER,
+        "matcher": _CLAUDE_EDIT_MATCHER,
         "hooks": [{"type": "command", "command": command, "args": list(_EVIDENCE_ARGS)}],
     }
 
@@ -149,23 +150,27 @@ def install_claude(settings_path: Path, *, uninstall: bool, dry_run: bool) -> In
         for handler in _as_list(_as_object(group).get("hooks"))
     )
 
+    # Strip our handlers from both events: evidence now lives on PreToolUse, so
+    # this also migrates away any legacy PostToolUse evidence handler.
+    pre = _strip_pci_groups(_as_list(hooks.get("PreToolUse")))
     post = _strip_pci_groups(_as_list(hooks.get("PostToolUse")))
     stop = _strip_pci_groups(_as_list(hooks.get("Stop")))
 
     if uninstall:
         action = "removed" if existed else "unchanged"
-        rows = [("PostToolUse", "evidence"), ("Stop", "reindex")] if existed else [("state", "no pci hooks present")]
+        rows = [("PreToolUse", "evidence"), ("Stop", "reindex")] if existed else [("state", "no pci hooks present")]
     else:
         command = _hook_command()
-        post.append(_evidence_group(command))
+        pre.append(_evidence_group(command))
         stop.append(_reindex_group(command))
         action = "updated" if existed else "installed"
         rows = [
-            ("PostToolUse", f"{_CLAUDE_POST_MATCHER} -> evidence"),
+            ("PreToolUse", f"{_CLAUDE_EDIT_MATCHER} -> evidence"),
             ("Stop", "reindex (async)"),
             ("command", command),
         ]
 
+    _assign_event(hooks, "PreToolUse", pre)
     _assign_event(hooks, "PostToolUse", post)
     _assign_event(hooks, "Stop", stop)
     if hooks:
