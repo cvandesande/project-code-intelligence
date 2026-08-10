@@ -37,7 +37,7 @@ from project_code_intelligence.parsers.security import (
     security_pattern_anchor,
     security_records,
 )
-from project_code_intelligence.records import line_window_records
+from project_code_intelligence.records import line_window_records, module_records
 
 if TYPE_CHECKING:
     from project_code_intelligence.models import IntelEdge, IntelFile, IntelRecord, JsonObject
@@ -143,6 +143,9 @@ def parse_file(
             records.append(make_profile_record(intel_file, spec))
         edges.extend(extra_edges)
         records.extend(security_records(intel_file, text))
+        module_recs, module_edges = module_records(intel_file, text, records, max_chars)
+        records.extend(module_recs)
+        edges.extend(module_edges)
     except Exception as exc:  # noqa: BLE001  # pragma: no cover - parser boundary
         failures.append({
             "source_path": intel_file.source_path,

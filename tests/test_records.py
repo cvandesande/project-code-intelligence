@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from typing import cast
 
-from project_code_intelligence.models import IntelFile, JsonObject, JsonValue
+from project_code_intelligence.models import IntelFile, IntelRecord, JsonObject, JsonValue
 from project_code_intelligence.records import (
     MIN_LINE_WINDOW_CHARS,
     RecordSpec,
@@ -25,6 +25,7 @@ from project_code_intelligence.records import (
     make_embedding_text,
     make_record,
     markdown_fence_for,
+    module_records,
 )
 
 
@@ -361,6 +362,94 @@ class MakeRecordTests(unittest.TestCase):
         record = make_record(intel_file, spec)
         # No "```doc" tag.
         self.assertNotIn("```doc", record.display_content)
+
+
+def _definition_record(intel_file: IntelFile, symbol: str, line_start: int, line_end: int) -> IntelRecord:
+    return make_record(
+        intel_file,
+        RecordSpec(
+            record_type="symbol_definition",
+            record_id=f"{intel_file.source_path}::function::{symbol}::{line_start:06d}",
+            title=f"{symbol} def",
+            summary="S",
+            body="body",
+            line_start=line_start,
+            line_end=line_end,
+            symbol=symbol,
+            symbol_kind="function",
+        ),
+    )
+
+
+class ModuleRecordsTests(unittest.TestCase):
+    # A file whose function body (lines 4-6) is captured by a symbol_definition,
+    # leaving imports (1-2) and a module-level registry wiring (line 9) uncovered.
+    _TEXT = (
+        "import os\n"
+        "from pkg import LanguageProfile\n"
+        "\n"
+        "def my_builder(path):\n"
+        "    return os.path.basename(path)\n"
+        "\n"
+        "\n"
+        "PROFILE = LanguageProfile(\n"
+        "    file_metadata=my_builder,\n"
+        ")\n"
+    )
+
+    @staticmethod
+    def _definitions(intel_file: IntelFile) -> list[IntelRecord]:
+        # my_builder spans lines 4-5 (def + body); everything else is module level.
+        return [_definition_record(intel_file, "my_builder", 4, 5)]
+
+    def test_module_records_capture_reference_made_at_module_level(self) -> None:
+        intel_file = _make_intel_file()
+        records = self._definitions(intel_file)
+        module_recs, _edges = module_records(intel_file, self._TEXT, records, max_chars=200)
+        self.assertTrue(module_recs)
+        self.assertTrue(all(rec.record_type == "module_chunk" for rec in module_recs))
+        joined = "\n".join(rec.display_content for rec in module_recs)
+        # The by-reference wiring (no call parens) is now visible as record text,
+        # which is exactly what call-candidate edges alone cannot capture.
+        self.assertIn("my_builder", joined)
+        self.assertIn("PROFILE", joined)
+        # The function's own body (line 5, os.path.basename) stays out of the
+        # module chunk because the definition record already covers it.
+        self.assertNotIn("basename", joined)
+
+    def test_module_records_emit_call_candidate_edges_for_module_level_calls(self) -> None:
+        intel_file = _make_intel_file()
+        records = self._definitions(intel_file)
+        module_recs, edges = module_records(intel_file, self._TEXT, records, max_chars=200)
+        targets = {edge.target_symbol for edge in edges}
+        # `LanguageProfile(` is a module-level call → a call_candidate edge.
+        self.assertIn("LanguageProfile", targets)
+        self.assertTrue(all(edge.edge_type == "call_candidate" for edge in edges))
+        module_ids = {rec.record_id for rec in module_recs}
+        self.assertTrue(all(edge.source_record_id in module_ids for edge in edges))
+
+    def test_module_records_empty_without_symbol_definitions(self) -> None:
+        # No definition records (e.g. a line-window-fallback file) → nothing to
+        # add; the fallback chunks already cover the whole file.
+        intel_file = _make_intel_file()
+        self.assertEqual(module_records(intel_file, self._TEXT, [], max_chars=200), ([], []))
+
+    def test_module_records_empty_when_definitions_cover_all_content(self) -> None:
+        intel_file = _make_intel_file()
+        text = "def only():\n    return 1\n"
+        records = [_definition_record(intel_file, "only", 1, 2)]
+        self.assertEqual(module_records(intel_file, text, records, max_chars=200), ([], []))
+
+    def test_module_records_carry_line_ranges_and_ordinals(self) -> None:
+        intel_file = _make_intel_file()
+        records = self._definitions(intel_file)
+        module_recs, _edges = module_records(intel_file, self._TEXT, records, max_chars=200)
+        for index, rec in enumerate(module_recs, 1):
+            self.assertEqual(rec.metadata.get("chunk_ordinal"), index)
+            self.assertTrue(rec.metadata.get("module_level"))
+            self.assertIsNotNone(rec.line_start)
+            self.assertIsNotNone(rec.line_end)
+        self.assertTrue(all(rec.confidence_kind == "high_confidence_fact" for rec in module_recs))
 
 
 class MakeCodeRecordTests(unittest.TestCase):
