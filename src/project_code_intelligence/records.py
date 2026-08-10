@@ -8,9 +8,12 @@ from dataclasses import dataclass
 
 from project_code_intelligence import profile_context
 from project_code_intelligence.language_profiles import language_file_only_metadata_keys
-from project_code_intelligence.models import IntelFile, IntelRecord, JsonObject
+from project_code_intelligence.models import IntelEdge, IntelFile, IntelRecord, JsonObject
 
 MIN_LINE_WINDOW_CHARS = 100
+# Cap references turned into edges from one module-level chunk, mirroring the
+# per-definition cap in parsers.core so a huge module body cannot flood edges.
+_MODULE_EDGE_LIMIT = 80
 
 # File-level metadata keys (sibling lists of functions/imports/etc) that
 # language profiles produce. These belong on the file row; copying them onto
@@ -50,6 +53,13 @@ def line_for_offset_with_index(offsets: list[int], offset: int) -> int:
     return bisect_right(offsets, offset)
 
 
+def truncate_chunk_line(line: str, max_chars: int) -> str:
+    """Clip an over-long source line so one line cannot exceed a chunk budget."""
+    if len(line) > max_chars:
+        return line[: max_chars - 22].rstrip() + " [line truncated]"
+    return line
+
+
 def line_window_records(intel_file: IntelFile, text: str, max_chars: int, overlap_lines: int) -> list[IntelRecord]:
     if max_chars < MIN_LINE_WINDOW_CHARS:
         raise ValueError(f"line window max_chars must be at least {MIN_LINE_WINDOW_CHARS}")
@@ -59,9 +69,7 @@ def line_window_records(intel_file: IntelFile, text: str, max_chars: int, overla
     current_chars = 0
     ordinal = 0
     for lineno, line in enumerate(lines, 1):
-        chunk_line = line
-        if len(chunk_line) > max_chars:
-            chunk_line = chunk_line[: max_chars - 22].rstrip() + " [line truncated]"
+        chunk_line = truncate_chunk_line(line, max_chars)
         add_chars = len(chunk_line) + 1
         if current and current_chars + add_chars > max_chars:
             ordinal += 1
@@ -242,3 +250,116 @@ def extract_referenced_symbols(text: str) -> list[str]:
         "lambda",
     }
     return sorted({ref for ref in refs if ref not in keywords})[:160]
+
+
+def _covered_line_numbers(records: list[IntelRecord]) -> set[int]:
+    """Line numbers already captured by a definition record in this file."""
+    covered: set[int] = set()
+    for record in records:
+        if record.record_type != "symbol_definition":
+            continue
+        if record.line_start is None or record.line_end is None:
+            continue
+        covered.update(range(record.line_start, record.line_end + 1))
+    return covered
+
+
+def make_module_record(intel_file: IntelFile, lines: list[tuple[int, str]], ordinal: int) -> IntelRecord:
+    line_start = lines[0][0]
+    line_end = lines[-1][0]
+    body = "\n".join(line for _lineno, line in lines)
+    metadata: JsonObject = {
+        **common_extracts(body),
+        "symbols_referenced": extract_referenced_symbols(body)[:120],
+        "module_level": True,
+        "chunk_ordinal": ordinal,
+    }
+    title = f"{intel_file.source_path} module level {line_start}-{line_end}"
+    summary = f"{intel_file.language} module-level code in {intel_file.source_path}:{line_start}-{line_end}"
+    return make_record(
+        intel_file,
+        RecordSpec(
+            record_type="module_chunk",
+            record_id=f"{intel_file.source_path}::module::{line_start:06d}-{line_end:06d}",
+            title=title,
+            summary=summary,
+            body=body,
+            line_start=line_start,
+            line_end=line_end,
+            metadata=metadata,
+            confidence_kind="high_confidence_fact",
+        ),
+    )
+
+
+def _module_edges(intel_file: IntelFile, record: IntelRecord) -> list[IntelEdge]:
+    referenced = record.metadata.get("symbols_referenced")
+    if not isinstance(referenced, list):
+        return []
+    edges: list[IntelEdge] = []
+    for ref in referenced[:_MODULE_EDGE_LIMIT]:
+        if not isinstance(ref, str) or not ref:
+            continue
+        edges.append(
+            IntelEdge(
+                source_record_id=record.record_id,
+                edge_type="call_candidate",
+                target_symbol=ref,
+                source_path=intel_file.source_path,
+                confidence_kind="heuristic_candidate",
+            )
+        )
+    return edges
+
+
+def module_records(
+    intel_file: IntelFile,
+    text: str,
+    records: list[IntelRecord],
+    max_chars: int,
+) -> tuple[list[IntelRecord], list[IntelEdge]]:
+    """Capture module-level code that definition parsers drop.
+
+    Definition-extracting parsers (Python/C/Go/Rust/JS) emit records only for
+    function/class spans, so top-level statements -- imports, dispatch tables,
+    ``PROFILE = Profile(..., builder=func)`` wiring, ``__all__``, ``__main__``
+    blocks -- land in no record. A reference made there is then invisible to
+    call-candidate edges and to any text scan over record bodies, so a
+    referenced-but-never-called helper looks dead. This pass emits
+    ``module_chunk`` records over the residual (uncovered) non-blank lines plus
+    their call candidates, making module-level references first-class facts.
+
+    Returns nothing when the file has no symbol definitions (a line-window
+    fallback already covers the whole file) or has no residual content.
+    """
+    covered = _covered_line_numbers(records)
+    if not covered:
+        return [], []
+    uncovered = [
+        (lineno, line) for lineno, line in enumerate(text.splitlines(), 1) if lineno not in covered and line.strip()
+    ]
+    if not uncovered:
+        return [], []
+    out_records: list[IntelRecord] = []
+    out_edges: list[IntelEdge] = []
+    current: list[tuple[int, str]] = []
+    current_chars = 0
+    ordinal = 0
+    for lineno, line in uncovered:
+        chunk_line = truncate_chunk_line(line, max_chars)
+        add_chars = len(chunk_line) + 1
+        if current and current_chars + add_chars > max_chars:
+            ordinal += 1
+            record = make_module_record(intel_file, current, ordinal)
+            out_records.append(record)
+            out_edges.extend(_module_edges(intel_file, record))
+            current = []
+            current_chars = 0
+        current.append((lineno, chunk_line))
+        current_chars += add_chars
+    if current:
+        ordinal += 1
+        record = make_module_record(intel_file, current, ordinal)
+        out_records.append(record)
+        out_edges.extend(_module_edges(intel_file, record))
+    return out_records, out_edges
