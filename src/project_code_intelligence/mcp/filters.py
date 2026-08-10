@@ -38,9 +38,10 @@ def column(alias: str, name: str) -> str:
     return f"{alias}.{name}" if alias else name
 
 
-def latest_record_snapshot_clause(alias: str) -> str:
+def _latest_snapshot_clause(alias: str, id_column: str) -> str:
+    # Record table matches via its snapshot_id column, snapshot table via its own id.
     return " ".join([
-        column(alias, "snapshot_id"),
+        column(alias, id_column),
         "=",
         "(",
         "SELECT latest_snapshot.id",
@@ -53,23 +54,14 @@ def latest_record_snapshot_clause(alias: str) -> str:
         "LIMIT 1",
         ")",
     ])
+
+
+def latest_record_snapshot_clause(alias: str) -> str:
+    return _latest_snapshot_clause(alias, "snapshot_id")
 
 
 def latest_snapshot_table_clause(alias: str) -> str:
-    return " ".join([
-        column(alias, "id"),
-        "=",
-        "(",
-        "SELECT latest_snapshot.id",
-        "FROM project_code_intel_snapshots latest_snapshot",
-        "WHERE latest_snapshot.collection =",
-        column(alias, "collection"),
-        "AND latest_snapshot.repo =",
-        column(alias, "repo"),
-        "ORDER BY latest_snapshot.created_at DESC, latest_snapshot.id DESC",
-        "LIMIT 1",
-        ")",
-    ])
+    return _latest_snapshot_clause(alias, "id")
 
 
 def query_with_where(prefix: str, clauses: list[str], suffix: str) -> str:
@@ -126,7 +118,7 @@ def scoped_snapshot_table_clauses(args: Json, alias: str) -> tuple[list[str], Qu
     return [latest_snapshot_table_clause(alias)], []
 
 
-def scoped_collection_repo_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]:
+def _collection_repo_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]:
     clauses: list[str] = []
     params: QueryParams = []
     collection = scoped_collection(args)
@@ -137,6 +129,11 @@ def scoped_collection_repo_clauses(args: Json, alias: str) -> tuple[list[str], Q
     if repo:
         clauses.append(f"{column(alias, 'repo')} = %s")
         params.append(repo)
+    return clauses, params
+
+
+def scoped_collection_repo_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]:
+    clauses, params = _collection_repo_clauses(args, alias)
     snapshot_clauses, snapshot_params = scoped_snapshot_clauses(args, alias)
     clauses.extend(snapshot_clauses)
     params.extend(snapshot_params)
@@ -144,16 +141,7 @@ def scoped_collection_repo_clauses(args: Json, alias: str) -> tuple[list[str], Q
 
 
 def scoped_snapshot_table_collection_repo_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]:
-    clauses: list[str] = []
-    params: QueryParams = []
-    collection = scoped_collection(args)
-    if collection:
-        clauses.append(f"{column(alias, 'collection')} = %s")
-        params.append(collection)
-    repo = optional_text(args, "repo")
-    if repo:
-        clauses.append(f"{column(alias, 'repo')} = %s")
-        params.append(repo)
+    clauses, params = _collection_repo_clauses(args, alias)
     snapshot_clauses, snapshot_params = scoped_snapshot_table_clauses(args, alias)
     clauses.extend(snapshot_clauses)
     params.extend(snapshot_params)
