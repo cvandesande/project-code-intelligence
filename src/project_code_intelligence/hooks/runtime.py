@@ -106,14 +106,10 @@ def _build_block(removed: list[str], max_symbols: int) -> str | None:
     return header + "\n" + "\n---\n".join(report.rstrip("\n") for report in reports)
 
 
-def _emit_evidence(agent: Agent, block: str, out: IO[str]) -> None:
+def _emit_evidence(agent: Agent, block: str, out: IO[str], *, event_name: str) -> None:
     if agent == "claude":
-        payload = {
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "additionalContext": block,
-            }
-        }
+        # Echo the firing event (PreToolUse/PostToolUse) so hookSpecificOutput matches it.
+        payload = {"hookSpecificOutput": {"hookEventName": event_name, "additionalContext": block}}
         _ = out.write(json.dumps(payload))
         return
     # opencode: the JS shim appends raw stdout to the tool result.
@@ -123,13 +119,15 @@ def _emit_evidence(agent: Agent, block: str, out: IO[str]) -> None:
 def run_evidence(agent: Agent, *, stdin: IO[str] | None = None, stdout: IO[str] | None = None) -> int:
     in_stream: IO[str] = stdin if stdin is not None else cast("IO[str]", sys.stdin)
     out_stream: IO[str] = stdout if stdout is not None else cast("IO[str]", sys.stdout)
-    removed = _removed_symbols(agent, _read_json(in_stream))
+    event = _read_json(in_stream)
+    removed = _removed_symbols(agent, event)
     if not removed:
         return 0
     block = _build_block(removed, _MAX_SYMBOLS)
     if block is None:
         return 0
-    _emit_evidence(agent, block, out_stream)
+    event_name = _as_str(event.get("hook_event_name")) or "PreToolUse"
+    _emit_evidence(agent, block, out_stream, event_name=event_name)
     return 0
 
 

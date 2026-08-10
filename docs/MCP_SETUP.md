@@ -326,7 +326,15 @@ Use the export block printed after the JSON before launching Claude Code.
 `opencode.json`. OpenCode config is JSON or JSONC and defines MCP servers under
 `mcp`.
 
-Generate the snippet from the indexed repo/workspace:
+For contributors working inside this repo, the tracked `opencode.example.json`
+already wires the local server; copy it to the gitignored `opencode.json` to
+enable it (this repo ships an active local `opencode.json` for maintainers):
+
+```sh
+cp opencode.example.json opencode.json
+```
+
+Or generate the snippet from any indexed repo/workspace:
 
 ```sh
 pci-index --init-db --mcp-config opencode .

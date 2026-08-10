@@ -67,12 +67,14 @@ class EvidenceRuntimeTests(unittest.TestCase):
     def test_claude_delete_wraps_in_additional_context(self) -> None:
         reports = _StubReports({"gone": ["gone  function  a.py:1-3\ncallers (0)"]})
         event = {
+            "hook_event_name": "PreToolUse",
             "tool_name": "Edit",
             "tool_input": {"file_path": "a.py", "old_string": "def gone():\n x\n", "new_string": ""},
         }
         payload = cast("dict[str, object]", json.loads(self._run("claude", event, reports)))
         hook_out = cast("dict[str, object]", payload["hookSpecificOutput"])
-        self.assertEqual(hook_out["hookEventName"], "PostToolUse")
+        # Output event name echoes the firing event (preventive PreToolUse).
+        self.assertEqual(hook_out["hookEventName"], "PreToolUse")
         self.assertIn("[pci blast-radius", cast("str", hook_out["additionalContext"]))
 
     def test_in_place_edit_is_silent(self) -> None:
@@ -132,8 +134,9 @@ class InstallClaudeTests(unittest.TestCase):
 
             data = _read_json_file(settings)
             hooks = cast("dict[str, object]", data["hooks"])
-            self.assertEqual(len(cast("list[object]", hooks["PostToolUse"])), 1)
+            self.assertEqual(len(cast("list[object]", hooks["PreToolUse"])), 1)
             self.assertEqual(len(cast("list[object]", hooks["Stop"])), 1)
+            self.assertNotIn("PostToolUse", hooks)  # evidence is preventive now
 
     def test_install_preserves_foreign_hooks(self) -> None:
         with TemporaryDirectory() as tmp:
