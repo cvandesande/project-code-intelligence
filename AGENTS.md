@@ -4,6 +4,13 @@ This repo has a project-code-intelligence MCP server. For non-trivial code
 discovery, use it before broad rg/find or speculative file reads. Use rg/direct
 reads for known small files and final verification.
 
+Before you remove or rename a definition (function, class, method), call the
+`blast_radius` MCP tool for that symbol first. Treat its callers, test
+coverage, and entry-point/orphan flags as evidence (not a verdict), and verify
+live callers in source before finalizing the cut. The evidence hook injects the
+same bundle on an edit-delete as a backstop, but pulling it up front is
+cheaper than undoing a bad removal.
+
 This repository builds `project-code-intelligence`: an MCP server that gives
 coding agents structured access to indexed Git repositories — semantic
 search, lexical search, a candidate-edge graph, and static-analysis findings

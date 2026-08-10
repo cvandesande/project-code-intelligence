@@ -218,6 +218,37 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
             "additionalProperties": False,
         },
     ),
+    "blast_radius": ToolDefinition(
+        "Impact of removing/refactoring a symbol: resolved callers (with test and "
+        "module-level wiring), test coverage, entry-point and orphan flags, semantic "
+        "neighbours, and index staleness. Evidence, not a verdict -- verify live callers "
+        "in source. Call before deleting a definition.",
+        {
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Symbol name (bare or qualified). Mutex-friendly with source_path+line.",
+                },
+                "source_path": {"type": "string", "description": _SOURCE_PATH_DESC},
+                "line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Line inside the target definition; pair with source_path.",
+                },
+                "neighbors": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 20,
+                    "description": "Semantic neighbours to include; default 3, 0 to skip.",
+                },
+                "collection": {"type": "string", "description": _COLLECTION_DESC},
+                "repo": {"type": "string"},
+                "verbose": {"type": "boolean"},
+            },
+            "additionalProperties": False,
+        },
+    ),
     "list_code_intel_files": ToolDefinition(
         "List indexed files. Compact by default.",
         {
