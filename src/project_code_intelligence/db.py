@@ -25,7 +25,7 @@ from project_code_intelligence.config import DatabaseSettings, database_url_with
 from project_code_intelligence.exceptions import DatabaseConnectionError
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from typing_extensions import LiteralString
 
@@ -839,3 +839,13 @@ def json_metadata(value: object) -> str:
     if not isinstance(value, dict):
         raise TypeError("metadata must be an object")
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def compact_json(value: object, *, default: Callable[[object], object] | None = None) -> str:
+    """Deterministic compact JSON for jsonb columns: sorted keys, no whitespace.
+
+    ``default`` forwards to ``json.dumps`` (pass ``str`` to coerce values that
+    are not natively JSON-serializable). Unlike ``json_metadata`` this accepts
+    any JSON value, not only objects.
+    """
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=default)
