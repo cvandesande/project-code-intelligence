@@ -430,6 +430,12 @@ def build_evidence(conn: db.DbConnection, target: TargetDef, *, neighbors: int, 
 # --- rendering ------------------------------------------------------------------
 
 
+def _strip_repo(path: str, repo: str) -> str:
+    """Drop the leading ``{repo}/`` so text-report paths read repo-relative."""
+    prefix = f"{repo}/"
+    return path[len(prefix) :] if repo and path.startswith(prefix) else path
+
+
 def _location(path: str, line: int | None) -> str:
     return f"{path}:{line}" if line is not None else path
 
@@ -448,16 +454,18 @@ def _staleness_banner(staleness: Staleness) -> str | None:
 
 
 def render_text(evidence: Evidence) -> str:
+    # Paths are stored repo-prefixed; strip it so the compact report stays readable.
+    repo = evidence.label.rsplit("/", 1)[-1]
     lines: list[str] = []
     banner = _staleness_banner(evidence.staleness)
     if banner is not None:
         lines.append(f"! {banner}")
     span = f"{evidence.line_start}-{evidence.line_end}" if evidence.line_start is not None else "?"
-    lines.append(f"{evidence.symbol}  {evidence.symbol_kind}  {evidence.source_path}:{span}")
+    lines.append(f"{evidence.symbol}  {evidence.symbol_kind}  {_strip_repo(evidence.source_path, repo)}:{span}")
     if evidence.callers:
         shown = evidence.callers[:5]
         rendered = "  ".join(
-            f"{_location(caller.source_path, caller.line)}"
+            f"{_location(_strip_repo(caller.source_path, repo), caller.line)}"
             + ("[test]" if caller.is_test else "")
             + ("[module]" if caller.at_module_level else "")
             for caller in shown
@@ -467,7 +475,11 @@ def render_text(evidence: Evidence) -> str:
     else:
         hint = f"; name referenced {evidence.name_reference_count}x elsewhere" if evidence.name_reference_count else ""
         lines.append(f"callers (0){hint}")
-    tests = "yes (" + ", ".join(evidence.covered_by_tests) + ")" if evidence.covered_by_tests else "no"
+    tests = (
+        "yes (" + ", ".join(_strip_repo(path, repo) for path in evidence.covered_by_tests) + ")"
+        if evidence.covered_by_tests
+        else "no"
+    )
     flags: list[str] = [f"tests: {tests}"]
     if evidence.is_conventional_entrypoint or evidence.is_service_entrypoint:
         flags.append("entrypoint")
@@ -476,15 +488,12 @@ def render_text(evidence: Evidence) -> str:
     if evidence.looks_orphaned:
         flags.append("looks orphaned (verify: heuristic edges miss dynamic dispatch)")
     lines.append("; ".join(flags))
-    if evidence.callees:
-        names = ", ".join(callee.target_symbol or "?" for callee in evidence.callees[:12] if callee.target_symbol)
-        lines.append(f"callees: {names}")
+    # Callees omitted here (noisy, leak builtins); callers answer delete-safety, --json keeps them.
     if evidence.neighbors:
         lines.append("semantic neighbours (same meaning candidates -- verify in source):")
-        lines.extend(
-            f"  {neighbor.similarity:.2f}  {neighbor.symbol}  {_location(neighbor.source_path, neighbor.line)}"
-            for neighbor in evidence.neighbors
-        )
+        for neighbor in evidence.neighbors:
+            loc = _location(_strip_repo(neighbor.source_path, repo), neighbor.line)
+            lines.append(f"  {neighbor.similarity:.2f}  {neighbor.symbol}  {loc}")
     return "\n".join(lines) + "\n"
 
 
