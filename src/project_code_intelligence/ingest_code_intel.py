@@ -2057,7 +2057,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.prune_snapshots and result == 0:
         collection = args.collection or default_collection(args.root)
         repo_names = parse_repos(args.repos or "")
-        with db.connect() as conn:
+        # Pruning issues DELETEs, so it needs a writable connection like the upload path.
+        with db.connect(readonly=False) as conn:
             for repo in repo_names:
                 deleted = prune_old_snapshots(conn, collection, repo, keep=args.prune_keep)
                 if deleted > 0:
