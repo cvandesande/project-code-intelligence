@@ -51,6 +51,15 @@ _SPREAD_UNIT = 0.5
 _EXISTING_HELPER_FACTOR = 0.1
 # Residual (parameterization) heavier than the shared core => a leaky abstraction.
 _LEAKY_RATIO = 1.0
+# Below this mean pairwise structural agreement, or this semantic cosine, a
+# cluster is likely chained/incoherent — flagged so a loose group is not trusted
+# on size alone. Single-linkage clustering can admit members below the join
+# threshold by transitivity, which is exactly what this catches.
+_LOW_COHERENCE_STRUCTURAL = 0.6
+_LOW_COHERENCE_SEMANTIC = 0.6
+# Recommendations worth acting on now; ranked above already-abstracted and
+# leave-as-is so actionable candidates surface first.
+_ACTIONABLE_RECOMMENDATIONS = frozenset({"worth-collapsing", "parameterize-carefully"})
 
 _TOKEN_SPLIT = re.compile(r"[^0-9A-Za-z]+")
 _CAMEL_SPLIT = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
@@ -103,6 +112,17 @@ class MotifGroup:
     def residual_roles(self) -> tuple[str, ...]:
         """Roles that vary across members (evidence for the residual cost)."""
         return tuple(sorted(residual_role_union(self.members, self.common_roles)))
+
+    @property
+    def low_coherence(self) -> bool:
+        """The cluster is loose — weak mean agreement or weak semantic overlap.
+
+        A true value warns that the group may be a single-linkage chain rather
+        than one shared shape; verify the members in source before trusting it.
+        """
+        if self.avg_structural < _LOW_COHERENCE_STRUCTURAL:
+            return True
+        return self.avg_semantic is not None and self.avg_semantic < _LOW_COHERENCE_SEMANTIC
 
     @property
     def estimated_loc_removed(self) -> int | None:
@@ -328,8 +348,15 @@ def redundancy_removed(
     weights: Mapping[str, float] | None,
 ) -> float:
     """Structural complexity removed: (K-1) redundant copies of the shared core,
-    discounted by how tightly the members actually agree."""
-    return (len(members) - 1) * core_shared_weight(core_roles, weights) * avg_structural
+    discounted by how tightly the members actually agree.
+
+    Agreement enters squared. Single-linkage clustering chains transitively
+    related functions into large, loose groups whose mean pairwise agreement can
+    fall below the join threshold; a linear discount let such a chain out-rank a
+    small, tight motif on member count alone. Squaring penalizes looseness
+    harder so a coherent group beats a sprawling one of similar raw mass.
+    """
+    return (len(members) - 1) * core_shared_weight(core_roles, weights) * avg_structural * avg_structural
 
 
 def existing_helper(members: Sequence[FunctionNode], function_symbols: frozenset[str]) -> tuple[str, ...]:
@@ -539,6 +566,26 @@ def group_semantic_similarity(conn: db.DbConnection, snapshot_id: int, member_id
     return None
 
 
+def _group_sort_key(group: MotifGroup) -> tuple[bool, float, float, int, int]:
+    """Rank key: actionable groups first, then net value, then coherence.
+
+    Semantic similarity breaks net-value ties so a tighter group wins; groups
+    with no embedded body (``avg_semantic is None``) sort last within a tie.
+    """
+    return (
+        group.recommendation in _ACTIONABLE_RECOMMENDATIONS,
+        group.net_value,
+        group.avg_semantic if group.avg_semantic is not None else -1.0,
+        len(group.members),
+        group.estimated_loc_removed or 0,
+    )
+
+
+def rank_groups(groups: Sequence[MotifGroup]) -> list[MotifGroup]:
+    """Order groups so actionable, high-value, coherent candidates come first."""
+    return sorted(groups, key=_group_sort_key, reverse=True)
+
+
 @dataclass(frozen=True)
 class SnapshotResult:
     """Per-snapshot analysis output plus the counts that explain what was scanned."""
@@ -564,14 +611,11 @@ def analyze_snapshot(conn: db.DbConnection, snapshot: SnapshotRef, options: Anal
         )
         for members in clusters
     ]
-    # Rank by net value; LOC removed is only a tiebreak, never the target.
-    groups.sort(
-        key=lambda group: (group.net_value, len(group.members), group.estimated_loc_removed or 0),
-        reverse=True,
-    )
+    # Actionable groups first, then net value; LOC is only a tiebreak, never the target.
+    ranked = rank_groups(groups)
     return SnapshotResult(
         label=f"{snapshot.collection}/{snapshot.repo}",
-        groups=tuple(groups[: options.limit]),
+        groups=tuple(ranked[: options.limit]),
         functions_analyzed=len(unique),
         clones_folded=folded,
     )
@@ -607,6 +651,7 @@ def _group_to_json(group: MotifGroup) -> dict[str, object]:
             "residual_roles": list(group.residual_roles),
             "shared_helper": list(group.shared_helper),
             "estimated_loc_removed": group.estimated_loc_removed,
+            "low_coherence": group.low_coherence,
         },
     }
 
@@ -645,9 +690,15 @@ def _render_group(group: MotifGroup, ordinal: int) -> list[str]:
     semantic = "n/a" if group.avg_semantic is None else f"{group.avg_semantic:.2f}"
     loc_removed = "n/a" if group.estimated_loc_removed is None else str(group.estimated_loc_removed)
     cost_breakdown = f"base + residual {group.residual_cost:.2f} + spread {group.spread_penalty:.2f}"
+    coherence = (
+        ["  Caveat: low coherence — loose cluster, may be chained; verify members share one shape"]
+        if group.low_coherence
+        else []
+    )
     return [
         f"Motif {ordinal}: {len(group.members)} instances — {group.recommendation} (net value {group.net_value:.2f})",
         f"  Why: {_why(group)}",
+        *coherence,
         "  Common shape:",
         *(f"    {role}" for role in group.common_roles),
         "  Instances:",
