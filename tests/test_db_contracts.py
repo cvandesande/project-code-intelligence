@@ -15,6 +15,7 @@ from project_code_intelligence.db import (
     DatabaseConnectionError,
     DatabaseRole,
     bootstrap_postgres_roles,
+    compact_json,
     conninfo,
     create_role_sql,
     drop_inferred_database,
@@ -369,6 +370,17 @@ class DatabaseContractTests(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             _ = json_metadata(["not", "an", "object"])
+
+
+class CompactJsonTests(unittest.TestCase):
+    def test_compact_json_is_deterministic_and_supports_default(self) -> None:
+        self.assertEqual(compact_json({"b": 2, "a": 1}), '{"a":1,"b":2}')
+        # Accepts non-object JSON values, unlike json_metadata.
+        self.assertEqual(compact_json([3, 1, 2]), "[3,1,2]")
+        # default=str coerces values that are not natively serializable.
+        self.assertEqual(compact_json({"k": {1, 2}}, default=str), '{"k":"{1, 2}"}')
+        with self.assertRaises(TypeError):
+            _ = compact_json({"k": {1, 2}})
 
 
 class DatabaseGuidanceTests(unittest.TestCase):

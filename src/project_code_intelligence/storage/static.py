@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 from project_code_intelligence import db
@@ -60,7 +59,7 @@ def _insert_static_run(conn: db.DbConnection, snapshot_id: int, snapshot: Snapsh
             run.semantic_version,
             run.information_uri,
             run.automation_id,
-            json.dumps(run.metadata, sort_keys=True, separators=(",", ":"), default=str),
+            db.compact_json(run.metadata, default=str),
         ],
     ).fetchone()
     return row_int(db.require_row(row, "insert static run"), "id")
@@ -93,8 +92,8 @@ def _insert_static_rule(conn: db.DbConnection, run_id: int, snapshot: Snapshot, 
             rule.full_description,
             rule.default_level,
             rule.help_uri,
-            json.dumps(rule.properties, sort_keys=True, separators=(",", ":"), default=str),
-            json.dumps(rule.metadata, sort_keys=True, separators=(",", ":"), default=str),
+            db.compact_json(rule.properties, default=str),
+            db.compact_json(rule.metadata, default=str),
         ],
     )
 
@@ -149,10 +148,10 @@ def _insert_static_finding(
             finding.line_end,
             finding.column_start,
             finding.column_end,
-            json.dumps(finding.fingerprints, sort_keys=True, separators=(",", ":"), default=str),
-            json.dumps(finding.suppressions, sort_keys=True, separators=(",", ":"), default=str),
-            json.dumps(finding.properties, sort_keys=True, separators=(",", ":"), default=str),
-            json.dumps(finding.raw_result, sort_keys=True, separators=(",", ":"), default=str),
+            db.compact_json(finding.fingerprints, default=str),
+            db.compact_json(finding.suppressions, default=str),
+            db.compact_json(finding.properties, default=str),
+            db.compact_json(finding.raw_result, default=str),
         ],
     ).fetchone()
     return row_int(db.require_row(row, "insert static finding"), "id")
@@ -181,7 +180,7 @@ def _insert_static_locations(conn: db.DbConnection, finding_id: int, locations: 
                 location.column_start,
                 location.column_end,
                 location.snippet,
-                json.dumps(location.properties, sort_keys=True, separators=(",", ":"), default=str),
+                db.compact_json(location.properties, default=str),
             ],
         )
         inserted += 1
@@ -213,7 +212,7 @@ def _insert_static_code_flow_steps(conn: db.DbConnection, finding_id: int, code_
                 step.column_start,
                 step.column_end,
                 step.importance,
-                json.dumps(step.properties, sort_keys=True, separators=(",", ":"), default=str),
+                db.compact_json(step.properties, default=str),
             ],
         )
         inserted += 1

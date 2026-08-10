@@ -190,7 +190,7 @@ def insert_snapshot(conn: db.DbConnection, snapshot: Snapshot) -> int:
             snapshot.commit_sha,
             snapshot.tree_sha,
             snapshot.dirty,
-            json.dumps(snapshot.metadata, sort_keys=True, separators=(",", ":")),
+            db.compact_json(snapshot.metadata),
         ],
     ).fetchone()
     return row_int(db.require_row(row, "insert snapshot"), "id")
@@ -298,7 +298,7 @@ def insert_files(conn: db.DbConnection, snapshot_id: int, files: list[IntelFile]
         SELECT source_path, id
         FROM upserted
         """,
-        [json.dumps(payload, sort_keys=True, separators=(",", ":"))],
+        [db.compact_json(payload)],
     ).fetchall()
     return {str(row["source_path"]): row_int(row, "id") for row in rows}
 
@@ -447,7 +447,7 @@ def insert_records(
                           metadata = EXCLUDED.metadata,
                           embedding = coalesce(EXCLUDED.embedding, project_code_intel_records.embedding)
             """,
-            [json.dumps(batch, sort_keys=True, separators=(",", ":"))],
+            [db.compact_json(batch)],
         )
         if progress_fn is not None:
             progress_fn(len(batch))
@@ -512,7 +512,7 @@ def insert_edges(
             )
             ON CONFLICT DO NOTHING
             """,
-            [json.dumps(batch, sort_keys=True, separators=(",", ":"))],
+            [db.compact_json(batch)],
         )
         if progress_fn is not None:
             progress_fn(len(batch))
@@ -756,7 +756,7 @@ def insert_parser_failures(
             failure.get("language"),
             str(failure.get("parser") or "unknown"),
             str(failure.get("error") or "")[:2000],
-            json.dumps(parser_failure_metadata(failure), sort_keys=True, separators=(",", ":")),
+            db.compact_json(parser_failure_metadata(failure)),
         ]
         for failure in failures
     ]
