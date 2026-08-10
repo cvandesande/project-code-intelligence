@@ -150,8 +150,38 @@ class GroupBuildingTests(unittest.TestCase):
         self.assertEqual(group.net_value, 3.0)
         self.assertEqual(group.recommendation, "worth-collapsing")
         self.assertEqual(group.residual_roles, ())
+        self.assertFalse(group.low_coherence)
         # _node() gives every member 21 LOC; keep one, fold the rest.
         self.assertEqual(group.estimated_loc_removed, 21)
+
+    def test_redundancy_squares_structural_agreement(self) -> None:
+        members = [_node("a", "m.py", 1, ["x_a", "y_a"]), _node("b", "m.py", 40, ["x_b", "y_b"])]
+        # (K-1) * weight(core=2 roles, unweighted=2.0) * 0.5**2 = 1 * 2.0 * 0.25 = 0.5.
+        self.assertEqual(analyze.redundancy_removed(members, ["x", "y"], 0.5, None), 0.5)
+        # Perfect agreement is unchanged by squaring.
+        self.assertEqual(analyze.redundancy_removed(members, ["x", "y"], 1.0, None), 2.0)
+
+    def test_loose_cluster_flags_low_coherence(self) -> None:
+        # Pairwise Jaccard ~0.33 across all pairs (2 shared roles, 4 unique) ->
+        # mean below the 0.6 floor. Distinct leading verbs keep roles distinct.
+        members = [
+            _node("a", "m.py", 1, ["alpha_x", "beta_x", "gamma_x", "delta_x"]),
+            _node("b", "m.py", 40, ["alpha_x", "beta_x", "epsilon_x", "zeta_x"]),
+            _node("c", "m.py", 80, ["alpha_x", "beta_x", "eta_x", "theta_x"]),
+        ]
+        group = analyze.build_group(members, avg_semantic=0.9)
+        self.assertLess(group.avg_structural, 0.6)
+        self.assertTrue(group.low_coherence)
+
+    def test_weak_semantic_flags_low_coherence(self) -> None:
+        members = [
+            _node("create_user", "svc/user.py", 10, ["validate_user", "convert_user", "repo.insert", "map_error"]),
+            _node("create_team", "svc/team.py", 10, ["validate_team", "convert_team", "repo.insert", "map_error"]),
+        ]
+        # Structurally identical (1.0) but semantically far apart -> still flagged.
+        group = analyze.build_group(members, avg_semantic=0.4)
+        self.assertEqual(group.avg_structural, 1.0)
+        self.assertTrue(group.low_coherence)
 
     def test_estimated_loc_removed_needs_two_known_ranges(self) -> None:
         known = _node("create_user", "u.py", 10, ["validate_user", "convert_user", "repo.insert", "map_error"])
@@ -231,6 +261,39 @@ class NetValueTests(unittest.TestCase):
         self.assertEqual(group.recommendation, "already-abstracted")
         # net value damped below the un-damped 3.0 so it ranks low.
         self.assertLess(group.net_value, 3.0)
+
+
+def _motif(recommendation: str, net_value: float, avg_semantic: float | None = None) -> analyze.MotifGroup:
+    return analyze.MotifGroup(
+        members=(_node("m", "m.py", 1, ["x_m", "y_m", "z_m"]),),
+        common_roles=("x", "y", "z"),
+        avg_structural=1.0,
+        avg_semantic=avg_semantic,
+        net_value=net_value,
+        value_ratio=0.0,
+        redundancy_removed=0.0,
+        abstraction_cost=1.0,
+        residual_cost=0.0,
+        spread_penalty=0.0,
+        shared_helper=(),
+        recommendation=recommendation,
+    )
+
+
+class RankingTests(unittest.TestCase):
+    def test_actionable_outranks_non_actionable_regardless_of_net_value(self) -> None:
+        # An already-abstracted group with far higher net value must still sort
+        # below any actionable candidate.
+        helper = _motif("already-abstracted", 50.0)
+        action = _motif("worth-collapsing", 1.0)
+        ranked = analyze.rank_groups([helper, action])
+        self.assertEqual([group.recommendation for group in ranked], ["worth-collapsing", "already-abstracted"])
+
+    def test_semantic_breaks_net_value_ties(self) -> None:
+        weak = _motif("worth-collapsing", 5.0, avg_semantic=0.5)
+        strong = _motif("worth-collapsing", 5.0, avg_semantic=0.9)
+        ranked = analyze.rank_groups([weak, strong])
+        self.assertEqual([group.avg_semantic for group in ranked], [0.9, 0.5])
 
 
 def _sample_results() -> list[analyze.SnapshotResult]:
