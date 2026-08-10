@@ -1,5 +1,9 @@
 [tool.uv]
 python-preference = "only-system"
+# semgrep (dev-only) hard-pins mcp==1.23.3, which carries PYSEC-2026-3481/3482/3483.
+# We use only `semgrep scan`, never its `mcp` subcommand, so forcing the fixed
+# SDK version is safe and clears the deps-audit gate.
+override-dependencies = ["mcp>=1.28.1,<2"]
 
 [build-system]
 requires = ["setuptools>=77"]
