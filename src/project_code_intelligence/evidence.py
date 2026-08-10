@@ -589,15 +589,67 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _select_snapshots(snapshots: Sequence[SnapshotRef], parsed: EvidenceNamespace) -> list[SnapshotRef]:
+def _select_snapshots(
+    snapshots: Sequence[SnapshotRef], *, collection: str | None, repo: str | None
+) -> list[SnapshotRef]:
     selected: list[SnapshotRef] = []
     for snapshot in snapshots:
-        if parsed.collection is not None and snapshot.collection != parsed.collection:
+        if collection is not None and snapshot.collection != collection:
             continue
-        if parsed.repo is not None and snapshot.repo != parsed.repo:
+        if repo is not None and snapshot.repo != repo:
             continue
         selected.append(snapshot)
     return selected
+
+
+@dataclass(frozen=True)
+class EvidenceQuery:
+    """Filters selecting which definitions to build evidence for."""
+
+    symbol: str | None = None
+    source_path: str | None = None
+    line: int | None = None
+    neighbors: int = DEFAULT_NEIGHBORS
+    threshold: float = DEFAULT_NEIGHBOR_THRESHOLD
+    collection: str | None = None
+    repo: str | None = None
+
+
+def collect_evidence(conn: db.DbConnection, query: EvidenceQuery) -> list[Evidence]:
+    """Assemble evidence bundles for every snapshot/target matching the filters."""
+    bundles: list[Evidence] = []
+    for snapshot in _select_snapshots(latest_snapshots(conn), collection=query.collection, repo=query.repo):
+        targets = resolve_targets(conn, snapshot, symbol=query.symbol, source_path=query.source_path, line=query.line)
+        bundles.extend(
+            build_evidence(conn, target, neighbors=query.neighbors, threshold=query.threshold) for target in targets
+        )
+    return bundles
+
+
+def render_symbol_reports(
+    symbol: str,
+    *,
+    neighbors: int = 0,
+    collection: str | None = None,
+    repo: str | None = None,
+) -> list[str]:
+    """Rendered text reports for a symbol, or [] on any lookup failure.
+
+    A convenience wrapper for hook runtimes: it owns the DB connection and
+    swallows connection / missing-index errors so callers stay silent when the
+    index is unavailable.
+    """
+    try:
+        with mcp_db.connect() as conn:
+            if not mcp_db.code_intel_tables_exist(conn):
+                return []
+            bundles = collect_evidence(
+                conn,
+                EvidenceQuery(symbol=symbol, neighbors=neighbors, collection=collection, repo=repo),
+            )
+    except DatabaseConnectionError:
+        return []
+    return [render_text(bundle) for bundle in bundles]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -610,16 +662,18 @@ def main(argv: list[str] | None = None) -> int:
             if not mcp_db.code_intel_tables_exist(conn):
                 _ = sys.stderr.write("pci-evidence: no code-intelligence tables; run pci-index first\n")
                 return 1
-            snapshots = _select_snapshots(latest_snapshots(conn), parsed)
-            bundles: list[Evidence] = []
-            for snapshot in snapshots:
-                targets = resolve_targets(
-                    conn, snapshot, symbol=parsed.symbol, source_path=parsed.path, line=parsed.line
-                )
-                bundles.extend(
-                    build_evidence(conn, target, neighbors=parsed.neighbors, threshold=parsed.threshold)
-                    for target in targets
-                )
+            bundles = collect_evidence(
+                conn,
+                EvidenceQuery(
+                    symbol=parsed.symbol,
+                    source_path=parsed.path,
+                    line=parsed.line,
+                    neighbors=parsed.neighbors,
+                    threshold=parsed.threshold,
+                    collection=parsed.collection,
+                    repo=parsed.repo,
+                ),
+            )
     except DatabaseConnectionError as exc:
         _ = sys.stderr.write(f"pci-evidence: {exc}\n")
         return 1
