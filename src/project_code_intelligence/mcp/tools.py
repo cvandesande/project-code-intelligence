@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
-from project_code_intelligence import db
+from project_code_intelligence import db, evidence
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError
 from project_code_intelligence.mcp import db as mcp_db
 from project_code_intelligence.mcp.files import (
@@ -38,6 +38,7 @@ from project_code_intelligence.mcp.protocol import (
     QueryParams,
     ok,
     optional_bool,
+    optional_int,
     optional_text,
     require_int,
     scoped_collection,
@@ -621,6 +622,39 @@ def tool_related_code_intel(args: Json) -> Json:
     return ok(response)
 
 
+def tool_blast_radius(args: Json) -> Json:
+    symbol = optional_text(args, "symbol")
+    source_path = optional_text(args, "source_path")
+    if not symbol and not source_path:
+        raise McpProtocolError("symbol or source_path is required")
+    query = evidence.EvidenceQuery(
+        symbol=symbol,
+        source_path=source_path,
+        line=optional_int(args, "line"),
+        neighbors=require_int(args, "neighbors", 3, 0, 20),
+        collection=optional_text(args, "collection"),
+        repo=optional_text(args, "repo"),
+    )
+    with mcp_db.connect() as conn:
+        if not mcp_db.code_intel_tables_exist(conn):
+            return ok({"error": "code intelligence schema is not initialized"})
+        bundles = evidence.collect_evidence(conn, query)
+    symbols = [evidence.bundle_to_json(bundle) for bundle in bundles]
+    response: Json = {"found": bool(symbols), "count": len(symbols), "symbols": cast("JsonValue", symbols)}
+    if not symbols:
+        attach_warnings(
+            response,
+            [
+                make_warning(
+                    "symbol_not_found",
+                    message="no matching definition in the selected code intelligence scope",
+                    symbol=symbol or source_path,
+                )
+            ],
+        )
+    return ok(response)
+
+
 def tool_search_static_findings(args: Json) -> Json:
     limit = require_int(args, "limit", 10, 1, 100)
     clauses, params = static_finding_clauses(args)
@@ -850,6 +884,7 @@ TOOLS: ToolRegistry = {
     "search_code_intel_semantic": (TOOL_DEFINITIONS["search_code_intel_semantic"], tool_search_code_intel_semantic),
     "get_code_intel_record": (TOOL_DEFINITIONS["get_code_intel_record"], tool_get_code_intel_record),
     "related_code_intel": (TOOL_DEFINITIONS["related_code_intel"], tool_related_code_intel),
+    "blast_radius": (TOOL_DEFINITIONS["blast_radius"], tool_blast_radius),
     "list_code_intel_files": (TOOL_DEFINITIONS["list_code_intel_files"], tool_list_code_intel_files),
     "search_static_findings": (TOOL_DEFINITIONS["search_static_findings"], tool_search_static_findings),
     "get_static_finding": (TOOL_DEFINITIONS["get_static_finding"], tool_get_static_finding),

@@ -544,6 +544,11 @@ def _evidence_to_json(evidence: Evidence) -> dict[str, object]:
     }
 
 
+def bundle_to_json(evidence: Evidence) -> dict[str, object]:
+    """Public structured form of one bundle (for the MCP tool and JSON CLI)."""
+    return _evidence_to_json(evidence)
+
+
 def render_json(bundles: Sequence[Evidence]) -> str:
     return json.dumps([_evidence_to_json(bundle) for bundle in bundles], indent=2, sort_keys=True) + "\n"
 

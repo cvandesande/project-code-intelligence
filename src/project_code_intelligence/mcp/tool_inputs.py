@@ -147,6 +147,16 @@ class RelatedCodeIntelArgs(StrictArgs):
     verbose: bool | None = None
 
 
+class BlastRadiusArgs(StrictArgs):
+    symbol: str | None = None
+    source_path: str | None = None
+    line: int | None = Field(default=None, ge=1)
+    neighbors: int | None = Field(default=None, ge=0, le=20)
+    collection: str | None = None
+    repo: str | None = None
+    verbose: bool | None = None
+
+
 class ListCodeIntelFilesArgs(StrictArgs):
     limit: int | None = Field(default=None, ge=1, le=500)
     collection: str | None = None
@@ -197,6 +207,7 @@ TOOL_INPUT_MODELS: dict[str, type[StrictArgs]] = {
     "search_code_intel_semantic": SearchCodeIntelSemanticArgs,
     "get_code_intel_record": GetCodeIntelRecordArgs,
     "related_code_intel": RelatedCodeIntelArgs,
+    "blast_radius": BlastRadiusArgs,
     "list_code_intel_files": ListCodeIntelFilesArgs,
     "search_static_findings": SearchStaticFindingsArgs,
     "get_static_finding": GetStaticFindingArgs,

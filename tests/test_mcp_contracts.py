@@ -3500,5 +3500,48 @@ class ToolRegistryConsistencyTests(unittest.TestCase):
             self.assertTrue(callable(handler), msg=f"{name}: handler is not callable")
 
 
+class BlastRadiusToolContractTests(unittest.TestCase):
+    def test_advertised_as_read_tool(self) -> None:
+        self.assertIn("blast_radius", TOOL_DEFINITIONS)
+        self.assertIn("blast_radius", TOOL_INPUT_MODELS)
+        self.assertFalse(TOOL_DEFINITIONS["blast_radius"].write_tool)
+        names = {cast("dict[str, object]", tool)["name"] for tool in mcp_tools.advertised_tools()}
+        self.assertIn("blast_radius", names)
+
+    def test_input_rejects_unknown_property(self) -> None:
+        with self.assertRaises((McpProtocolError, McpProtocolTypeError)):
+            _ = validate_tool_arguments(TOOL_DEFINITIONS["blast_radius"], {"symbol": "x", "bogus": 1})
+
+    def test_input_accepts_symbol_and_neighbors(self) -> None:
+        validated = validate_tool_arguments(TOOL_DEFINITIONS["blast_radius"], {"symbol": "render_text", "neighbors": 0})
+        self.assertEqual(cast("dict[str, object]", validated)["symbol"], "render_text")
+
+    def test_requires_symbol_or_source_path(self) -> None:
+        with self.assertRaises(McpProtocolError):
+            _ = mcp_tools.tool_blast_radius({})
+
+    def test_reports_when_schema_not_initialized(self) -> None:
+        with (
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=False),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(FakeConnection())),
+        ):
+            response = mcp_tools.tool_blast_radius({"symbol": "x"})
+        self.assertIn("error", mcp_text_payload(response))
+
+    def test_missing_symbol_returns_not_found_warning(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])  # latest_snapshots -> no snapshots
+        with (
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_blast_radius({"symbol": "does_not_exist"})
+        payload = mcp_text_payload(response)
+        self.assertEqual(payload["found"], False)
+        self.assertEqual(payload["count"], 0)
+        warnings = cast("list[object]", payload["warnings"])
+        kinds = {cast("dict[str, object]", warning)["kind"] for warning in warnings}
+        self.assertIn("symbol_not_found", kinds)
+
+
 if __name__ == "__main__":
     _ = unittest.main()

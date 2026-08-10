@@ -36,6 +36,7 @@ WarningKind: TypeAlias = Literal[
     "heuristic_candidate_relationships",
     "semantic_filter_has_no_embeddings",
     "record_not_found",
+    "symbol_not_found",
     "static_analysis_not_run",
     "overconstrained_boolean_filters",
 ]
