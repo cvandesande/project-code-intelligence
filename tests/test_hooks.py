@@ -92,6 +92,34 @@ class EvidenceRuntimeTests(unittest.TestCase):
         self.assertEqual(self._run("opencode", event, reports), "")
         self.assertEqual(reports.calls, [])
 
+    def test_added_definition_gets_reminder_without_index_query(self) -> None:
+        reports = _StubReports({})
+        event = {"filePath": "a.py", "oldString": "", "newString": "def brand_new():\n pass\n"}
+        text = self._run("opencode", event, reports)
+        self.assertIn("[pci add-side", text)
+        self.assertIn("brand_new", text)
+        self.assertIn("search_code_intel_semantic", text)
+        self.assertEqual(reports.calls, [])  # a reminder, not a duplicate check
+
+    def test_added_test_case_gets_no_reminder(self) -> None:
+        reports = _StubReports({})
+        for path, name in (("tests/test_x.py", "test_thing"), ("pkg/helpers.py", "TestHarness")):
+            event = {"filePath": path, "oldString": "", "newString": f"def {name}():\n pass\n"}
+            self.assertEqual(self._run("opencode", event, reports), "", path)
+
+    def test_removed_test_still_gets_blast_radius(self) -> None:
+        """The exemption is add-only: deleting a test is a coverage loss worth reporting."""
+        reports = _StubReports({"test_thing": ["test_thing  function  tests/test_x.py:1-2\ncallers (0)"]})
+        event = {"filePath": "tests/test_x.py", "oldString": "def test_thing():\n x\n", "newString": ""}
+        self.assertIn("[pci blast-radius", self._run("opencode", event, reports))
+
+    def test_rename_prefers_blast_radius_over_reminder(self) -> None:
+        reports = _StubReports({"old_name": ["old_name  function  a.py:1-3\ncallers (1)"]})
+        event = {"filePath": "a.py", "oldString": "def old_name():\n x\n", "newString": "def new_name():\n x\n"}
+        text = self._run("opencode", event, reports)
+        self.assertIn("[pci blast-radius", text)
+        self.assertNotIn("[pci add-side", text)
+
     def test_non_source_file_is_silent(self) -> None:
         reports = _StubReports({"gone": ["x"]})
         event = {"filePath": "notes.md", "oldString": "def gone(): pass", "newString": ""}
@@ -139,11 +167,14 @@ class EvidenceRuntimeTests(unittest.TestCase):
             self.assertEqual(self._run("claude", event, reports), "")
         self.assertEqual(reports.calls, [])
 
-    def test_claude_write_new_file_is_silent(self) -> None:
+    def test_claude_write_new_file_reminds_but_never_queries_index(self) -> None:
+        """A new file removes nothing, so it takes the add branch: reminder, no blast radius."""
         reports = _StubReports({"gone": ["should not appear"]})
         with TemporaryDirectory() as tmp:
             event = _write_event(Path(tmp) / "new.py", "def fresh():\n    return 1\n")
-            self.assertEqual(self._run("claude", event, reports), "")
+            text = self._run("claude", event, reports)
+        self.assertIn("[pci add-side", text)
+        self.assertNotIn("[pci blast-radius", text)
         self.assertEqual(reports.calls, [])
 
     def test_rename_fires_blast_radius_for_the_old_name(self) -> None:
