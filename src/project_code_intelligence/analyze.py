@@ -22,6 +22,7 @@ import math
 import re
 import sys
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from operator import itemgetter
 from typing import TYPE_CHECKING
 
@@ -58,6 +59,13 @@ _LEAKY_RATIO = 1.0
 # threshold by transitivity, which is exactly what this catches.
 _LOW_COHERENCE_STRUCTURAL = 0.6
 _LOW_COHERENCE_SEMANTIC = 0.6
+# At or above this avg body-text similarity, members are near-identical text —
+# the "typed variants" downgrade (see is_typed_variant_group) treats a
+# same-body-different-return-type group as one shape with N type parameters,
+# not N shapes worth collapsing.
+_TYPED_VARIANT_TEXT = 0.85
+# Two or more distinct annotated return-type cores => the family varies by type.
+_MIN_DISTINCT_RETURN_CORES = 2
 # Recommendations worth acting on now; ranked above already-abstracted and
 # leave-as-is so actionable candidates surface first.
 _ACTIONABLE_RECOMMENDATIONS = frozenset({"worth-collapsing", "parameterize-carefully"})
@@ -89,9 +97,10 @@ class FunctionNode:
 class MotifGroup:
     """A cluster of structurally similar functions and its net-value evidence.
 
-    ``net_value`` is the MDL-flavored rank key: structural complexity removed by
-    a shared abstraction minus the complexity that abstraction introduces. It is
-    advisory. ``recommendation`` turns the number into a verdict — one of
+    ``coherence`` is the rank key (see its docstring). ``net_value`` is the
+    MDL-flavored evidence field: structural complexity removed by a shared
+    abstraction minus the complexity that abstraction introduces. Both are
+    advisory. ``recommendation`` turns the numbers into a verdict — one of
     ``worth-collapsing``, ``parameterize-carefully``, ``already-abstracted`` or
     ``leave-as-is`` — and the cost breakdown fields explain why.
     """
@@ -100,6 +109,7 @@ class MotifGroup:
     common_roles: tuple[str, ...]
     avg_structural: float
     avg_semantic: float | None
+    avg_text: float | None
     net_value: float
     value_ratio: float
     redundancy_removed: float
@@ -108,11 +118,21 @@ class MotifGroup:
     spread_penalty: float
     shared_helper: tuple[str, ...]
     recommendation: str
+    typed_variants: bool = False
 
     @property
     def residual_roles(self) -> tuple[str, ...]:
         """Roles that vary across members (evidence for the residual cost)."""
         return tuple(sorted(residual_role_union(self.members, self.common_roles)))
+
+    @property
+    def coherence(self) -> float:
+        """Rank key: ``max(avg_semantic, avg_text)``, ``None`` ignored, ``0.0`` if both ``None``.
+
+        Provisionally calibrated on a 10-group labeled sample, this repo.
+        """
+        values = [value for value in (self.avg_semantic, self.avg_text) if value is not None]
+        return max(values) if values else 0.0
 
     @property
     def low_coherence(self) -> bool:
@@ -259,6 +279,8 @@ def cluster_functions(
     parent = {index: index for index in range(len(eligible))}
     for i in range(len(eligible)):
         for j in range(i + 1, len(eligible)):
+            if _is_call_chain(eligible[i], eligible[j]):
+                continue
             if weighted_jaccard(eligible[i].callee_roles, eligible[j].callee_roles, weights) >= options.threshold:
                 parent[_union_find_root(parent, i)] = _union_find_root(parent, j)
     clusters: dict[int, list[FunctionNode]] = {}
@@ -296,12 +318,135 @@ def average_structural_similarity(members: Sequence[FunctionNode], weights: Mapp
     return sum(pairs) / len(pairs)
 
 
+_DEF_LINE_RE = re.compile(r"^\s*(?:async\s+)?def\s")
+_DOCSTRING_OPEN_RE = re.compile(r'^[a-zA-Z]{0,2}("""|\'\'\')')
+
+
+def normalize_body_text(text: str) -> str:
+    """Crude textual normalization for body-similarity comparison.
+
+    Drops the ``def`` line (including a multi-line signature) so names and
+    signatures do not inflate the score, strips a leading docstring (a
+    triple-quoted string as the first statement), and drops blank lines and
+    trailing whitespace so formatting noise does not either.
+    """
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if _DEF_LINE_RE.match(line):
+            end = index
+            while end < len(lines) and not lines[end].rstrip().endswith(":"):
+                end += 1
+            lines = lines[end + 1 :]
+            break
+    start = 0
+    while start < len(lines) and not lines[start].strip():
+        start += 1
+    if start < len(lines):
+        match = _DOCSTRING_OPEN_RE.match(lines[start].strip())
+        if match:
+            quote = match.group(1)
+            rest = lines[start].strip()[match.end() :]
+            start += 1
+            if quote not in rest:
+                while start < len(lines) and quote not in lines[start]:
+                    start += 1
+                start += 1
+    lines = lines[start:]
+    return "\n".join(line.rstrip() for line in lines if line.strip())
+
+
+def body_text_similarity(a: str, b: str) -> float:
+    """``SequenceMatcher`` ratio between two normalized function bodies."""
+    return SequenceMatcher(None, normalize_body_text(a), normalize_body_text(b)).ratio()
+
+
+_RETURN_ANNOTATION_RE = re.compile(r"->(.*):\s*$", re.DOTALL)
+_OPTIONAL_WRAP_RE = re.compile(r"^Optional\[(.*)\]$")
+
+
+def return_annotation(body_text: str) -> str | None:
+    """Extract and normalize a function's return annotation from its ``def`` line(s).
+
+    Reads the signature text between ``->`` and the signature's closing ``:``
+    (which may span multiple lines), then strips whitespace/quotes and drops
+    optionality (``| None`` / a wrapping ``Optional[...]``) so ``int | None``
+    and ``int`` normalize to the same core. Returns ``None`` when there is no
+    ``def`` line or no ``->`` annotation.
+    """
+    lines = body_text.splitlines()
+    signature: str | None = None
+    for index, line in enumerate(lines):
+        if _DEF_LINE_RE.match(line):
+            end = index
+            while end < len(lines) and not lines[end].rstrip().endswith(":"):
+                end += 1
+            signature = "\n".join(lines[index : end + 1])
+            break
+    if signature is None:
+        return None
+    match = _RETURN_ANNOTATION_RE.search(signature)
+    if match is None:
+        return None
+    core = _normalize_annotation(match.group(1).strip())
+    return core or None
+
+
+def _normalize_annotation(annotation: str) -> str:
+    """Strip quotes and optionality from one extracted return annotation."""
+    text = annotation.strip()
+    if len(text) > 1 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1].strip()
+    parts = [part.strip() for part in text.split("|")]
+    non_none = [part for part in parts if part != "None"]
+    text = " | ".join(non_none) if non_none else "None"
+    match = _OPTIONAL_WRAP_RE.match(text)
+    if match:
+        text = match.group(1).strip()
+    return text
+
+
+def has_typed_variants(annotations: Sequence[str | None]) -> bool:
+    """True when the annotated (non-``None``) members disagree on return-type core.
+
+    Members without an extractable annotation are ignored rather than counted
+    as a distinct "unknown" core, since a missing annotation is not evidence
+    the type differs.
+    """
+    cores = {annotation for annotation in annotations if annotation is not None}
+    return len(cores) >= _MIN_DISTINCT_RETURN_CORES
+
+
+def is_typed_variant_group(avg_text: float | None, annotations: Sequence[str | None]) -> bool:
+    """Both required: near-identical bodies, and return types differing beyond optionality.
+
+    Cheap deterministic proxy for families like ``optional_int``/``optional_bool``
+    or ``classification_text``/``classification_bool`` — same body, only the
+    extracted/returned type varies. Collapsing those loses type-checker
+    precision, so they must not be recommended as worth-collapsing.
+    """
+    if avg_text is None or avg_text < _TYPED_VARIANT_TEXT:
+        return False
+    return has_typed_variants(annotations)
+
+
 # --- net-value (MDL-flavored) scoring -------------------------------------------
 
 
 def _last_component(name: str) -> str:
     """Final dotted component of a callee/symbol name (``repo.insert`` -> ``insert``)."""
     return name.rsplit(".", 1)[-1].strip()
+
+
+def _is_call_chain(a: FunctionNode, b: FunctionNode) -> bool:
+    """True if one node calls the other — composition, not duplication.
+
+    A caller's call shape overlaps its callee's by construction (it calls the
+    callee plus whatever the callee itself calls), so such a pair must never
+    join one motif group. Deterministic rule, not a score.
+    """
+    a_callees = {_last_component(name) for name in a.callee_symbols}
+    b_callees = {_last_component(name) for name in b.callee_symbols}
+    return _last_component(b.symbol) in a_callees or _last_component(a.symbol) in b_callees
 
 
 def core_shared_weight(core_roles: Sequence[str], weights: Mapping[str, float] | None) -> float:
@@ -394,10 +539,21 @@ def value_ratio(redundancy: float, cost: float) -> float:
     return redundancy / cost
 
 
-def recommendation(value: float, shared: float, residual: float, *, has_helper: bool) -> str:
-    """Advisory verdict — explains, does not assert. See module docstring."""
+def recommendation(
+    value: float, shared: float, residual: float, *, has_helper: bool, typed_variants: bool = False
+) -> str:
+    """Advisory verdict — explains, does not assert. See module docstring.
+
+    ``typed_variants`` downgrades to ``leave-as-is`` regardless of ``value``:
+    a same-body-different-return-type family (see ``is_typed_variant_group``)
+    would lose type-checker precision if collapsed, so it is never recommended
+    as worth collapsing. Checked after ``has_helper`` so an already-abstracted
+    group keeps that (more specific) verdict.
+    """
     if has_helper:
         return "already-abstracted"
+    if typed_variants:
+        return "leave-as-is"
     if value <= 0.0:
         return "leave-as-is"
     if residual > shared * _LEAKY_RATIO:
@@ -405,11 +561,14 @@ def recommendation(value: float, shared: float, residual: float, *, has_helper: 
     return "worth-collapsing"
 
 
-def build_group(
+def build_group(  # noqa: PLR0913 -- one more keyword-only evidence field; see AGENTS.md on keyword-with-default additions.
     members: Sequence[FunctionNode],
     avg_semantic: float | None,
     weights: Mapping[str, float] | None = None,
     function_symbols: frozenset[str] = frozenset(),
+    avg_text: float | None = None,
+    *,
+    typed_variants: bool = False,
 ) -> MotifGroup:
     ordered = tuple(sorted(members, key=lambda node: (node.source_path, node.line_start or 0, node.symbol)))
     avg_structural = average_structural_similarity(ordered, weights)
@@ -426,6 +585,7 @@ def build_group(
         common_roles=core,
         avg_structural=avg_structural,
         avg_semantic=avg_semantic,
+        avg_text=avg_text,
         net_value=value,
         value_ratio=value_ratio(removed, cost),
         redundancy_removed=removed,
@@ -433,7 +593,8 @@ def build_group(
         residual_cost=residual,
         spread_penalty=spread,
         shared_helper=helper,
-        recommendation=recommendation(value, shared, residual, has_helper=bool(helper)),
+        recommendation=recommendation(value, shared, residual, has_helper=bool(helper), typed_variants=typed_variants),
+        typed_variants=typed_variants,
     )
 
 
@@ -568,16 +729,71 @@ def group_semantic_similarity(conn: db.DbConnection, snapshot_id: int, member_id
     return None
 
 
-def _group_sort_key(group: MotifGroup) -> tuple[bool, float, float, int, int]:
-    """Rank key: actionable groups first, then net value, then coherence.
+def _group_body_texts(conn: db.DbConnection, snapshot_id: int, member_ids: Sequence[str]) -> dict[str, str]:
+    """Each member's full chunk text (still including the ``def`` line), by def id.
 
-    Semantic similarity breaks net-value ties so a tighter group wins; groups
-    with no embedded body (``avg_semantic is None``) sort last within a tie.
+    Shared by ``group_text_similarity`` (which normalizes away the def line) and
+    ``group_return_annotations`` (which reads only the def line), so both work
+    from one query.
+    """
+    rows = conn.execute(
+        """
+        SELECT c.parent_record_id AS def_id, c.display_content AS content
+        FROM project_code_intel_records c
+        WHERE c.snapshot_id = %s
+          AND c.record_type = 'code_chunk'
+          AND c.parent_record_id = ANY(%s)
+        ORDER BY c.parent_record_id, c.line_start
+        """,
+        [snapshot_id, list(member_ids)],
+    ).fetchall()
+    bodies: dict[str, list[str]] = {}
+    for row in rows:
+        def_id = _coerce_str(row["def_id"])
+        content = _coerce_str(row["content"])
+        if def_id is None or content is None:
+            continue
+        bodies.setdefault(def_id, []).append(content)
+    return {def_id: "\n".join(chunks) for def_id, chunks in bodies.items()}
+
+
+def group_text_similarity(conn: db.DbConnection, snapshot_id: int, member_ids: Sequence[str]) -> float | None:
+    """Average pairwise textual similarity over members' code-chunk children.
+
+    Mirrors ``group_semantic_similarity``: the body text lives on the child
+    ``code_chunk`` record (``parent_record_id`` = the definition id); a member
+    can have several chunks, concatenated here in line order. Textual
+    similarity is the strongest true-duplicate signal (byte-identical bodies,
+    copied helpers) that graph shape and embedding cosine can miss. Returns
+    ``None`` when fewer than two members have a chunk.
+    """
+    texts = _group_body_texts(conn, snapshot_id, member_ids)
+    ids = sorted(texts)
+    if len(ids) < DEFAULT_MIN_MEMBERS:
+        return None
+    ratios = [
+        body_text_similarity(texts[ids[i]], texts[ids[j]]) for i in range(len(ids)) for j in range(i + 1, len(ids))
+    ]
+    return sum(ratios) / len(ratios) if ratios else None
+
+
+def group_return_annotations(conn: db.DbConnection, snapshot_id: int, member_ids: Sequence[str]) -> list[str | None]:
+    """Each member's normalized return annotation (see ``return_annotation``), or ``None``."""
+    texts = _group_body_texts(conn, snapshot_id, member_ids)
+    return [return_annotation(text) for text in texts.values()]
+
+
+def _group_sort_key(group: MotifGroup) -> tuple[bool, float, float, int, int]:
+    """Rank key: actionable groups first, then coherence, then net value.
+
+    A 10-group labeled sample on this repo showed ``net_value`` order does not
+    separate real duplicates from noise, while ``coherence`` does (every real
+    group landed in the top 6). ``net_value`` remains the tiebreak.
     """
     return (
         group.recommendation in _ACTIONABLE_RECOMMENDATIONS,
+        group.coherence,
         group.net_value,
-        group.avg_semantic if group.avg_semantic is not None else -1.0,
         len(group.members),
         group.estimated_loc_removed or 0,
     )
@@ -635,20 +851,31 @@ def analyze_snapshot(conn: db.DbConnection, snapshot: SnapshotRef, options: Anal
     weights = role_weights(unique)
     function_symbols = frozenset(_last_component(node.symbol) for node in unique)
     clusters = cluster_functions(unique, options, weights)
-    groups = [
-        build_group(
-            members,
-            group_semantic_similarity(conn, snapshot.snapshot_id, [member.record_id for member in members]),
-            weights,
-            function_symbols,
+    groups: list[MotifGroup] = []
+    for members in clusters:
+        member_ids = [member.record_id for member in members]
+        avg_text = group_text_similarity(conn, snapshot.snapshot_id, member_ids)
+        # Only worth a second query once the cheap text-similarity gate has passed.
+        annotations = (
+            group_return_annotations(conn, snapshot.snapshot_id, member_ids)
+            if avg_text is not None and avg_text >= _TYPED_VARIANT_TEXT
+            else []
         )
-        for members in clusters
-    ]
+        groups.append(
+            build_group(
+                members,
+                group_semantic_similarity(conn, snapshot.snapshot_id, member_ids),
+                weights,
+                function_symbols,
+                avg_text,
+                typed_variants=is_typed_variant_group(avg_text, annotations),
+            )
+        )
     if options.path_prefix:
         # Filter before ranking so the limit is spent on groups that touch the caller's area.
         prefix = options.path_prefix
         groups = [group for group in groups if any(path_matches_prefix(m.source_path, prefix) for m in group.members)]
-    # Actionable groups first, then net value; LOC is only a tiebreak, never the target.
+    # Actionable groups first, then coherence, then net value; LOC is only a tiebreak, never the target.
     ranked = rank_groups(groups)
     return SnapshotResult(
         label=f"{snapshot.collection}/{snapshot.repo}",
@@ -677,7 +904,10 @@ def _group_to_json(group: MotifGroup) -> dict[str, object]:
         "common_shape": list(group.common_roles),
         "graph_similarity": round(group.avg_structural, 4),
         "semantic_similarity": None if group.avg_semantic is None else round(group.avg_semantic, 4),
+        "text_similarity": None if group.avg_text is None else round(group.avg_text, 4),
+        "coherence": round(group.coherence, 4),
         "recommendation": group.recommendation,
+        "typed_variants": group.typed_variants,
         "net_value": round(group.net_value, 4),
         "evidence": {
             "redundancy_removed": round(group.redundancy_removed, 4),
@@ -719,6 +949,8 @@ def _why(group: MotifGroup) -> str:
     """One-line rationale for the recommendation — explain, do not assert."""
     if group.recommendation == "already-abstracted":
         return f"members already share internal helper(s): {', '.join(group.shared_helper)}"
+    if group.typed_variants:
+        return "same body, return types differ — collapsing loses type precision"
     if group.recommendation == "leave-as-is":
         return "abstraction cost meets or exceeds the redundancy it would remove"
     if group.recommendation == "parameterize-carefully":
@@ -730,9 +962,10 @@ def _why(group: MotifGroup) -> str:
 
 def _render_group(group: MotifGroup, ordinal: int) -> list[str]:
     semantic = "n/a" if group.avg_semantic is None else f"{group.avg_semantic:.2f}"
+    text = "n/a" if group.avg_text is None else f"{group.avg_text:.2f}"
     loc_removed = "n/a" if group.estimated_loc_removed is None else str(group.estimated_loc_removed)
     cost_breakdown = f"base + residual {group.residual_cost:.2f} + spread {group.spread_penalty:.2f}"
-    coherence = (
+    low_coherence_caveat = (
         ["  Caveat: low coherence — loose cluster, may be chained; verify members share one shape"]
         if group.low_coherence
         else []
@@ -740,13 +973,15 @@ def _render_group(group: MotifGroup, ordinal: int) -> list[str]:
     return [
         f"Motif {ordinal}: {len(group.members)} instances — {group.recommendation} (net value {group.net_value:.2f})",
         f"  Why: {_why(group)}",
-        *coherence,
+        *low_coherence_caveat,
         "  Common shape:",
         *(f"    {role}" for role in group.common_roles),
         "  Instances:",
         *(_render_member_line(member) for member in group.members),
         f"  Graph similarity:    {group.avg_structural:.2f}",
         f"  Semantic similarity: {semantic}",
+        f"  Text similarity:     {text}",
+        f"  Coherence (rank key): {group.coherence:.2f}",
         f"  Redundancy removed:  {group.redundancy_removed:.2f}  (weight units)",
         f"  Abstraction cost:    {group.abstraction_cost:.2f}  ({cost_breakdown})",
         f"  Est. LOC removed:    {loc_removed} (advisory; LOC is evidence, not the target)",
