@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
-from project_code_intelligence import db, evidence
+from project_code_intelligence import analyze, db, evidence
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError
 from project_code_intelligence.mcp import db as mcp_db
 from project_code_intelligence.mcp.files import (
@@ -810,6 +810,36 @@ def tool_get_static_finding(args: Json) -> Json:
     return ok(result)
 
 
+def tool_find_redundancy(args: Json) -> Json:
+    options = analyze.AnalysisOptions(
+        limit=require_int(args, "limit", 10, 1, 50),
+        path_prefix=optional_text(args, "source_path_prefix"),
+    )
+    collection = optional_text(args, "collection")
+    repo = optional_text(args, "repo")
+    with mcp_db.connect() as conn:
+        if not mcp_db.code_intel_tables_exist(conn):
+            return ok({"error": "code intelligence schema is not initialized"})
+        snapshots = analyze.select_snapshots(analyze.latest_snapshots(conn), collection=collection, repo=repo)
+        results = [analyze.analyze_snapshot(conn, snapshot, options) for snapshot in snapshots]
+    groups: list[Json] = []
+    functions_analyzed = 0
+    for result in results:
+        functions_analyzed += result.functions_analyzed
+        groups.extend(
+            cast("Json", {"snapshot": result.label, **analyze.group_to_json(group)}) for group in result.groups
+        )
+    response: Json = {
+        "found": bool(groups),
+        "count": len(groups),
+        "functions_analyzed": functions_analyzed,
+        "groups": cast("JsonValue", groups),
+    }
+    if not snapshots:
+        attach_warnings(response, [make_warning("empty_repo_scope", message="no snapshot matched the given scope")])
+    return ok(response)
+
+
 def tool_list_code_intel_files(args: Json) -> Json:
     limit = require_int(args, "limit", 50, 1, 500)
     clauses, params = scoped_collection_repo_clauses(args, "f")
@@ -885,6 +915,7 @@ TOOLS: ToolRegistry = {
     "get_code_intel_record": (TOOL_DEFINITIONS["get_code_intel_record"], tool_get_code_intel_record),
     "related_code_intel": (TOOL_DEFINITIONS["related_code_intel"], tool_related_code_intel),
     "blast_radius": (TOOL_DEFINITIONS["blast_radius"], tool_blast_radius),
+    "find_redundancy": (TOOL_DEFINITIONS["find_redundancy"], tool_find_redundancy),
     "list_code_intel_files": (TOOL_DEFINITIONS["list_code_intel_files"], tool_list_code_intel_files),
     "search_static_findings": (TOOL_DEFINITIONS["search_static_findings"], tool_search_static_findings),
     "get_static_finding": (TOOL_DEFINITIONS["get_static_finding"], tool_get_static_finding),

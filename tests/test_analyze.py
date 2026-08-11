@@ -341,5 +341,18 @@ class RenderingTests(unittest.TestCase):
         self.assertIn("no repeated call-shape motifs", text)
 
 
+class PathPrefixMatchTests(unittest.TestCase):
+    """Stored paths are repo-prefixed; a caller may pass either form."""
+
+    def test_repo_prefixed_prefix_matches(self) -> None:
+        self.assertTrue(analyze.path_matches_prefix("pci/src/pkg/mcp/tools.py", "pci/src/pkg/mcp"))
+
+    def test_repo_relative_prefix_matches(self) -> None:
+        self.assertTrue(analyze.path_matches_prefix("pci/src/pkg/mcp/tools.py", "src/pkg/mcp"))
+
+    def test_unrelated_prefix_does_not_match(self) -> None:
+        self.assertFalse(analyze.path_matches_prefix("pci/src/pkg/mcp/tools.py", "src/pkg/sarif"))
+
+
 if __name__ == "__main__":
     _ = unittest.main()

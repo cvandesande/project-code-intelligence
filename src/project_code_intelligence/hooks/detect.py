@@ -37,3 +37,8 @@ def removed_definitions(old_string: str, new_string: str) -> list[str]:
     before = defined_names(old_string)
     after = defined_names(new_string)
     return [name for name in sorted(before) if name not in after]
+
+
+def added_definitions(old_string: str, new_string: str) -> list[str]:
+    """Definitions present after an edit but not before -- the addition set."""
+    return removed_definitions(new_string, old_string)
