@@ -11,7 +11,17 @@ serves two purposes:
 
 Line numbers are as of commit `81370a4`; re-locate by symbol. Strike items
 through as they are fixed; do not delete them (the regression role needs the
-history).
+history). When you investigate an audit line (seed or not) and decide NOT to
+act, record it under "Dismissed after investigation" below with the reason.
+Fixes and dismissals together give the action rate per audit run — the
+number that decides whether a check stays shipped.
+
+The standing regression command is
+`python3 ~/pci-measurement-harness/seed_regression.py`, run from the repo
+root. It checks that every active (unstruck) seed still surfaces in
+`pci-analyze audit --json --limit 999` and that struck seeds are gone.
+Run it after any `analyze.py`/`find_redundancy` change and after each fix
+batch. Exit 1 = regression.
 
 | # | duplication | where |
 |---|-------------|-------|
@@ -41,6 +51,11 @@ Fixed since labeling:
   `context.py`) — `analyze.py` copy promoted to public `coerce_str`/`coerce_int`;
   `evidence.py` now imports it. `context.py` copy remains (no shared import
   path worth adding for one caller).
+
+Dismissed after investigation:
+
+<!-- format: - (date) `symbols` — one-line reason the collapse is not worth it -->
+- none yet
 
 ## Measurement context
 

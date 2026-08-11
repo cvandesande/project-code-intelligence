@@ -24,6 +24,9 @@ import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from rich.text import Text
+
+from project_code_intelligence import console_ui
 from project_code_intelligence.analyze import (
     DEFAULT_LIMIT,
     AnalysisOptions,
@@ -31,7 +34,6 @@ from project_code_intelligence.analyze import (
     analyze_snapshot,
     coerce_int,
     coerce_str,
-    group_to_json,
     latest_snapshots,
     select_snapshots,
 )
@@ -77,6 +79,7 @@ class AuditResult:
     """Everything the audit found for one snapshot."""
 
     label: str
+    repo: str
     snapshot_id: int
     staleness: Json | None
     names_total: int
@@ -211,6 +214,7 @@ def audit_snapshot(conn: db.DbConnection, snapshot: SnapshotRef, options: Analys
     static_commit, static_counts = static_finding_counts(conn, snapshot)
     return AuditResult(
         label=f"{snapshot.collection}/{snapshot.repo}",
+        repo=snapshot.repo,
         snapshot_id=snapshot.snapshot_id,
         staleness=snapshot_staleness(conn, snapshot.snapshot_id),
         names_total=names_total,
@@ -222,6 +226,15 @@ def audit_snapshot(conn: db.DbConnection, snapshot: SnapshotRef, options: Analys
 
 
 # --- rendering ------------------------------------------------------------------
+#
+# Both renderers strip the leading "<repo>/" from paths (the section header
+# names the repo) and print only max pairwise text similarity per group: the
+# measurement showed no other computed score separates real duplicates from
+# junk, so printing them would only spend reader attention / agent tokens.
+
+
+def _rel(path: str, repo: str) -> str:
+    return path.removeprefix(repo + "/")
 
 
 def _staleness_lines(staleness: Json | None) -> list[str]:
@@ -243,24 +256,18 @@ def _staleness_lines(staleness: Json | None) -> list[str]:
     return out
 
 
-def _member_lines(group: MotifGroup) -> list[str]:
-    return [f"    {member.symbol}  {member.source_path}:{member.line_start}" for member in group.members]
-
-
-def _group_lines(group: MotifGroup) -> list[str]:
-    text = "n/a" if group.avg_text is None else f"{group.avg_text:.2f}"
+def _group_lines(group: MotifGroup, repo: str) -> list[str]:
     max_text = "n/a" if group.max_text is None else f"{group.max_text:.2f}"
-    semantic = "n/a" if group.avg_semantic is None else f"{group.avg_semantic:.2f}"
     return [
-        f"  {len(group.members)} members (text avg {text} max {max_text}, semantic {semantic}):",
-        *_member_lines(group),
+        f"  {len(group.members)} members (max pairwise text {max_text}):",
+        *(f"    {m.symbol}  {_rel(m.source_path, repo)}:{m.line_start}" for m in group.members),
     ]
 
 
-def _group_section(groups: list[MotifGroup]) -> list[str]:
+def _group_section(groups: list[MotifGroup], repo: str) -> list[str]:
     if not groups:
         return ["  none"]
-    return [line for group in groups for line in _group_lines(group)]
+    return [line for group in groups for line in _group_lines(group, repo)]
 
 
 def _static_lines(result: AuditResult) -> list[str]:
@@ -274,6 +281,22 @@ def _static_lines(result: AuditResult) -> list[str]:
     ]
 
 
+# Path lists longer than this wrap onto indented lines in the text report.
+_PATHS_PER_LINE = 3
+
+
+def _duplicate_name_lines(result: AuditResult) -> list[str]:
+    out: list[str] = []
+    for dup in result.duplicate_names:
+        paths = [_rel(path, result.repo) for path in dup.paths]
+        if len(paths) > _PATHS_PER_LINE:
+            out.append(f"  {dup.name}  x{len(paths)}:")
+            out.extend(f"    {path}" for path in paths)
+        else:
+            out.append(f"  {dup.name}  x{len(paths)}: {', '.join(paths)}")
+    return out
+
+
 def render_result(result: AuditResult) -> list[str]:
     near, rest = split_groups(result.redundancy.groups)
     return [
@@ -285,7 +308,7 @@ def render_result(result: AuditResult) -> list[str]:
         "### Duplicate names (defined in more than one file)",
         f"{len(result.duplicate_names)} of {result.names_total} function/method names are defined in >1 file.",
         "Counted fact, not a verdict: entry-point names such as `main` are conventional.",
-        *(f"  {dup.name}  x{len(dup.paths)}: {', '.join(dup.paths)}" for dup in result.duplicate_names),
+        *_duplicate_name_lines(result),
         "",
         "### Redundancy candidates",
         f"_{result.redundancy.functions_analyzed} functions analyzed, "
@@ -295,10 +318,10 @@ def render_result(result: AuditResult) -> list[str]:
         "The candidate list is UNRANKED -- order carries no confidence.",
         "",
         f"Near-certain (contains an exact-text pair, max pairwise text >= {NEAR_CERTAIN_TEXT}):",
-        *_group_section(near),
+        *_group_section(near, result.repo),
         "",
         "Candidates (unranked; verify in source):",
-        *_group_section(rest),
+        *_group_section(rest, result.repo),
         "",
         "### Static findings (SARIF passthrough)",
         *_static_lines(result),
@@ -306,7 +329,7 @@ def render_result(result: AuditResult) -> list[str]:
     ]
 
 
-def render_text(results: Sequence[AuditResult]) -> str:
+def render_lines(results: Sequence[AuditResult]) -> list[str]:
     lines = [
         "# PCI audit -- whole-tree cleanup candidates",
         "",
@@ -316,36 +339,97 @@ def render_text(results: Sequence[AuditResult]) -> str:
     ]
     for result in results:
         lines.extend(render_result(result))
-    return "\n".join(lines) + "\n"
+    return lines
+
+
+def render_text(results: Sequence[AuditResult]) -> str:
+    return "\n".join(render_lines(results)) + "\n"
+
+
+# First match wins; the palette follows the console_ui status pills
+# (green ok / yellow warn / red fail). Purely cosmetic: a rule that stops
+# matching just loses its color.
+_PREFIX_STYLES: tuple[tuple[str, str], ...] = (
+    ("### ", "bold cyan"),
+    ("#", "bold"),
+    ("  none", "dim"),
+    ("Near-certain", "bold"),
+    ("Candidates (unranked", "bold"),
+    ("Advisory only", "dim"),
+    ("source before acting", "dim"),
+    ("Counted fact", "dim"),
+    ("Measured on this repo", "dim"),
+    ("working tree was dirty", "yellow"),
+    ("local HEAD is", "yellow"),
+    ("no SARIF ingested", "yellow"),
+    ("snapshot row missing", "red"),
+)
+_CONTAINS_STYLES: tuple[tuple[str, str], ...] = (
+    ("-- stale", "red"),
+    ("-- current", "green"),
+)
+
+
+def line_style(line: str) -> str | None:
+    for prefix, style in _PREFIX_STYLES:
+        if line.startswith(prefix):
+            return style
+    for marker, style in _CONTAINS_STYLES:
+        if marker in line:
+            return style
+    return None
+
+
+# Keys the machine output keeps from the annotated snapshot row.
+_STALENESS_KEYS = ("commit_sha", "head_status", "head_commit", "dirty", "index_age_seconds")
+
+
+def _group_to_compact(group: MotifGroup, repo: str) -> dict[str, object]:
+    """Token-minimal group: max pairwise text plus "symbol path:start-end" members.
+
+    Everything else group_to_json carries (coherence, evidence, recommendation,
+    averages, record ids) measured as non-separating for this decision, so the
+    machine output omits it; the full record stays available via the
+    find_redundancy MCP tool and ``pci-analyze compression``.
+    """
+    return {
+        "max_text": group.max_text,
+        "members": [f"{m.symbol} {_rel(m.source_path, repo)}:{m.line_start}-{m.line_end}" for m in group.members],
+    }
 
 
 def _result_to_json(result: AuditResult) -> dict[str, object]:
     near, rest = split_groups(result.redundancy.groups)
+    staleness: object = None
+    if result.staleness is not None:
+        staleness = {key: result.staleness.get(key) for key in _STALENESS_KEYS if result.staleness.get(key) is not None}
+    static_counts: dict[str, dict[str, int]] = {}
+    for count in result.static_counts:
+        static_counts.setdefault(count.tool, {})[count.level] = count.count
     return {
         "snapshot_id": result.snapshot_id,
-        "staleness": result.staleness,
+        "staleness": staleness,
         "duplicate_names": {
             "names_total": result.names_total,
-            "multi_file": len(result.duplicate_names),
-            "items": [{"name": dup.name, "paths": list(dup.paths)} for dup in result.duplicate_names],
+            "items": {dup.name: [_rel(path, result.repo) for path in dup.paths] for dup in result.duplicate_names},
         },
         "redundancy": {
             "functions_analyzed": result.redundancy.functions_analyzed,
             "clones_folded": result.redundancy.clones_folded,
             "near_certain_text_threshold": NEAR_CERTAIN_TEXT,
-            "near_certain": [group_to_json(group) for group in near],
-            "candidates_unranked": [group_to_json(group) for group in rest],
+            "near_certain": [_group_to_compact(group, result.repo) for group in near],
+            "candidates_unranked": [_group_to_compact(group, result.repo) for group in rest],
         },
         "static_findings": {
             "commit_sha": result.static_commit,
-            "counts": [{"tool": c.tool, "level": c.level, "count": c.count} for c in result.static_counts],
+            "counts": static_counts,
         },
     }
 
 
 def render_json(results: Sequence[AuditResult]) -> str:
     payload = {result.label: _result_to_json(result) for result in results}
-    return json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n"
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str) + "\n"
 
 
 # --- CLI ------------------------------------------------------------------------
@@ -393,8 +477,14 @@ def audit_main(argv: list[str] | None = None) -> int:
     except DatabaseConnectionError as exc:
         _ = sys.stderr.write(f"pci-analyze: {exc}\n")
         return 1
-    output = render_json(results) if parsed.json else render_text(results)
-    _ = sys.stdout.write(output)
+    if parsed.json:
+        _ = sys.stdout.write(render_json(results))
+    elif console_ui.should_emit_pretty(sys.stdout):
+        console = console_ui.build_console()
+        for line in render_lines(results):
+            console.print(Text(line, style=line_style(line) or ""))
+    else:
+        _ = sys.stdout.write(render_text(results))
     return 0
 
 

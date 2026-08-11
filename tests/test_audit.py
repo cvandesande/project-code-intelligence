@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import unittest
+from typing import cast
 
 from project_code_intelligence import analyze, audit
 
@@ -57,29 +59,51 @@ class SplitGroupsTests(unittest.TestCase):
         self.assertEqual([g.members[0].symbol for g in rest], ["d", "f"])
 
 
+def _result() -> audit.AuditResult:
+    return audit.AuditResult(
+        label="c/r",
+        repo="r",
+        snapshot_id=1,
+        staleness=None,
+        names_total=10,
+        duplicate_names=(audit.DuplicateName(name="main", paths=("r/a.py", "r/b.py")),),
+        redundancy=analyze.SnapshotResult(
+            label="c/r",
+            groups=(_group(["x", "y"], avg_text=1.0, max_text=1.0),),
+            functions_analyzed=10,
+            clones_folded=0,
+        ),
+        static_commit=None,
+        static_counts=(),
+    )
+
+
 class RenderTests(unittest.TestCase):
     def test_render_text_smoke(self) -> None:
-        result = audit.AuditResult(
-            label="c/r",
-            snapshot_id=1,
-            staleness=None,
-            names_total=10,
-            duplicate_names=(audit.DuplicateName(name="main", paths=("a.py", "b.py")),),
-            redundancy=analyze.SnapshotResult(
-                label="c/r",
-                groups=(_group(["x", "y"], avg_text=1.0, max_text=1.0),),
-                functions_analyzed=10,
-                clones_folded=0,
-            ),
-            static_commit=None,
-            static_counts=(),
-        )
-        text = audit.render_text([result])
+        text = audit.render_text([_result()])
         self.assertIn("UNRANKED", text)
+        # "r/" repo prefix stripped: the header names the repo.
         self.assertIn("main  x2: a.py, b.py", text)
         self.assertIn("x  x.py:1", text)
         self.assertIn("no SARIF ingested", text)
         self.assertIn("reindex (pci-index)", text)
+
+    def test_render_json_compact(self) -> None:
+        rendered = audit.render_json([_result()])
+        payload = cast("dict[str, dict[str, object]]", json.loads(rendered))["c/r"]
+        dup_names = cast("dict[str, object]", payload["duplicate_names"])
+        self.assertEqual(dup_names["items"], {"main": ["a.py", "b.py"]})
+        redundancy = cast("dict[str, object]", payload["redundancy"])
+        group = cast("list[object]", redundancy["near_certain"])[0]
+        # Members collapse to one string each; scores with no measured signal are omitted.
+        self.assertEqual(group, {"max_text": 1.0, "members": ["x x.py:1-5", "y y.py:1-5"]})
+        self.assertNotIn("evidence", rendered)
+
+    def test_line_style_smoke(self) -> None:
+        self.assertEqual(audit.line_style("### Index staleness"), "bold cyan")
+        self.assertEqual(audit.line_style("commit abc -- current, indexed 0h01m ago"), "green")
+        self.assertEqual(audit.line_style("commit abc -- stale"), "red")
+        self.assertIsNone(audit.line_style("    x  x.py:1"))
 
 
 if __name__ == "__main__":
