@@ -160,6 +160,7 @@ def load_definitions(conn: db.DbConnection, snapshot_id: int) -> list[tuple[str,
           AND r.record_type = 'symbol_definition'
           AND r.symbol IS NOT NULL
           AND r.symbol_kind IN ('function', 'method', 'shell_function')
+          AND r.file_role != 'test'
           AND f.is_source = true
           AND f.is_test = false
         """,

@@ -558,6 +558,11 @@ RUST_SELF_METHOD_CALL_RE = re.compile(r"\bself\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s
 RUST_RECEIVER_METHOD_CALL_RE = re.compile(
     r"\b(?!self\b|Self\b)[A-Za-z_][A-Za-z0-9_]*\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\("
 )
+RUST_MACRO_CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)!\s*[({\[]")
+# Method calls the receiver regex misses: chained (`.iter().all(`, `?.bar(`,
+# `.await.foo(`) and turbofish (`.parse::<u32>(`).
+RUST_CHAINED_METHOD_CALL_RE = re.compile(r"[)\]?]\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+RUST_TURBOFISH_METHOD_CALL_RE = re.compile(r"\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*::\s*<[^>\n]*>\s*\(")
 RUST_FN_PARAM_START_RE = re.compile(r"\bfn\s+[A-Za-z_][A-Za-z0-9_]*(?:\s*<[^>{};()]+>)?\s*\(")
 RUST_CLOSURE_PARAMS_RE = re.compile(r"(?:^|[\s=({[,])(?:move\s+)?\|(?P<params>[^|\n{};]{0,240})\|", re.MULTILINE)
 RUST_LOCAL_CLOSURE_BINDING_RE = re.compile(
@@ -964,6 +969,24 @@ def rust_receiver_method_names(body: str) -> frozenset[str]:
     return frozenset(match.group(1) for match in RUST_RECEIVER_METHOD_CALL_RE.finditer(body))
 
 
+def rust_extra_callee_roles(body: str, refs: list[str]) -> list[str]:
+    """Callee names excluded from edges as unresolvable but still call-shape signal.
+
+    Receiver method calls (``rx.recv()``) and macro invocations (``format!``)
+    never become call_candidate edges because the name-based resolver cannot
+    bind them safely. find_redundancy roles only need the name, so they are
+    carried in symbol metadata instead (see load_function_nodes). Std method
+    names (``map``, ``collect``) stay in: Python roles include stdlib calls,
+    and IDF role weighting already zeroes out ubiquitous names.
+    """
+    stripped = strip_rust_attributes(strip_c_like_comments(body))
+    names = set(rust_receiver_method_names(stripped))
+    for pattern in (RUST_MACRO_CALL_RE, RUST_CHAINED_METHOD_CALL_RE, RUST_TURBOFISH_METHOD_CALL_RE):
+        names.update(match.group(1) for match in pattern.finditer(stripped))
+    ref_bares = {ref.rsplit("::", 1)[-1] for ref in refs}
+    return sorted(names - ref_bares)[:160]
+
+
 def rust_referenced_symbols(
     body: str,
     *,
@@ -1104,6 +1127,10 @@ def rust_item_records(
     if kind == "fn" and (impl_context.trait or impl_context.owner):
         name = rust_qualified_method_symbol(name, impl_trait=impl_context.trait, impl_owner=impl_context.owner)
         kind = "method"
+    elif kind == "fn":
+        # "fn" is Rust surface syntax; consumers filter on the shared
+        # "function" kind (analyze.py, audit.py, mcp/tools.py, storage).
+        kind = "function"
     test_record = rust_test_attribute_before(context.lines, idx) or rust_line_in_ranges(idx + 1, context.test_ranges)
     metadata: JsonObject = {
         "body_truncated": truncated,
@@ -1123,7 +1150,8 @@ def rust_item_records(
         local_methods=impl_context.local_methods,
         defined_symbol=name,
     )
-    display_body = rust_collapse_doc_examples(body)
+    if kind in {"function", "method"} and (extra_roles := rust_extra_callee_roles(body, refs)):
+        metadata["extra_callee_roles"] = extra_roles
     symbol, chunk, symbol_edges = make_symbol_chunk(
         context.intel_file,
         SymbolChunkSpec(
@@ -1132,7 +1160,7 @@ def rust_item_records(
             kind=kind,
             line_start=idx + 1,
             line_end=line_end,
-            body=display_body,
+            body=rust_collapse_doc_examples(body),
             metadata=metadata,
             confidence_kind="approximate_fact",
             non_resolvable_targets=RUST_NON_RESOLVABLE_NAMES,

@@ -1145,6 +1145,36 @@ class GoParserRegressionTests(unittest.TestCase):
 
 
 class RustParserRegressionTests(unittest.TestCase):
+    def test_rust_records_emit_shared_function_kind(self) -> None:
+        text = "\n".join([
+            "pub fn top_level() {",
+            "    let value = rx.try_recv();",
+            '    format!("{value:?}");',
+            "    let n = items.iter().all(|s| s.ok);",
+            "    let p = text.parse::<u32>();",
+            "    helper();",
+            "}",
+            "fn helper() {}",
+            "pub async fn top_level_async() {}",
+            "impl Thing {",
+            "    pub fn method_like(&self) {}",
+            "}",
+        ])
+
+        records, _edges = rust_records(fixture_file("src/lib.rs", "rust"), text, 2400, 0)
+        by_symbol = {record.symbol: record for record in records if record.record_type == "symbol_definition"}
+
+        self.assertEqual(by_symbol["top_level"].symbol_kind, "function")
+        self.assertEqual(by_symbol["top_level_async"].symbol_kind, "function")
+        self.assertEqual(by_symbol["Thing::method_like"].symbol_kind, "method")
+        # Receiver methods and macros ride in metadata, not edges; the
+        # resolvable callee (helper) stays out of the extra list.
+        self.assertEqual(
+            by_symbol["top_level"].metadata["extra_callee_roles"],
+            ["all", "format", "iter", "parse", "try_recv"],
+        )
+        self.assertNotIn("extra_callee_roles", by_symbol["top_level_async"].metadata)
+
     def test_rust_records_collapse_doc_examples_and_skip_doc_edges(self) -> None:
         text = "\n".join([
             "impl Thing {",
