@@ -797,11 +797,18 @@ def connect(*, readonly: bool | None = None, settings: DatabaseSettings | None =
     try:
         conn = Connection[DictRow].connect(conninfo(settings), row_factory=DICT_ROW_FACTORY)
     except OperationalError as exc:
+        inferred_note = (
+            f" The database name {settings.dbname!r} was inferred from the working directory; "
+            "run from the project root or set PCI_DATABASE_SCOPE_PATH."
+            if settings.database_inferred and settings.dbname
+            else ""
+        )
         raise DatabaseConnectionError(
             "Could not connect to PostgreSQL/pgvector using "
             + connection_hint(settings)
             + ". "
             + connection_configuration_guidance(settings)
+            + inferred_note
             + "\n"
             + str(exc)
         ) from exc

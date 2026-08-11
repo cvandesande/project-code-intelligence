@@ -3608,7 +3608,7 @@ class FindRedundancyToolContractTests(unittest.TestCase):
                 callee_roles=analyze.role_set(["validate_team", "convert_team", "repo.insert", "map_error"]),
             ),
         ]
-        group = analyze.build_group(members, avg_semantic=0.9, avg_text=0.95)
+        group = analyze.build_group(members, avg_semantic=0.9, avg_text=0.95, max_text=1.0)
         snapshot_result = analyze.SnapshotResult(
             label="default/demo", groups=(group,), functions_analyzed=2, clones_folded=0
         )
@@ -3622,6 +3622,7 @@ class FindRedundancyToolContractTests(unittest.TestCase):
         payload = mcp_text_payload(response)
         groups = cast("list[dict[str, object]]", payload["groups"])
         self.assertEqual(groups[0]["text_similarity"], 0.95)
+        self.assertEqual(groups[0]["max_text_similarity"], 1.0)
         self.assertEqual(groups[0]["semantic_similarity"], 0.9)
         self.assertEqual(groups[0]["coherence"], 0.95)
 

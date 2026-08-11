@@ -22,7 +22,13 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from project_code_intelligence.analyze import SnapshotRef, latest_snapshots
+from project_code_intelligence.analyze import (
+    SnapshotRef,
+    coerce_int,
+    coerce_str,
+    latest_snapshots,
+    select_snapshots,
+)
 from project_code_intelligence.exceptions import DatabaseConnectionError
 from project_code_intelligence.mcp import db as mcp_db
 from project_code_intelligence.mcp.status import annotate_status_snapshots
@@ -38,16 +44,6 @@ DEFAULT_NEIGHBOR_THRESHOLD = 0.80
 # Over-fetch factor so parent/child and prefix filtering still leaves N results.
 _NEIGHBOR_OVERFETCH = 5
 _ENTRYPOINT_NAMES = frozenset({"main"})
-
-
-def _coerce_str(value: object) -> str | None:
-    return value if isinstance(value, str) and value else None
-
-
-def _coerce_int(value: object) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    return value
 
 
 def _last_component(symbol: str) -> str:
@@ -220,9 +216,9 @@ def resolve_targets(
     ).fetchall()
     out: list[TargetDef] = []
     for row in rows:
-        record_id = _coerce_str(row["record_id"])
-        sym = _coerce_str(row["symbol"])
-        path = _coerce_str(row["source_path"])
+        record_id = coerce_str(row["record_id"])
+        sym = coerce_str(row["symbol"])
+        path = coerce_str(row["source_path"])
         if record_id is None or sym is None or path is None:
             continue
         out.append(
@@ -230,10 +226,10 @@ def resolve_targets(
                 snapshot=snapshot,
                 record_id=record_id,
                 symbol=sym,
-                symbol_kind=_coerce_str(row["symbol_kind"]) or "",
+                symbol_kind=coerce_str(row["symbol_kind"]) or "",
                 source_path=path,
-                line_start=_coerce_int(row["line_start"]),
-                line_end=_coerce_int(row["line_end"]),
+                line_start=coerce_int(row["line_start"]),
+                line_end=coerce_int(row["line_end"]),
             )
         )
     return out
@@ -259,16 +255,16 @@ def load_callers(conn: db.DbConnection, target: TargetDef) -> list[Caller]:
     ).fetchall()
     out: list[Caller] = []
     for row in rows:
-        path = _coerce_str(row["source_path"])
+        path = coerce_str(row["source_path"])
         if path is None:
             continue
         out.append(
             Caller(
-                symbol=_coerce_str(row["source_symbol"]),
+                symbol=coerce_str(row["source_symbol"]),
                 source_path=path,
-                line=_coerce_int(row["line_start"]),
+                line=coerce_int(row["line_start"]),
                 is_test=bool(row["is_test"]),
-                at_module_level=_coerce_str(row["source_record_type"]) == "module_chunk",
+                at_module_level=coerce_str(row["source_record_type"]) == "module_chunk",
             )
         )
     return out
@@ -289,13 +285,13 @@ def load_callees(conn: db.DbConnection, target: TargetDef) -> list[Callee]:
     ).fetchall()
     out: list[Callee] = []
     for row in rows:
-        target_symbol = _coerce_str(row["target_symbol"])
+        target_symbol = coerce_str(row["target_symbol"])
         if target_symbol is None:
             continue
         out.append(
             Callee(
                 target_symbol=target_symbol,
-                target_path=_coerce_str(row["target_path"]),
+                target_path=coerce_str(row["target_path"]),
                 resolved=bool(row["resolved"]),
             )
         )
@@ -320,7 +316,7 @@ def name_reference_count(conn: db.DbConnection, target: TargetDef) -> int:
         """,
         [target.snapshot.snapshot_id, _last_component(target.symbol), target.record_id],
     ).fetchone()
-    return _coerce_int(row["n"]) or 0 if row is not None else 0
+    return coerce_int(row["n"]) or 0 if row is not None else 0
 
 
 def is_service_entrypoint(conn: db.DbConnection, target: TargetDef) -> bool:
@@ -368,14 +364,14 @@ def load_neighbors(conn: db.DbConnection, target: TargetDef, *, limit: int, thre
     out: list[Neighbor] = []
     target_span = (target.line_start, target.line_end)
     for row in rows:
-        symbol = _coerce_str(row["symbol"])
-        path = _coerce_str(row["source_path"])
+        symbol = coerce_str(row["symbol"])
+        path = coerce_str(row["source_path"])
         similarity = row["similarity"]
         if symbol is None or path is None or not isinstance(similarity, (int, float)) or isinstance(similarity, bool):
             continue
         if float(similarity) < threshold:
             break
-        line = _coerce_int(row["line_start"])
+        line = coerce_int(row["line_start"])
         if is_parent_child((target.symbol, target.source_path, target_span), (symbol, path, (line, line))):
             continue
         out.append(Neighbor(symbol=symbol, source_path=path, line=line, similarity=float(similarity)))
@@ -404,7 +400,7 @@ def load_staleness(conn: db.DbConnection, target: TargetDef) -> Staleness:
     return Staleness(
         head_status=head_status if isinstance(head_status, str) else "unknown",
         dirty=bool(annotated.get("dirty")),
-        index_age_seconds=_coerce_int(annotated.get("index_age_seconds")),
+        index_age_seconds=coerce_int(annotated.get("index_age_seconds")),
         target_file_dirty=target_file_dirty,
     )
 
@@ -594,19 +590,6 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _select_snapshots(
-    snapshots: Sequence[SnapshotRef], *, collection: str | None, repo: str | None
-) -> list[SnapshotRef]:
-    selected: list[SnapshotRef] = []
-    for snapshot in snapshots:
-        if collection is not None and snapshot.collection != collection:
-            continue
-        if repo is not None and snapshot.repo != repo:
-            continue
-        selected.append(snapshot)
-    return selected
-
-
 @dataclass(frozen=True)
 class EvidenceQuery:
     """Filters selecting which definitions to build evidence for."""
@@ -623,7 +606,7 @@ class EvidenceQuery:
 def collect_evidence(conn: db.DbConnection, query: EvidenceQuery) -> list[Evidence]:
     """Assemble evidence bundles for every snapshot/target matching the filters."""
     bundles: list[Evidence] = []
-    for snapshot in _select_snapshots(latest_snapshots(conn), collection=query.collection, repo=query.repo):
+    for snapshot in select_snapshots(latest_snapshots(conn), collection=query.collection, repo=query.repo):
         targets = resolve_targets(conn, snapshot, symbol=query.symbol, source_path=query.source_path, line=query.line)
         bundles.extend(
             build_evidence(conn, target, neighbors=query.neighbors, threshold=query.threshold) for target in targets
@@ -638,22 +621,24 @@ def render_symbol_reports(
     collection: str | None = None,
     repo: str | None = None,
 ) -> list[str]:
-    """Rendered text reports for a symbol, or [] on any lookup failure.
+    """Rendered text reports for a symbol ([] when the symbol is not indexed).
 
-    A convenience wrapper for hook runtimes: it owns the DB connection and
-    swallows connection / missing-index errors so callers stay silent when the
-    index is unavailable.
+    A convenience wrapper for hook runtimes: it owns the DB connection. It
+    raises ``DatabaseConnectionError`` when the index database is unreachable
+    or has no code-intelligence tables, so callers can warn instead of staying
+    silent -- the database name is cwd-inferred, and a wrong working directory
+    looks exactly like a missing index.
     """
-    try:
-        with mcp_db.connect() as conn:
-            if not mcp_db.code_intel_tables_exist(conn):
-                return []
-            bundles = collect_evidence(
-                conn,
-                EvidenceQuery(symbol=symbol, neighbors=neighbors, collection=collection, repo=repo),
+    with mcp_db.connect() as conn:
+        if not mcp_db.code_intel_tables_exist(conn):
+            raise DatabaseConnectionError(
+                "connected, but the database has no code-intelligence tables; run pci-index, "
+                "or check the working directory the database name was inferred from"
             )
-    except DatabaseConnectionError:
-        return []
+        bundles = collect_evidence(
+            conn,
+            EvidenceQuery(symbol=symbol, neighbors=neighbors, collection=collection, repo=repo),
+        )
     return [render_text(bundle) for bundle in bundles]
 
 
