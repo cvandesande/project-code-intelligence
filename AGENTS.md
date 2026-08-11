@@ -17,7 +17,11 @@ MCP tool for what it would do first. Treat the hits as candidate equivalents
 (not a verdict), and read the closest one in source before you write: reuse or
 extend it rather than duplicating. To ask the same question about the code
 already indexed, `find_redundancy` reports groups of functions that repeat one
-call-shape, ranked by whether collapsing them is worth it.
+call-shape, ranked by whether collapsing them is worth it. For a whole-tree
+sweep (staleness, duplicate names, redundancy candidates, static findings),
+run `pci-analyze audit` from the repo root; measured precisions are printed
+in the report, and `docs/verified-duplications-2026-08-11.md` carries the
+source-verified seed list.
 
 There is no add-side hook: call-shape overlap was measured (twice, 30 blind
 reimplementations each) and fires on 11-13% of real duplicates, with no score

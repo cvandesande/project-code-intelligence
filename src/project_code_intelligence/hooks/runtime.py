@@ -8,8 +8,11 @@ Two behaviours, shared across agents:
   by the caller), serialised by a lock so runs never overlap.
 
 Input arrives as JSON on stdin in the agent's native shape; output is written
-to stdout in the agent's native shape. On no-match or any failure the runtime
-stays silent and exits 0, so it never breaks the tool call.
+to stdout in the agent's native shape. On no-match the runtime stays silent
+and exits 0. When a removal IS detected but the index database is unreachable
+(typically a wrong working directory -- the database name is cwd-inferred),
+it emits a one-line warning instead of silence: a silently skipped check reads
+as "no callers found", which is the dangerous direction.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence import evidence, process
+from project_code_intelligence.exceptions import DatabaseConnectionError
 from project_code_intelligence.hooks import detect
 
 if TYPE_CHECKING:
@@ -106,8 +110,15 @@ def _edit_fields(agent: Agent, event: dict[str, object]) -> tuple[str, str, str]
 
 def _build_block(removed: list[str], max_symbols: int) -> str | None:
     reports: list[str] = []
-    for name in removed[:max_symbols]:
-        reports.extend(text for text in evidence.render_symbol_reports(name, neighbors=_NEIGHBORS) if text.strip())
+    try:
+        for name in removed[:max_symbols]:
+            reports.extend(text for text in evidence.render_symbol_reports(name, neighbors=_NEIGHBORS) if text.strip())
+    except DatabaseConnectionError as exc:
+        first_line = str(exc).splitlines()[0]
+        return (
+            f"[pci blast-radius unavailable -- you removed {', '.join(removed)} but the index could not be "
+            f"checked: {first_line} (cwd {Path.cwd()}). Verify callers manually before finalizing.]"
+        )
     if not reports:
         return None
     hidden = len(removed) - max_symbols

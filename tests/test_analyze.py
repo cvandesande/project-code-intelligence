@@ -293,6 +293,7 @@ def _motif(recommendation: str, net_value: float, avg_semantic: float | None = N
         avg_structural=1.0,
         avg_semantic=avg_semantic,
         avg_text=None,
+        max_text=None,
         net_value=net_value,
         value_ratio=0.0,
         redundancy_removed=0.0,

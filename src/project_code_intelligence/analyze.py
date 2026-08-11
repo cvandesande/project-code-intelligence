@@ -106,6 +106,9 @@ class MotifGroup:
     avg_structural: float
     avg_semantic: float | None
     avg_text: float | None
+    # Max pairwise body-text similarity. The average dilutes a byte-identical
+    # pair inside a larger group, so "contains an exact-text copy" needs the max.
+    max_text: float | None
     net_value: float
     value_ratio: float
     redundancy_removed: float
@@ -562,6 +565,7 @@ def build_group(  # noqa: PLR0913 -- one more keyword-only evidence field; see A
     function_symbols: frozenset[str] = frozenset(),
     avg_text: float | None = None,
     *,
+    max_text: float | None = None,
     typed_variants: bool = False,
 ) -> MotifGroup:
     ordered = tuple(sorted(members, key=lambda node: (node.source_path, node.line_start or 0, node.symbol)))
@@ -580,6 +584,7 @@ def build_group(  # noqa: PLR0913 -- one more keyword-only evidence field; see A
         avg_structural=avg_structural,
         avg_semantic=avg_semantic,
         avg_text=avg_text,
+        max_text=max_text,
         net_value=value,
         value_ratio=value_ratio(removed, cost),
         redundancy_removed=removed,
@@ -602,11 +607,13 @@ class SnapshotRef:
     repo: str
 
 
-def _coerce_str(value: object) -> str | None:
+def coerce_str(value: object) -> str | None:
+    """Non-empty string from a DB row value, else None (shared: analyze, evidence, audit)."""
     return value if isinstance(value, str) and value else None
 
 
-def _coerce_int(value: object) -> int | None:
+def coerce_int(value: object) -> int | None:
+    """Int (not bool) from a DB row value, else None (shared: analyze, evidence, audit)."""
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value
@@ -623,9 +630,9 @@ def latest_snapshots(conn: db.DbConnection) -> list[SnapshotRef]:
     ).fetchall()
     out: list[SnapshotRef] = []
     for row in rows:
-        snapshot_id = _coerce_int(row["id"])
-        collection = _coerce_str(row["collection"])
-        repo = _coerce_str(row["repo"])
+        snapshot_id = coerce_int(row["id"])
+        collection = coerce_str(row["collection"])
+        repo = coerce_str(row["repo"])
         if snapshot_id is None or collection is None or repo is None:
             continue
         out.append(SnapshotRef(snapshot_id=snapshot_id, collection=collection, repo=repo))
@@ -645,8 +652,8 @@ def _callees_by_source(conn: db.DbConnection, snapshot_id: int) -> dict[str, lis
     ).fetchall()
     out: dict[str, list[str]] = {}
     for row in rows:
-        source = _coerce_str(row["source_record_id"])
-        target = _coerce_str(row["target_symbol"])
+        source = coerce_str(row["source_record_id"])
+        target = coerce_str(row["target_symbol"])
         if source is None or target is None:
             continue
         out.setdefault(source, []).append(target)
@@ -672,9 +679,9 @@ def load_function_nodes(conn: db.DbConnection, snapshot_id: int) -> list[Functio
     ).fetchall()
     out: list[FunctionNode] = []
     for row in rows:
-        record_id = _coerce_str(row["record_id"])
-        symbol = _coerce_str(row["symbol"])
-        source_path = _coerce_str(row["source_path"])
+        record_id = coerce_str(row["record_id"])
+        symbol = coerce_str(row["symbol"])
+        source_path = coerce_str(row["source_path"])
         if record_id is None or symbol is None or source_path is None:
             continue
         raw_callees = callees.get(record_id, [])
@@ -683,8 +690,8 @@ def load_function_nodes(conn: db.DbConnection, snapshot_id: int) -> list[Functio
                 record_id=record_id,
                 symbol=symbol,
                 source_path=source_path,
-                line_start=_coerce_int(row["line_start"]),
-                line_end=_coerce_int(row["line_end"]),
+                line_start=coerce_int(row["line_start"]),
+                line_end=coerce_int(row["line_end"]),
                 callee_roles=role_set(raw_callees),
                 callee_symbols=frozenset(callee for callee in raw_callees if callee),
             )
@@ -743,23 +750,27 @@ def _group_body_texts(conn: db.DbConnection, snapshot_id: int, member_ids: Seque
     ).fetchall()
     bodies: dict[str, list[str]] = {}
     for row in rows:
-        def_id = _coerce_str(row["def_id"])
-        content = _coerce_str(row["content"])
+        def_id = coerce_str(row["def_id"])
+        content = coerce_str(row["content"])
         if def_id is None or content is None:
             continue
         bodies.setdefault(def_id, []).append(content)
     return {def_id: "\n".join(chunks) for def_id, chunks in bodies.items()}
 
 
-def group_text_similarity(conn: db.DbConnection, snapshot_id: int, member_ids: Sequence[str]) -> float | None:
-    """Average pairwise textual similarity over members' code-chunk children.
+def group_text_similarity(
+    conn: db.DbConnection, snapshot_id: int, member_ids: Sequence[str]
+) -> tuple[float, float] | None:
+    """(average, max) pairwise textual similarity over members' code-chunk children.
 
     Mirrors ``group_semantic_similarity``: the body text lives on the child
     ``code_chunk`` record (``parent_record_id`` = the definition id); a member
     can have several chunks, concatenated here in line order. Textual
     similarity is the strongest true-duplicate signal (byte-identical bodies,
-    copied helpers) that graph shape and embedding cosine can miss. Returns
-    ``None`` when fewer than two members have a chunk.
+    copied helpers) that graph shape and embedding cosine can miss. The max is
+    reported alongside the average because the average dilutes a byte-identical
+    pair inside a larger group. Returns ``None`` when fewer than two members
+    have a chunk.
     """
     texts = _group_body_texts(conn, snapshot_id, member_ids)
     ids = sorted(texts)
@@ -768,7 +779,9 @@ def group_text_similarity(conn: db.DbConnection, snapshot_id: int, member_ids: S
     ratios = [
         body_text_similarity(texts[ids[i]], texts[ids[j]]) for i in range(len(ids)) for j in range(i + 1, len(ids))
     ]
-    return sum(ratios) / len(ratios) if ratios else None
+    if not ratios:
+        return None
+    return sum(ratios) / len(ratios), max(ratios)
 
 
 def group_return_annotations(conn: db.DbConnection, snapshot_id: int, member_ids: Sequence[str]) -> list[str | None]:
@@ -825,7 +838,9 @@ def analyze_snapshot(conn: db.DbConnection, snapshot: SnapshotRef, options: Anal
     groups: list[MotifGroup] = []
     for members in clusters:
         member_ids = [member.record_id for member in members]
-        avg_text = group_text_similarity(conn, snapshot.snapshot_id, member_ids)
+        text_similarity = group_text_similarity(conn, snapshot.snapshot_id, member_ids)
+        avg_text = text_similarity[0] if text_similarity is not None else None
+        max_text = text_similarity[1] if text_similarity is not None else None
         # Only worth a second query once the cheap text-similarity gate has passed.
         annotations = (
             group_return_annotations(conn, snapshot.snapshot_id, member_ids)
@@ -839,6 +854,7 @@ def analyze_snapshot(conn: db.DbConnection, snapshot: SnapshotRef, options: Anal
                 weights,
                 function_symbols,
                 avg_text,
+                max_text=max_text,
                 typed_variants=is_typed_variant_group(avg_text, annotations),
             )
         )
@@ -876,6 +892,7 @@ def _group_to_json(group: MotifGroup) -> dict[str, object]:
         "graph_similarity": round(group.avg_structural, 4),
         "semantic_similarity": None if group.avg_semantic is None else round(group.avg_semantic, 4),
         "text_similarity": None if group.avg_text is None else round(group.avg_text, 4),
+        "max_text_similarity": None if group.max_text is None else round(group.max_text, 4),
         "coherence": round(group.coherence, 4),
         "recommendation": group.recommendation,
         "typed_variants": group.typed_variants,
@@ -1083,8 +1100,13 @@ def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if args and args[0] == "compression":
         return compression_main(args[1:])
+    if args and args[0] == "audit":
+        # audit imports this module, so a top-level import would be a cycle.
+        from project_code_intelligence.audit import audit_main  # noqa: PLC0415
+
+        return audit_main(args[1:])
     parser = argparse.ArgumentParser(prog="pci-analyze", description="Structural analysis passes over the index.")
-    _ = parser.add_argument("subcommand", choices=["compression"], help="Analysis pass to run.")
+    _ = parser.add_argument("subcommand", choices=["compression", "audit"], help="Analysis pass to run.")
     _ = parser.parse_args(args[:1])
     # parse_args above exits on an invalid/missing subcommand; unreachable otherwise.
     return compression_main(args[1:])

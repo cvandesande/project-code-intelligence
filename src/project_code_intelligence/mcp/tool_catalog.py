@@ -222,7 +222,8 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         "Impact of removing/refactoring a symbol: resolved callers (with test and "
         "module-level wiring), test coverage, entry-point and orphan flags, semantic "
         "neighbours, and index staleness. Evidence, not a verdict -- verify live callers "
-        "in source. Call before deleting a definition.",
+        "in source. Call before deleting a definition. Cannot see uncommitted code: the "
+        "index refreshes on git post-commit.",
         {
             "type": "object",
             "properties": {

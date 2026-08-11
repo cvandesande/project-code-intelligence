@@ -102,6 +102,22 @@ class EvidenceRuntimeTests(unittest.TestCase):
         event = {"filePath": "a.py", "oldString": "def gone():\n x\n", "newString": ""}
         self.assertEqual(self._run("opencode", event, reports), "")
 
+    def test_unreachable_index_warns_instead_of_silence(self) -> None:
+        """A removal with an unreachable database must warn, not read as 'no callers'."""
+
+        def raising(_symbol: str, **_: object) -> list[str]:
+            raise runtime.DatabaseConnectionError("Could not connect to PostgreSQL/pgvector using PCI_PG_DB=x")
+
+        out = io.StringIO()
+        event = {"filePath": "a.py", "oldString": "def gone():\n x\n", "newString": ""}
+        with mock.patch.object(runtime.evidence, "render_symbol_reports", raising):
+            code = runtime.run_evidence("opencode", stdin=io.StringIO(json.dumps(event)), stdout=out)
+        self.assertEqual(code, 0)
+        text = out.getvalue()
+        self.assertIn("blast-radius unavailable", text)
+        self.assertIn("gone", text)
+        self.assertIn("Could not connect", text)
+
     def test_claude_write_over_file_reports_removals(self) -> None:
         """A whole-file Write carries no old_string; the old side comes from disk."""
         reports = _StubReports({"gone": ["gone  function  a.py:1-3\ncallers (2)"]})
