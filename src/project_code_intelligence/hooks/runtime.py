@@ -20,6 +20,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -36,11 +37,29 @@ _MAX_SYMBOLS = 2
 _NEIGHBORS = 0
 _LOCK_NAME = "pci-reindex.lock"
 
-# There is deliberately no add-side (anti-slop) hook. Measured twice over 30 blind
+# There is deliberately no add-side DETECTOR. Measured twice over 30 blind
 # reimplementations each, call-shape overlap fires on 11-13% of real duplicates and no
 # threshold separates them from novel code (see HANDOFF.md / git history for the full
-# record). The add-side check is the pull path: search_code_intel_semantic before
+# record). The add-side check stays the pull path: search_code_intel_semantic before
 # writing, find_redundancy for what is already indexed.
+#
+# What the add branch below does emit is the REMINDER, not a verdict: it makes no claim
+# that the new definition duplicates anything, it only restates the AGENTS.md rule at the
+# moment it applies. AGENTS.md loads once per session and then sinks under the
+# transcript; this arrives adjacent to the edit. Cheap, no index query, no threshold.
+_REMINDER = (
+    "[pci add-side -- this edit defines {names}. Per AGENTS.md, call "
+    "search_code_intel_semantic for what it does before writing, and read the closest hit "
+    "in source: reuse or extend it rather than duplicating. No duplicate check was run; "
+    "this is a reminder, not a finding.]"
+)
+_MAX_ADDED = 3
+# Test code is exempt: a new test case has no prior art to reuse, so the reminder is pure
+# noise there. Path gate covers tests/ dirs and *_test / test_* files; the name gate covers
+# test helpers living in a source file. Deletions are NOT exempt -- a removed test is a
+# coverage loss the blast-radius report should still surface.
+_TEST_PATH = re.compile(r"(?:^|/)tests?/|(?:^|/)(?:test_[^/]*|[^/]*_test)\.[A-Za-z]+$")
+_TEST_NAME = re.compile(r"^(?:Test|test_)")
 
 Agent = str  # "opencode" | "claude"
 
@@ -148,13 +167,24 @@ def run_evidence(agent: Agent, *, stdin: IO[str] | None = None, stdout: IO[str] 
     file_path, old_string, new_string = _edit_fields(agent, event)
     if not detect.is_source_path(file_path):
         return 0
+    event_name = _as_str(event.get("hook_event_name")) or "PreToolUse"
     removed = detect.removed_definitions(old_string, new_string)
     if not removed:
+        # Added names = the removal set with the two sides swapped. A rename shows up on
+        # both sides; removal wins, since blast radius is evidence and this is only a nudge.
+        added = (
+            []
+            if _TEST_PATH.search(file_path)
+            else [n for n in detect.removed_definitions(new_string, old_string) if not _TEST_NAME.match(n)]
+        )
+        if added:
+            names = ", ".join(added[:_MAX_ADDED])
+            overflow = f" (+{len(added) - _MAX_ADDED} more)" if len(added) > _MAX_ADDED else ""
+            _emit_evidence(agent, _REMINDER.format(names=names + overflow), out_stream, event_name=event_name)
         return 0
     block = _build_block(removed, _MAX_SYMBOLS)
     if block is None:
         return 0
-    event_name = _as_str(event.get("hook_event_name")) or "PreToolUse"
     _emit_evidence(agent, block, out_stream, event_name=event_name)
     return 0
 
