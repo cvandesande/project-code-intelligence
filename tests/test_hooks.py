@@ -4,17 +4,14 @@ import io
 import json
 import os
 import unittest
-from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, cast
 from unittest import mock
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Mapping
-    from contextlib import AbstractContextManager
+    from collections.abc import Mapping
 
-from project_code_intelligence import analyze
 from project_code_intelligence.hooks import detect, install, runtime
 from project_code_intelligence.hooks.opencode_assets import OPENCODE_FILES
 
@@ -38,14 +35,6 @@ class DetectTests(unittest.TestCase):
     def test_source_path_gate(self) -> None:
         self.assertTrue(detect.is_source_path("a/b.py"))
         self.assertFalse(detect.is_source_path("notes.md"))
-
-    def test_added_definition_on_insert(self) -> None:
-        self.assertEqual(detect.added_definitions("", "def fresh():\n    return 1\n"), ["fresh"])
-
-    def test_rename_is_both_a_removal_and_an_addition(self) -> None:
-        old, new = "def foo():\n pass\n", "def bar():\n pass\n"
-        self.assertEqual(detect.removed_definitions(old, new), ["foo"])
-        self.assertEqual(detect.added_definitions(old, new), ["bar"])
 
 
 def _write_event(path: Path, content: str) -> dict[str, object]:
@@ -141,83 +130,8 @@ class EvidenceRuntimeTests(unittest.TestCase):
             self.assertEqual(self._run("claude", event, reports), "")
         self.assertEqual(reports.calls, [])
 
-
-_ADDED_BODY = "def report_for(symbol):\n    query = build(symbol)\n    rows = collect(query)\n    return render(rows)\n"
-
-
-def _fake_node(symbol: str) -> analyze.FunctionNode:
-    return analyze.FunctionNode(
-        record_id=f"repo/a.py::function::{symbol}",
-        symbol=symbol,
-        source_path="repo/src/a.py",
-        line_start=10,
-        line_end=20,
-        callee_roles=frozenset({"build", "collect", "render"}),
-        callee_symbols=frozenset({"build", "collect", "render"}),
-    )
-
-
-@contextmanager
-def _shape_matches(matches: list[tuple[analyze.FunctionNode, float]]) -> Generator[None]:
-    """Run the shape check against a fixed match list instead of the database."""
-    snapshot = analyze.SnapshotRef(snapshot_id=1, collection="c", repo="r")
-
-    def connect() -> AbstractContextManager[object]:
-        return nullcontext(object())
-
-    def tables_exist(_conn: object) -> bool:
-        return True
-
-    def latest_snapshots(_conn: object) -> list[analyze.SnapshotRef]:
-        return [snapshot]
-
-    def shape_matches(*_args: object, **_kwargs: object) -> list[tuple[analyze.FunctionNode, float]]:
-        return matches
-
-    with mock.patch.multiple(
-        runtime,
-        db=mock.MagicMock(connect=connect, code_intel_tables_exist=tables_exist),
-        analyze=mock.MagicMock(
-            role_set=analyze.role_set,
-            latest_snapshots=latest_snapshots,
-            shape_matches=shape_matches,
-        ),
-    ):
-        yield
-
-
-class AntiSlopShapeTests(unittest.TestCase):
-    """The add-side check is structural: call-shape overlap, never embedding distance."""
-
-    def test_reports_matching_shape(self) -> None:
-        with _shape_matches([(_fake_node("render_symbol_reports"), 0.64)]):
-            block = runtime.shape_report(["report_for"], _ADDED_BODY)
-        self.assertIsNotNone(block)
-        text = cast("str", block)
-        self.assertIn("[pci anti-slop", text)
-        self.assertIn("render_symbol_reports", text)
-        self.assertIn("0.64", text)
-
-    def test_no_match_is_silent(self) -> None:
-        with _shape_matches([]):
-            self.assertIsNone(runtime.shape_report(["report_for"], _ADDED_BODY))
-
-    def test_two_additions_at_once_are_skipped(self) -> None:
-        """Shape is read from the whole new text, so two additions would blend into one."""
-        with _shape_matches([(_fake_node("x"), 0.9)]):
-            self.assertIsNone(runtime.shape_report(["one", "two"], _ADDED_BODY))
-
-    def test_thin_function_is_below_the_role_floor(self) -> None:
-        with _shape_matches([(_fake_node("x"), 0.9)]):
-            self.assertIsNone(runtime.shape_report(["add"], "def add(a, b):\n    return a + b\n"))
-
-    def test_database_failure_stays_silent(self) -> None:
-        broken = mock.MagicMock(connect=mock.MagicMock(side_effect=OSError("no socket")))
-        with mock.patch.object(runtime, "db", broken):
-            self.assertIsNone(runtime.shape_report(["report_for"], _ADDED_BODY))
-
-    def test_removal_wins_over_addition_on_rename(self) -> None:
-        """A rename is both; the removal is the costlier mistake, so it takes the channel."""
+    def test_rename_fires_blast_radius_for_the_old_name(self) -> None:
+        """A rename removes the old name; the evidence hook must report it."""
         reports = _StubReports({"old_name": ["old_name  function  a.py:1-3\ncallers (1)"]})
         event = {
             "hook_event_name": "PreToolUse",
@@ -228,12 +142,9 @@ class AntiSlopShapeTests(unittest.TestCase):
                 "new_string": "def new_name():\n    return build()\n",
             },
         }
-        out = io.StringIO()
-        with mock.patch.object(runtime.evidence, "render_symbol_reports", reports):
-            code = runtime.run_evidence("claude", stdin=io.StringIO(json.dumps(event)), stdout=out)
-        self.assertEqual(code, 0)
-        self.assertIn("[pci blast-radius", out.getvalue())
-        self.assertNotIn("[pci anti-slop", out.getvalue())
+        text = self._run("claude", event, reports)
+        self.assertIn("[pci blast-radius", text)
+        self.assertEqual(reports.calls, ["old_name"])
 
 
 class InstallOpencodeTests(unittest.TestCase):

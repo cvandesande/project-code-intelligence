@@ -19,20 +19,10 @@ extend it rather than duplicating. To ask the same question about the code
 already indexed, `find_redundancy` reports groups of functions that repeat one
 call-shape, ranked by whether collapsing them is worth it.
 
-The add side has a hook too, but do not rely on it. On an edit that adds a
-single definition it reports existing functions with the same IDF-weighted
-call-shape. Measured twice, over 30 blind reimplementations each -- a model given only a
-signature and docstring, never the body, which is what writing new code
-actually looks like -- it fires on 11-13% of them. The ranking is far better
-than the score: the function being duplicated is the top hit of 1385 in about
-60% of cases and in the top 3 in 64-70%. But a real reimplementation scores
-0.36-0.39 median, which is inside the score range of unrelated code, so no
-threshold turns that ranking into a reliable trigger. At 0.40 recall reaches
-about 0.5 and 18-27% of genuinely new functions fire too. The threshold is set where the hook is quiet and
-usually right when it does fire, which means silent on almost every real
-duplicate. Treat silence as no evidence. The pull check above is the one that
-works. Shape is also not meaning: two functions that call the same small helper
-set score high whatever they do.
+There is no add-side hook: call-shape overlap was measured (twice, 30 blind
+reimplementations each) and fires on 11-13% of real duplicates, with no score
+threshold separating them from novel code. The pull check above is the add-side
+protection; hook silence on an add is no evidence of anything.
 
 This repository builds `project-code-intelligence`: an MCP server that gives
 coding agents structured access to indexed Git repositories — semantic
