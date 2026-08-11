@@ -250,10 +250,11 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         },
     ),
     "find_redundancy": ToolDefinition(
-        "Groups of functions that repeat one call-shape motif, ranked by net value "
-        "(redundancy removed minus abstraction cost), each with a recommendation and a "
-        "shared-helper flag. Shape comes from heuristic call edges, so it is evidence, "
-        "not a verdict -- verify in source. Call before adding a function that may already exist.",
+        "Groups of functions that repeat one call-shape motif, ranked by coherence "
+        "(max of semantic/text similarity), each with a net value (redundancy removed minus "
+        "abstraction cost), a recommendation, and a shared-helper flag. Shape comes from "
+        "heuristic call edges, so it is evidence, not a verdict -- verify in source. Call "
+        "before adding a function that may already exist.",
         {
             "type": "object",
             "properties": {

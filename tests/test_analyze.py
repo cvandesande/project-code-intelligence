@@ -132,6 +132,25 @@ class ClusteringTests(unittest.TestCase):
         self.assertEqual(len(clusters), 1)
         self.assertEqual({node.symbol for node in clusters[0]}, {"pair_a", "pair_b"})
 
+    def test_caller_callee_pair_never_grouped(self) -> None:
+        # normalize_rocm_bundle calls bundle_for_gfx_target; their shapes overlap
+        # by composition, not duplication, so they must not cluster together.
+        nodes = [
+            _node(
+                "normalize_rocm_bundle",
+                "svc/rocm.py",
+                10,
+                ["validate_bundle", "convert_bundle", "bundle_for_gfx_target", "map_error"],
+            ),
+            _node(
+                "bundle_for_gfx_target",
+                "svc/rocm.py",
+                40,
+                ["validate_bundle", "convert_bundle", "resolve_target", "map_error"],
+            ),
+        ]
+        self.assertEqual(analyze.cluster_functions(nodes, AnalysisOptions(min_members=2)), [])
+
 
 class GroupBuildingTests(unittest.TestCase):
     def test_build_group_computes_common_shape_and_net_value(self) -> None:
@@ -153,6 +172,15 @@ class GroupBuildingTests(unittest.TestCase):
         self.assertFalse(group.low_coherence)
         # _node() gives every member 21 LOC; keep one, fold the rest.
         self.assertEqual(group.estimated_loc_removed, 21)
+
+    def test_coherence_is_max_of_semantic_and_text_ignoring_none(self) -> None:
+        members = [
+            _node("create_user", "svc/user.py", 10, ["validate_user", "convert_user", "repo.insert", "map_error"]),
+            _node("create_team", "svc/team.py", 10, ["validate_team", "convert_team", "repo.insert", "map_error"]),
+        ]
+        self.assertEqual(analyze.build_group(members, avg_semantic=0.4, avg_text=0.9).coherence, 0.9)
+        self.assertEqual(analyze.build_group(members, avg_semantic=0.9, avg_text=0.4).coherence, 0.9)
+        self.assertEqual(analyze.build_group(members, avg_semantic=None, avg_text=None).coherence, 0.0)
 
     def test_redundancy_squares_structural_agreement(self) -> None:
         members = [_node("a", "m.py", 1, ["x_a", "y_a"]), _node("b", "m.py", 40, ["x_b", "y_b"])]
@@ -269,6 +297,7 @@ def _motif(recommendation: str, net_value: float, avg_semantic: float | None = N
         common_roles=("x", "y", "z"),
         avg_structural=1.0,
         avg_semantic=avg_semantic,
+        avg_text=None,
         net_value=net_value,
         value_ratio=0.0,
         redundancy_removed=0.0,
@@ -295,6 +324,15 @@ class RankingTests(unittest.TestCase):
         ranked = analyze.rank_groups([weak, strong])
         self.assertEqual([group.avg_semantic for group in ranked], [0.9, 0.5])
 
+    def test_coherence_outranks_net_value_within_actionable_tier(self) -> None:
+        # coherence (max of semantic/text similarity) is the primary rank key
+        # within a tier; a lower-net_value group with higher coherence must
+        # still sort first.
+        high_value_low_coherence = _motif("worth-collapsing", net_value=50.0, avg_semantic=0.2)
+        low_value_high_coherence = _motif("parameterize-carefully", net_value=1.0, avg_semantic=0.9)
+        ranked = analyze.rank_groups([high_value_low_coherence, low_value_high_coherence])
+        self.assertEqual([group.net_value for group in ranked], [1.0, 50.0])
+
 
 def _sample_results() -> list[analyze.SnapshotResult]:
     members = [
@@ -319,8 +357,10 @@ class RenderingTests(unittest.TestCase):
         self.assertEqual(groups[0]["common_shape"], ["convert", "insert", "map", "validate"])
         self.assertEqual(groups[0]["graph_similarity"], 1.0)
         self.assertEqual(groups[0]["semantic_similarity"], 0.87)
+        self.assertIsNone(groups[0]["text_similarity"])
         self.assertEqual(groups[0]["recommendation"], "worth-collapsing")
         self.assertEqual(groups[0]["net_value"], 3.0)
+        self.assertEqual(groups[0]["coherence"], 0.87)
         evidence = cast("dict[str, object]", groups[0]["evidence"])
         self.assertEqual(evidence["redundancy_removed"], 4.0)
         self.assertEqual(evidence["abstraction_cost"], 1.0)
@@ -333,12 +373,106 @@ class RenderingTests(unittest.TestCase):
         self.assertIn("validate", text)
         self.assertIn("worth-collapsing", text)
         self.assertIn("Why:", text)
+        self.assertIn("Coherence (rank key): 0.87", text)
         self.assertIn("2 functions analyzed, 0 exact clones folded", text)
 
     def test_empty_results_render_without_error(self) -> None:
         empty = [analyze.SnapshotResult(label="default/demo", groups=(), functions_analyzed=0, clones_folded=0)]
         text = analyze.render_text(empty)
         self.assertIn("no repeated call-shape motifs", text)
+
+
+class TextSimilarityTests(unittest.TestCase):
+    def test_identical_bodies_score_near_one(self) -> None:
+        body = '''def create_user(payload):
+    """Create a user."""
+    validated = validate_user(payload)
+    return repo.insert(validated)
+'''
+        self.assertGreater(analyze.body_text_similarity(body, body), 0.99)
+
+    def test_unrelated_bodies_score_low(self) -> None:
+        left = '''def create_user(payload):
+    """Create a user."""
+    validated = validate_user(payload)
+    return repo.insert(validated)
+'''
+        right = '''def render_report(rows):
+    """Render a text report."""
+    lines = [format_row(row) for row in rows]
+    return "\\n".join(lines)
+'''
+        self.assertLess(analyze.body_text_similarity(left, right), 0.5)
+
+    def test_normalize_drops_def_line_and_docstring(self) -> None:
+        text = '''def create_user(
+    payload,
+):
+    """Create a user.
+
+    Longer description.
+    """
+    validated = validate_user(payload)
+    return repo.insert(validated)
+'''
+        self.assertEqual(
+            analyze.normalize_body_text(text),
+            "    validated = validate_user(payload)\n    return repo.insert(validated)",
+        )
+
+
+def _core_for(annotation: str) -> str | None:
+    """Extracted, normalized return-type core for one raw annotation text."""
+    return analyze.return_annotation(f"def f() -> {annotation}:\n    pass\n")
+
+
+class TypedVariantTests(unittest.TestCase):
+    """The four annotation cases from the task, plus the recommendation-level check."""
+
+    def test_int_bool_str_optionals_are_distinct_cores(self) -> None:
+        # Must fire: cores int/bool/str differ.
+        cores = [_core_for("int | None"), _core_for("bool"), _core_for("str | None")]
+        self.assertEqual(cores, ["int", "bool", "str"])
+        self.assertTrue(analyze.has_typed_variants(cores))
+
+    def test_str_and_bool_are_distinct_cores(self) -> None:
+        # Must fire: str vs bool differ outright.
+        cores = [_core_for("str"), _core_for("bool")]
+        self.assertTrue(analyze.has_typed_variants(cores))
+
+    def test_optional_dict_matches_plain_dict_core(self) -> None:
+        # Must NOT fire: optionality-only difference normalizes to the same core.
+        cores = [_core_for("dict[str, object] | None"), _core_for("dict[str, object]")]
+        self.assertEqual(cores[0], cores[1])
+        self.assertFalse(analyze.has_typed_variants(cores))
+
+    def test_identical_str_annotations_do_not_fire(self) -> None:
+        # Must NOT fire: no difference at all.
+        cores = [_core_for("str"), _core_for("str")]
+        self.assertFalse(analyze.has_typed_variants(cores))
+
+    def test_high_text_similarity_and_differing_cores_downgrade_recommendation(self) -> None:
+        cores = [_core_for("int | None"), _core_for("str | None")]
+        typed_variants = analyze.is_typed_variant_group(0.9, cores)
+        self.assertTrue(typed_variants)
+        # Value/shared/residual that would otherwise say "worth-collapsing" must
+        # still downgrade — collapsing would lose type-checker precision.
+        self.assertEqual(
+            analyze.recommendation(3.0, 4.0, 0.0, has_helper=False, typed_variants=typed_variants),
+            "leave-as-is",
+        )
+
+    def test_build_group_wires_typed_variants_without_touching_net_value(self) -> None:
+        members = [
+            _node("get_int", "svc/opt.py", 10, ["validate_x", "convert_x", "repo.get", "map_error"]),
+            _node("get_str", "svc/opt.py", 40, ["validate_x", "convert_x", "repo.get", "map_error"]),
+        ]
+        collapsible = analyze.build_group(members, avg_semantic=0.9)
+        typed = analyze.build_group(members, avg_semantic=0.9, typed_variants=True)
+        self.assertEqual(typed.net_value, collapsible.net_value)
+        self.assertEqual(collapsible.recommendation, "worth-collapsing")
+        self.assertEqual(typed.recommendation, "leave-as-is")
+        self.assertTrue(typed.typed_variants)
 
 
 class PathPrefixMatchTests(unittest.TestCase):

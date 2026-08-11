@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
-from project_code_intelligence import config, git_utils
+from project_code_intelligence import analyze, config, git_utils
 from project_code_intelligence import db as pci_db
 from project_code_intelligence import server as mcp_server
 from project_code_intelligence.embedding.types import EmbeddingEndpointUnavailableError
@@ -3586,6 +3586,81 @@ class FindRedundancyToolContractTests(unittest.TestCase):
         warnings = cast("list[object]", payload["warnings"])
         kinds = {cast("dict[str, object]", warning)["kind"] for warning in warnings}
         self.assertIn("empty_repo_scope", kinds)
+
+    def test_group_surfaces_text_similarity(self) -> None:
+        # avg_text is evidence-only: it must reach the wire response alongside
+        # the existing graph/semantic similarity fields.
+        members = [
+            analyze.FunctionNode(
+                record_id="a.py::function::create_user::000010",
+                symbol="create_user",
+                source_path="svc/user.py",
+                line_start=10,
+                line_end=20,
+                callee_roles=analyze.role_set(["validate_user", "convert_user", "repo.insert", "map_error"]),
+            ),
+            analyze.FunctionNode(
+                record_id="a.py::function::create_team::000010",
+                symbol="create_team",
+                source_path="svc/team.py",
+                line_start=10,
+                line_end=20,
+                callee_roles=analyze.role_set(["validate_team", "convert_team", "repo.insert", "map_error"]),
+            ),
+        ]
+        group = analyze.build_group(members, avg_semantic=0.9, avg_text=0.95)
+        snapshot_result = analyze.SnapshotResult(
+            label="default/demo", groups=(group,), functions_analyzed=2, clones_folded=0
+        )
+        conn = QueuedConnection([FakeCursor(many=[{"id": 1, "collection": "default", "repo": "demo"}])])
+        with (
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(analyze, "analyze_snapshot", return_value=snapshot_result),
+        ):
+            response = mcp_tools.tool_find_redundancy({})
+        payload = mcp_text_payload(response)
+        groups = cast("list[dict[str, object]]", payload["groups"])
+        self.assertEqual(groups[0]["text_similarity"], 0.95)
+        self.assertEqual(groups[0]["semantic_similarity"], 0.9)
+        self.assertEqual(groups[0]["coherence"], 0.95)
+
+    def test_group_surfaces_typed_variants(self) -> None:
+        # typed_variants is evidence-only: it must reach the wire response, and
+        # a group flagged this way must not be recommended as worth-collapsing.
+        members = [
+            analyze.FunctionNode(
+                record_id="a.py::function::get_int::000010",
+                symbol="get_int",
+                source_path="svc/opt.py",
+                line_start=10,
+                line_end=20,
+                callee_roles=analyze.role_set(["validate_x", "convert_x", "repo.get", "map_error"]),
+            ),
+            analyze.FunctionNode(
+                record_id="a.py::function::get_str::000010",
+                symbol="get_str",
+                source_path="svc/opt.py",
+                line_start=40,
+                line_end=50,
+                callee_roles=analyze.role_set(["validate_x", "convert_x", "repo.get", "map_error"]),
+            ),
+        ]
+        group = analyze.build_group(members, avg_semantic=0.9, avg_text=0.95, typed_variants=True)
+        snapshot_result = analyze.SnapshotResult(
+            label="default/demo", groups=(group,), functions_analyzed=2, clones_folded=0
+        )
+        conn = QueuedConnection([FakeCursor(many=[{"id": 1, "collection": "default", "repo": "demo"}])])
+        with (
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(analyze, "analyze_snapshot", return_value=snapshot_result),
+        ):
+            response = mcp_tools.tool_find_redundancy({})
+        payload = mcp_text_payload(response)
+        groups = cast("list[dict[str, object]]", payload["groups"])
+        self.assertEqual(groups[0]["typed_variants"], True)
+        self.assertEqual(groups[0]["recommendation"], "leave-as-is")
 
 
 if __name__ == "__main__":
