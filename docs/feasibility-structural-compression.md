@@ -218,12 +218,15 @@ the score does not optimize for LOC (LOC stays evidence and a tiebreak).
   charges for reaching across modules.
 - `net_value = redundancy_removed - abstraction_cost` (rank key);
   `value_ratio` is reported as secondary evidence.
-- Dedupe against existing abstractions: if members already share an internal
-  helper realizing the motif, net value is damped and the group is labelled
-  `already-abstracted` — the `compact_json` dogfood lesson, so the tool does not
-  propose re-abstracting what is already factored.
+- Dedupe against existing abstractions: withdrawn after measurement. The
+  original design damped net value and labelled a group `already-abstracted`
+  when members shared an internal callee (the `compact_json` dogfood lesson).
+  Blind labeling (2026-08-11, 26 fresh groups, 40 labeled total) showed the
+  signal classifies at base rate: every real duplicate pair shared some
+  low-level callee they each duplicated code *around*, so the rule buried 9
+  of 17 real finds. `shared_helper` survives as evidence only.
 - Advisory verdicts: `worth-collapsing`, `parameterize-carefully`,
-  `already-abstracted`, `leave-as-is`, each with an evidence breakdown.
+  `leave-as-is`, each with an evidence breakdown.
 
 Deferred (extractor-dependent, Gate C): parameter/return-type divergence. It
 needs real signatures; approximating it from the heuristic graph would assert

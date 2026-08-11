@@ -241,25 +241,17 @@ class GroupBuildingTests(unittest.TestCase):
 
 class NetValueTests(unittest.TestCase):
     def test_recommendation_branches(self) -> None:
-        # existing helper wins regardless of value.
-        self.assertEqual(analyze.recommendation(5.0, 4.0, 0.0, has_helper=True), "already-abstracted")
         # non-positive value -> leave it alone.
-        self.assertEqual(analyze.recommendation(0.0, 4.0, 0.0, has_helper=False), "leave-as-is")
-        self.assertEqual(analyze.recommendation(-2.0, 4.0, 0.0, has_helper=False), "leave-as-is")
+        self.assertEqual(analyze.recommendation(0.0, 4.0, 0.0), "leave-as-is")
+        self.assertEqual(analyze.recommendation(-2.0, 4.0, 0.0), "leave-as-is")
         # positive value but residual heavier than the shared core -> leaky.
-        self.assertEqual(analyze.recommendation(1.0, 3.0, 4.0, has_helper=False), "parameterize-carefully")
+        self.assertEqual(analyze.recommendation(1.0, 3.0, 4.0), "parameterize-carefully")
         # positive value, low residual -> collapse.
-        self.assertEqual(analyze.recommendation(3.0, 4.0, 0.0, has_helper=False), "worth-collapsing")
+        self.assertEqual(analyze.recommendation(3.0, 4.0, 0.0), "worth-collapsing")
 
-    def test_net_value_damped_when_helper_present(self) -> None:
-        undamped = analyze.net_value(4.0, 1.0, has_helper=False)
-        self.assertEqual(undamped, 3.0)
-        # Positive value is damped toward zero so already-abstracted groups rank low.
-        damped = analyze.net_value(4.0, 1.0, has_helper=True)
-        self.assertGreater(damped, 0.0)
-        self.assertLess(damped, undamped)
-        # A negative value is not "improved" by the damping.
-        self.assertEqual(analyze.net_value(1.0, 5.0, has_helper=True), -4.0)
+    def test_net_value_is_removed_minus_introduced(self) -> None:
+        self.assertEqual(analyze.net_value(4.0, 1.0), 3.0)
+        self.assertEqual(analyze.net_value(1.0, 5.0), -4.0)
 
     def test_existing_helper_detects_shared_internal_callee(self) -> None:
         members = [
@@ -279,16 +271,19 @@ class NetValueTests(unittest.TestCase):
         ]
         self.assertEqual(analyze.existing_helper(members, frozenset({"alpha", "beta"})), ())
 
-    def test_build_group_flags_already_abstracted(self) -> None:
+    def test_shared_helper_is_evidence_only(self) -> None:
+        # A shared internal callee is surfaced but never changes the verdict or
+        # the rank key: parallel wrappers around one helper are what real
+        # duplication looks like (measured at base rate on 40 labeled groups).
         members = [
             _node("create_user", "svc/user.py", 10, ["validate_user", "compact_json", "repo.insert", "map_error"]),
             _node("create_team", "svc/team.py", 10, ["validate_team", "compact_json", "repo.insert", "map_error"]),
         ]
         group = analyze.build_group(members, avg_semantic=None, function_symbols=frozenset({"compact_json"}))
         self.assertEqual(group.shared_helper, ("compact_json",))
-        self.assertEqual(group.recommendation, "already-abstracted")
-        # net value damped below the un-damped 3.0 so it ranks low.
-        self.assertLess(group.net_value, 3.0)
+        bare = analyze.build_group(members, avg_semantic=None, function_symbols=frozenset())
+        self.assertEqual(group.recommendation, bare.recommendation)
+        self.assertEqual(group.net_value, bare.net_value)
 
 
 def _motif(recommendation: str, net_value: float, avg_semantic: float | None = None) -> analyze.MotifGroup:
@@ -311,12 +306,12 @@ def _motif(recommendation: str, net_value: float, avg_semantic: float | None = N
 
 class RankingTests(unittest.TestCase):
     def test_actionable_outranks_non_actionable_regardless_of_net_value(self) -> None:
-        # An already-abstracted group with far higher net value must still sort
-        # below any actionable candidate.
-        helper = _motif("already-abstracted", 50.0)
+        # A leave-as-is group with far higher net value must still sort below
+        # any actionable candidate.
+        idle = _motif("leave-as-is", 50.0)
         action = _motif("worth-collapsing", 1.0)
-        ranked = analyze.rank_groups([helper, action])
-        self.assertEqual([group.recommendation for group in ranked], ["worth-collapsing", "already-abstracted"])
+        ranked = analyze.rank_groups([idle, action])
+        self.assertEqual([group.recommendation for group in ranked], ["worth-collapsing", "leave-as-is"])
 
     def test_semantic_breaks_net_value_ties(self) -> None:
         weak = _motif("worth-collapsing", 5.0, avg_semantic=0.5)
@@ -458,7 +453,7 @@ class TypedVariantTests(unittest.TestCase):
         # Value/shared/residual that would otherwise say "worth-collapsing" must
         # still downgrade — collapsing would lose type-checker precision.
         self.assertEqual(
-            analyze.recommendation(3.0, 4.0, 0.0, has_helper=False, typed_variants=typed_variants),
+            analyze.recommendation(3.0, 4.0, 0.0, typed_variants=typed_variants),
             "leave-as-is",
         )
 
