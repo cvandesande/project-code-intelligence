@@ -47,9 +47,6 @@ _ABSTRACTION_BASE = 1.0
 # Extra cost per additional module a shared abstraction must reach across
 # (a new import/dependency edge). In-module groups pay nothing.
 _SPREAD_UNIT = 0.5
-# When members already share an internal helper, positive net value is damped
-# toward zero so "already abstracted" groups rank low, not high.
-_EXISTING_HELPER_FACTOR = 0.1
 # Residual (parameterization) heavier than the shared core => a leaky abstraction.
 _LEAKY_RATIO = 1.0
 # Below this mean pairwise structural agreement, or this semantic cosine, a
@@ -65,8 +62,8 @@ _LOW_COHERENCE_SEMANTIC = 0.6
 _TYPED_VARIANT_TEXT = 0.85
 # Two or more distinct annotated return-type cores => the family varies by type.
 _MIN_DISTINCT_RETURN_CORES = 2
-# Recommendations worth acting on now; ranked above already-abstracted and
-# leave-as-is so actionable candidates surface first.
+# Recommendations worth acting on now; ranked above leave-as-is so actionable
+# candidates surface first.
 _ACTIONABLE_RECOMMENDATIONS = frozenset({"worth-collapsing", "parameterize-carefully"})
 
 _TOKEN_SPLIT = re.compile(r"[^0-9A-Za-z]+")
@@ -100,8 +97,8 @@ class MotifGroup:
     MDL-flavored evidence field: structural complexity removed by a shared
     abstraction minus the complexity that abstraction introduces. Both are
     advisory. ``recommendation`` turns the numbers into a verdict — one of
-    ``worth-collapsing``, ``parameterize-carefully``, ``already-abstracted`` or
-    ``leave-as-is`` — and the cost breakdown fields explain why.
+    ``worth-collapsing``, ``parameterize-carefully`` or ``leave-as-is`` — and
+    the cost breakdown fields explain why.
     """
 
     members: tuple[FunctionNode, ...]
@@ -506,9 +503,14 @@ def redundancy_removed(
 
 
 def existing_helper(members: Sequence[FunctionNode], function_symbols: frozenset[str]) -> tuple[str, ...]:
-    """Internal helper(s) every member already calls — evidence the motif is
-    already abstracted. Members' own symbols are excluded so mutual recursion is
-    not mistaken for a shared helper. Returns names sorted for stable output."""
+    """Internal helper(s) every member already calls — surfaced as evidence only.
+
+    A shared callee is NOT proof the motif is abstracted: blind labeling (n=26,
+    this repo) found every real duplicate pair shared some low-level callee they
+    each duplicated code around, so this signal classifies at base rate. It no
+    longer feeds ``net_value`` or ``recommendation``; a human reads it next to
+    the members. Members' own symbols are excluded so mutual recursion is not
+    mistaken for a shared helper. Returns names sorted for stable output."""
     if not members:
         return ()
     member_names = {_last_component(member.symbol) for member in members}
@@ -522,13 +524,9 @@ def existing_helper(members: Sequence[FunctionNode], function_symbols: frozenset
     return tuple(sorted(internal))
 
 
-def net_value(redundancy: float, cost: float, *, has_helper: bool) -> float:
-    """Rank key: bits saved (removed - introduced). Positive value is damped when
-    an existing helper already realizes the motif, so such groups rank low."""
-    base = redundancy - cost
-    if has_helper and base > 0.0:
-        return base * _EXISTING_HELPER_FACTOR
-    return base
+def net_value(redundancy: float, cost: float) -> float:
+    """Tiebreak evidence: bits saved (removed - introduced)."""
+    return redundancy - cost
 
 
 def value_ratio(redundancy: float, cost: float) -> float:
@@ -538,19 +536,16 @@ def value_ratio(redundancy: float, cost: float) -> float:
     return redundancy / cost
 
 
-def recommendation(
-    value: float, shared: float, residual: float, *, has_helper: bool, typed_variants: bool = False
-) -> str:
+def recommendation(value: float, shared: float, residual: float, *, typed_variants: bool = False) -> str:
     """Advisory verdict — explains, does not assert. See module docstring.
 
     ``typed_variants`` downgrades to ``leave-as-is`` regardless of ``value``:
     a same-body-different-return-type family (see ``is_typed_variant_group``)
     would lose type-checker precision if collapsed, so it is never recommended
-    as worth collapsing. Checked after ``has_helper`` so an already-abstracted
-    group keeps that (more specific) verdict.
+    as worth collapsing. There is deliberately no already-abstracted verdict:
+    the shared-callee signal behind it classified at base rate on 40 labeled
+    groups and buried real duplicates (``shared_helper`` stays as evidence).
     """
-    if has_helper:
-        return "already-abstracted"
     if typed_variants:
         return "leave-as-is"
     if value <= 0.0:
@@ -578,7 +573,7 @@ def build_group(  # noqa: PLR0913 -- one more keyword-only evidence field; see A
     cost = _ABSTRACTION_BASE + residual + spread
     removed = redundancy_removed(ordered, core, avg_structural, weights)
     helper = existing_helper(ordered, function_symbols)
-    value = net_value(removed, cost, has_helper=bool(helper))
+    value = net_value(removed, cost)
     return MotifGroup(
         members=ordered,
         common_roles=core,
@@ -592,7 +587,7 @@ def build_group(  # noqa: PLR0913 -- one more keyword-only evidence field; see A
         residual_cost=residual,
         spread_penalty=spread,
         shared_helper=helper,
-        recommendation=recommendation(value, shared, residual, has_helper=bool(helper), typed_variants=typed_variants),
+        recommendation=recommendation(value, shared, residual, typed_variants=typed_variants),
         typed_variants=typed_variants,
     )
 
@@ -923,8 +918,6 @@ def _render_member_line(member: FunctionNode) -> str:
 
 def _why(group: MotifGroup) -> str:
     """One-line rationale for the recommendation — explain, do not assert."""
-    if group.recommendation == "already-abstracted":
-        return f"members already share internal helper(s): {', '.join(group.shared_helper)}"
     if group.typed_variants:
         return "same body, return types differ — collapsing loses type precision"
     if group.recommendation == "leave-as-is":
