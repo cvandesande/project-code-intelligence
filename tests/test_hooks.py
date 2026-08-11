@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from typing import cast
 from unittest import mock
 
+from project_code_intelligence import analyze
 from project_code_intelligence.exceptions import DatabaseConnectionError
 from project_code_intelligence.hooks import detect, install, runtime, similar
 from project_code_intelligence.hooks.opencode_assets import OPENCODE_FILES
@@ -35,6 +36,46 @@ class DetectTests(unittest.TestCase):
         self.assertTrue(detect.is_source_path("a/b.py"))
         self.assertFalse(detect.is_source_path("notes.md"))
 
+    def test_detects_rust_fn_through_every_modifier_order(self) -> None:
+        """.rs was in SOURCE_EXT while `fn` matched nothing, so Rust definitions were
+        invisible to both sides of the hook. Methods indent inside impl blocks."""
+        blob = (
+            "fn plain() {}\n"
+            "pub fn public() {}\n"
+            "pub(crate) fn scoped() {}\n"
+            "pub async fn public_async() {}\n"
+            "const fn constant() {}\n"
+            'pub unsafe extern "C" fn foreign() {}\n'
+            "impl Thing {\n"
+            "    pub fn method(&self) {}\n"
+            "}\n"
+        )
+        self.assertEqual(
+            detect.defined_names(blob),
+            {"plain", "public", "scoped", "public_async", "constant", "foreign", "method"},
+        )
+
+    def test_rust_removal_is_a_removal(self) -> None:
+        self.assertEqual(detect.removed_definitions("pub fn gone(a: u32) -> u32 {\n    a\n}\n", ""), ["gone"])
+
+    def test_gate_patterns_match_the_opencode_copy_verbatim(self) -> None:
+        """detect.py and LIB_JS carry the same patterns and nothing enforced it until now --
+        the opencode plugin uses its JS copy as the gate, so drift silently drops events."""
+        lib_js = OPENCODE_FILES["lib/pci-evidence-logic.js"]
+        for source in detect.DEF_SOURCES:
+            self.assertIn(source, lib_js, f"pattern missing from LIB_JS: {source}")
+        self.assertEqual(lib_js.count("/g,\n"), len(detect.DEF_SOURCES))
+
+    def test_checked_in_opencode_assets_match_their_source(self) -> None:
+        """.opencode/ holds this repo's own installed copies and they are tracked, so editing
+        OPENCODE_FILES without rewriting them leaves a stale gate running here."""
+        root = Path(__file__).resolve().parent.parent
+        for rel, text in OPENCODE_FILES.items():
+            installed = root / ".opencode" / rel
+            if not installed.is_file():
+                continue  # not installed in this checkout; install_opencode covers that path
+            self.assertEqual(installed.read_text(encoding="utf-8"), text, f"stale copy: {rel}")
+
     def test_definition_slice_stops_before_the_next_definition(self) -> None:
         """The slice is a query vector, so a neighbouring signature must not bleed into it."""
         text = "def wanted(x):\n    y = x\n    return y\n\ndef other():\n    pass\n"
@@ -51,6 +92,103 @@ class DetectTests(unittest.TestCase):
     def test_definition_slice_caps_runaway_bodies(self) -> None:
         text = "def big():\n" + "".join(f"    line{i} = {i}\n" for i in range(200))
         self.assertEqual(len(detect.definition_slices(text, ["big"], max_lines=10)["big"].splitlines()), 10)
+
+
+class _StubCursor:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self._rows = rows
+
+    def fetchall(self) -> list[dict[str, object]]:
+        return self._rows
+
+
+class _StubConn:
+    """Enough of a connection for similar.nearest: one canned result set per query."""
+
+    def __init__(self, batches: list[list[dict[str, object]]]) -> None:
+        self.batches = batches
+        self.queries = 0
+
+    def execute(self, _sql: str, _params: object = None) -> _StubCursor:
+        rows = self.batches[min(self.queries, len(self.batches) - 1)]
+        self.queries += 1
+        return _StubCursor(rows)
+
+    def __enter__(self) -> _StubConn:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+
+def _one_snapshot(_conn: object) -> list[analyze.SnapshotRef]:
+    return [analyze.SnapshotRef(snapshot_id=1, collection="c", repo="r")]
+
+
+def _no_snapshots(_conn: object) -> list[analyze.SnapshotRef]:
+    return []
+
+
+def _fake_embedding(_text: str) -> tuple[str, int]:
+    return "[0]", 1
+
+
+def _row(symbol: str, distance: float, *, line: object = 10, path: str = "repo/src/pkg/mod.py") -> dict[str, object]:
+    return {"symbol": symbol, "source_path": path, "line_start": line, "distance": distance}
+
+
+class SimilarTests(unittest.TestCase):
+    """The query path in similar.nearest, with the index and the embedder stubbed out."""
+
+    @staticmethod
+    def _nearest(batches: list[list[dict[str, object]]]) -> list[similar.Hit]:
+        conn = _StubConn(batches)
+        with (
+            mock.patch.object(similar.mcp_db, "connect", lambda: conn),
+            mock.patch.object(similar.analyze, "latest_snapshots", _one_snapshot),
+            mock.patch.object(similar.semantic, "query_embedding", _fake_embedding),
+        ):
+            return similar.nearest({"brand_new": "def brand_new():\n    pass"})
+
+    def test_hits_beyond_the_gate_are_dropped(self) -> None:
+        hits = SimilarTests._nearest([[_row("close_one", 0.20), _row("far_one", similar.GATE + 0.05)]])
+        self.assertEqual([hit.symbol for hit in hits], ["close_one"])
+
+    def test_self_match_is_not_prior_art(self) -> None:
+        """An in-place rewrite matches its own indexed chunk; 'similar to itself' is noise."""
+        hits = SimilarTests._nearest([[_row("Klass.brand_new", 0.01), _row("other", 0.10)]])
+        self.assertEqual([hit.symbol for hit in hits], ["other"])
+
+    def test_rows_with_unusable_columns_are_skipped_not_crashed(self) -> None:
+        hits = SimilarTests._nearest([
+            [_row("ok", 0.10, line=None), {"symbol": None, "source_path": None, "line_start": 1, "distance": 0.1}]
+        ])
+        self.assertEqual([(hit.symbol, hit.line_start) for hit in hits], [("ok", None)])
+
+    def test_results_are_sorted_and_capped(self) -> None:
+        rows = [_row(f"s{i}", 0.20 - i * 0.01) for i in range(5)]
+        hits = SimilarTests._nearest([rows])
+        self.assertEqual(len(hits), similar.MAX_HITS)
+        self.assertEqual([hit.distance for hit in hits], sorted(hit.distance for hit in hits))
+
+    def test_missing_snapshot_returns_nothing_rather_than_raising(self) -> None:
+        conn = _StubConn([[]])
+        with (
+            mock.patch.object(similar.mcp_db, "connect", lambda: conn),
+            mock.patch.object(similar.analyze, "latest_snapshots", _no_snapshots),
+        ):
+            self.assertEqual(similar.nearest({"a": "def a():\n    pass"}), [])
+
+    def test_gate_env_override_is_read_and_bad_values_ignored(self) -> None:
+        """The gate does not transfer across languages, so a repo must be able to retune it."""
+        with mock.patch.dict(os.environ, {similar.GATE_ENV: "0.40"}):
+            self.assertAlmostEqual(similar.gate(), 0.40)
+        with mock.patch.dict(os.environ, {similar.GATE_ENV: "not-a-number"}):
+            self.assertAlmostEqual(similar.gate(), similar.GATE)
+
+    def test_render_strips_the_repo_prefix(self) -> None:
+        hit = similar.Hit(added_name="new", symbol="old", source_path="repo/src/a.py", line_start=7, distance=0.123)
+        self.assertEqual(hit.render("repo"), "  0.12  old  src/a.py:7  (vs your new)")
 
 
 def _write_event(path: Path, content: str) -> dict[str, object]:

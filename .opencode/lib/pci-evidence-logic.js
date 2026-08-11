@@ -12,6 +12,7 @@ export const SOURCE_EXT = /\.(py|go|sh|bash|c|h|rs|js|ts|java)$/
 const DEF_PATTERNS = [
   /(?:^|\n)[ \t]*(?:async[ \t]+)?(?:def|class|func|type)[ \t]+([A-Za-z_]\w*)/g,
   /(?:^|\n)[ \t]*func[ \t]*\([^)]*\)[ \t]*([A-Za-z_]\w*)/g,
+  /(?:^|\n)[ \t]*(?:(?:pub(?:\([^)]*\))?|const|async|unsafe|extern|default|"\w*")[ \t]+)*fn[ \t]+([A-Za-z_]\w*)/g,
   /(?:^|\n)[ \t]*(?:function[ \t]+)?([A-Za-z_]\w*)[ \t]*\(\)[ \t]*\{/g,
 ]
 

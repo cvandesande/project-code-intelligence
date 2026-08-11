@@ -17,11 +17,28 @@ if TYPE_CHECKING:
 SOURCE_EXT = re.compile(r"\.(?:py|go|sh|bash|c|h|rs|js|ts|java)$")
 
 # Definition forms across the indexed languages; each capture group is the name.
-_DEF_PATTERNS = (
-    re.compile(r"(?:^|\n)[ \t]*(?:async[ \t]+)?(?:def|class|func|type)[ \t]+([A-Za-z_]\w*)"),
-    re.compile(r"(?:^|\n)[ \t]*func[ \t]*\([^)]*\)[ \t]*([A-Za-z_]\w*)"),  # go method (receiver)
-    re.compile(r"(?:^|\n)[ \t]*(?:function[ \t]+)?([A-Za-z_]\w*)[ \t]*\(\)[ \t]*\{"),  # shell function
+#
+# Kept as source strings, not compiled literals, so test_hooks can assert each one appears
+# verbatim in the opencode LIB_JS copy. The "keep the two in sync" note below was previously
+# unenforced, and the Rust pattern is exactly the kind of addition that drifts.
+DEF_SOURCES = (
+    r"(?:^|\n)[ \t]*(?:async[ \t]+)?(?:def|class|func|type)[ \t]+([A-Za-z_]\w*)",
+    r"(?:^|\n)[ \t]*func[ \t]*\([^)]*\)[ \t]*([A-Za-z_]\w*)",  # go method (receiver)
+    # Rust fn, free or indented in an impl block. One repeated modifier group rather than a
+    # fixed order: pub / pub(crate) / pub(in a::b), const, async, unsafe, default, and extern
+    # plus its "abi" as two tokens, in any combination. Permissive on purpose -- everything it
+    # admits still has to be followed by `fn name`, so call sites do not match.
+    #
+    # .rs has always been in SOURCE_EXT while `fn` matched nothing, so before this pattern the
+    # hook was silent on every Rust definition -- on the delete side as much as the add side.
+    # Measured on a Rust repo: removing a function with 9 live callers produced no output.
+    #
+    # Only fn is covered. struct/enum/trait are indexed but neither blast_radius nor the
+    # add-side query ranks them (both filter to symbol_kind function/method).
+    r'(?:^|\n)[ \t]*(?:(?:pub(?:\([^)]*\))?|const|async|unsafe|extern|default|"\w*")[ \t]+)*fn[ \t]+([A-Za-z_]\w*)',
+    r"(?:^|\n)[ \t]*(?:function[ \t]+)?([A-Za-z_]\w*)[ \t]*\(\)[ \t]*\{",  # shell function
 )
+_DEF_PATTERNS = tuple(re.compile(source) for source in DEF_SOURCES)
 
 
 def is_source_path(path: str) -> bool:
