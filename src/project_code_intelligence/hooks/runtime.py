@@ -3,9 +3,7 @@
 Two behaviours, shared across agents:
 
 * ``evidence`` -- on an edit that removed a definition, emit that symbol's
-  blast radius so the agent can judge "safe to cut?" while the change is fresh;
-  on an edit that added one, emit existing functions sharing its call-shape so
-  the agent can judge "does this already exist?" before the duplicate lands.
+  blast radius so the agent can judge "safe to cut?" while the change is fresh.
 * ``reindex`` -- refresh the code index in the background (debounced/coalesced
   by the caller), serialised by a lock so runs never overlap.
 
@@ -20,13 +18,11 @@ import fcntl
 import json
 import os
 import sys
-from operator import itemgetter
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from project_code_intelligence import analyze, evidence, process, records
+from project_code_intelligence import evidence, process
 from project_code_intelligence.hooks import detect
-from project_code_intelligence.mcp import db
 
 if TYPE_CHECKING:
     from typing import IO
@@ -36,39 +32,11 @@ _MAX_SYMBOLS = 2
 _NEIGHBORS = 0
 _LOCK_NAME = "pci-reindex.lock"
 
-# Anti-slop on add. Structural, not semantic: embedding similarity does not separate a
-# duplicate from code that merely resembles its neighbours (a real duplicate measured
-# 0.57 against 0.55 for unrelated new code), so a cosine hook would fire on every
-# addition. IDF-weighted call-shape overlap is the signal the compression pass already
-# clusters on, and it does separate.
-#
-# Do not trust this hook to catch a duplicate. Measured twice, 30 blind
-# reimplementations each (a model handed only a signature and docstring, never the body
-# -- the input distribution that matters), it fires on 11-13% of them at this threshold:
-#   * rank carries real signal: the duplicated function is the top hit of 1385 about 60%
-#     of the time, top 3 in 64-70%, top 10 in 87%;
-#   * absolute score does not: a real reimplementation scores 0.36-0.39 median, inside
-#     the range unrelated code produces, so no threshold separates them. At 0.40 recall
-#     reaches 0.5 but 18-27% of genuinely-novel functions also fire, and this channel is
-#     shared with the removal hook -- noise there costs more than the recall is worth.
-# The second run gave the model the target module's import block, to rule out that the
-# first had starved it of real helper names. It changed almost nothing: only 26% of the
-# callees a fresh implementation writes name anything already in the repo (23% before).
-# That is not a harness artifact, it is what new code looks like.
-# The threshold is therefore set for quiet, not for recall, and equals the compression
-# pass's own so there is no second magic number to drift.
-#
-# An earlier calibration over the index put recall near 1.00. It scored each function
-# against its OWN text, where extraction agrees almost exactly -- a tautology, not a
-# measurement. Hand-written "plausible duplicate" probes are just as optimistic: one
-# scored 0.66 where the blind rewrite of the same function scored 0.13. Re-measure with
-# blind rewrites, or not at all.
-#
-# The minimum role count drops functions too thin to have a shape: 25% of functions
-# here (353 of 1385) never reach it and the hook is silent on them.
-_SHAPE_THRESHOLD = analyze.DEFAULT_THRESHOLD
-_SHAPE_MIN_ROLES = analyze.DEFAULT_MIN_ROLES
-_SHAPE_MATCHES = 3
+# There is deliberately no add-side (anti-slop) hook. Measured twice over 30 blind
+# reimplementations each, call-shape overlap fires on 11-13% of real duplicates and no
+# threshold separates them from novel code (see HANDOFF.md / git history for the full
+# record). The add-side check is the pull path: search_code_intel_semantic before
+# writing, find_redundancy for what is already indexed.
 
 Agent = str  # "opencode" | "claude"
 
@@ -152,41 +120,6 @@ def _build_block(removed: list[str], max_symbols: int) -> str | None:
     return header + "\n" + "\n---\n".join(report.rstrip("\n") for report in reports)
 
 
-def shape_report(added: list[str], new_string: str) -> str | None:
-    """Existing functions whose call-shape matches the single definition being added.
-
-    Only fires for a one-definition edit: the shape is read from the whole new text, so
-    two additions at once would blend into one meaningless shape. Silent on any failure.
-    """
-    if len(added) != 1:
-        return None
-    roles = analyze.role_set(records.extract_referenced_symbols(new_string))
-    if len(roles) < _SHAPE_MIN_ROLES:
-        return None
-    try:
-        with db.connect() as conn:
-            if not db.code_intel_tables_exist(conn):
-                return None
-            matches = [
-                (node, score)
-                for snapshot in analyze.latest_snapshots(conn)
-                for node, score in analyze.shape_matches(
-                    conn, snapshot, roles, threshold=_SHAPE_THRESHOLD, limit=_SHAPE_MATCHES
-                )
-            ]
-    except Exception:  # noqa: BLE001 -- a hook never breaks the tool call it decorates
-        return None
-    if not matches:
-        return None
-    ranked = sorted(matches, key=itemgetter(1), reverse=True)[:_SHAPE_MATCHES]
-    header = (
-        f"[pci anti-slop -- '{added[0]}' has the call-shape of existing code. "
-        "Evidence, not a verdict: read these before duplicating, then reuse, extend, or proceed.]"
-    )
-    lines = [f"  {score:.2f}  {node.symbol}  {node.source_path}:{node.line_start}" for node, score in ranked]
-    return header + "\n" + "\n".join(lines)
-
-
 def _emit_evidence(agent: Agent, block: str, out: IO[str], *, event_name: str) -> None:
     if agent == "claude":
         # Echo the firing event (PreToolUse/PostToolUse) so hookSpecificOutput matches it.
@@ -205,13 +138,9 @@ def run_evidence(agent: Agent, *, stdin: IO[str] | None = None, stdout: IO[str] 
     if not detect.is_source_path(file_path):
         return 0
     removed = detect.removed_definitions(old_string, new_string)
-    # A rename reads as both a removal and an addition; the removal is the costlier
-    # mistake, so it wins and the shape check never competes with it.
-    block = (
-        _build_block(removed, _MAX_SYMBOLS)
-        if removed
-        else shape_report(detect.added_definitions(old_string, new_string), new_string)
-    )
+    if not removed:
+        return 0
+    block = _build_block(removed, _MAX_SYMBOLS)
     if block is None:
         return 0
     event_name = _as_str(event.get("hook_event_name")) or "PreToolUse"

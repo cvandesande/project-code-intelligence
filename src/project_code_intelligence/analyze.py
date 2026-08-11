@@ -23,7 +23,6 @@ import re
 import sys
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
-from operator import itemgetter
 from typing import TYPE_CHECKING
 
 from project_code_intelligence.exceptions import DatabaseConnectionError
@@ -812,29 +811,6 @@ class SnapshotResult:
     groups: tuple[MotifGroup, ...]
     functions_analyzed: int
     clones_folded: int
-
-
-def shape_matches(
-    conn: db.DbConnection,
-    snapshot: SnapshotRef,
-    roles: frozenset[str],
-    *,
-    threshold: float,
-    limit: int,
-) -> list[tuple[FunctionNode, float]]:
-    """Indexed functions whose call-shape matches ``roles``, closest first.
-
-    The same IDF-weighted role overlap the compression pass clusters on, asked of
-    one candidate shape instead of every pair -- so an unindexed function (one
-    being written right now) can be checked against what is already indexed.
-    """
-    if not roles:
-        return []
-    nodes = load_function_nodes(conn, snapshot.snapshot_id)
-    weights = role_weights(nodes)
-    scored = [(node, weighted_jaccard(node.callee_roles, roles, weights)) for node in nodes]
-    ranked = sorted((pair for pair in scored if pair[1] >= threshold), key=itemgetter(1), reverse=True)
-    return ranked[:limit]
 
 
 def path_matches_prefix(source_path: str, prefix: str) -> bool:
