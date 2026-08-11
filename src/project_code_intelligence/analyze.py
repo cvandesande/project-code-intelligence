@@ -23,7 +23,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence.exceptions import DatabaseConnectionError
 from project_code_intelligence.mcp import db as mcp_db
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from project_code_intelligence import db
+    from project_code_intelligence.models import JsonObject
 
 # --- tuning constants (all overridable from the CLI) ---------------------------
 DEFAULT_THRESHOLD = 0.6
@@ -664,7 +665,7 @@ def load_function_nodes(conn: db.DbConnection, snapshot_id: int) -> list[Functio
     callees = _callees_by_source(conn, snapshot_id)
     rows = conn.execute(
         """
-        SELECT r.record_id, r.symbol, r.source_path, r.line_start, r.line_end
+        SELECT r.record_id, r.symbol, r.source_path, r.line_start, r.line_end, r.metadata
         FROM project_code_intel_records r
         JOIN project_code_intel_files f
           ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
@@ -672,6 +673,7 @@ def load_function_nodes(conn: db.DbConnection, snapshot_id: int) -> list[Functio
           AND r.record_type = 'symbol_definition'
           AND r.symbol IS NOT NULL
           AND r.symbol_kind IN ('function', 'method', 'shell_function')
+          AND r.file_role != 'test'
           AND f.is_source = true
           AND f.is_test = false
         """,
@@ -684,7 +686,12 @@ def load_function_nodes(conn: db.DbConnection, snapshot_id: int) -> list[Functio
         source_path = coerce_str(row["source_path"])
         if record_id is None or symbol is None or source_path is None:
             continue
-        raw_callees = callees.get(record_id, [])
+        raw_callees = list(callees.get(record_id, []))
+        raw_metadata = row["metadata"]
+        metadata = cast("JsonObject", raw_metadata) if isinstance(raw_metadata, dict) else {}
+        extra = metadata.get("extra_callee_roles")
+        if isinstance(extra, list):
+            raw_callees.extend(role for role in extra if isinstance(role, str))
         out.append(
             FunctionNode(
                 record_id=record_id,
