@@ -22,6 +22,7 @@ import math
 import re
 import sys
 from dataclasses import dataclass, field
+from operator import itemgetter
 from typing import TYPE_CHECKING
 
 from project_code_intelligence.exceptions import DatabaseConnectionError
@@ -145,6 +146,7 @@ class AnalysisOptions:
     min_roles: int = DEFAULT_MIN_ROLES
     min_members: int = DEFAULT_MIN_MEMBERS
     limit: int = DEFAULT_LIMIT
+    path_prefix: str | None = None
 
 
 # --- pure analysis logic (no database) -----------------------------------------
@@ -596,6 +598,37 @@ class SnapshotResult:
     clones_folded: int
 
 
+def shape_matches(
+    conn: db.DbConnection,
+    snapshot: SnapshotRef,
+    roles: frozenset[str],
+    *,
+    threshold: float,
+    limit: int,
+) -> list[tuple[FunctionNode, float]]:
+    """Indexed functions whose call-shape matches ``roles``, closest first.
+
+    The same IDF-weighted role overlap the compression pass clusters on, asked of
+    one candidate shape instead of every pair -- so an unindexed function (one
+    being written right now) can be checked against what is already indexed.
+    """
+    if not roles:
+        return []
+    nodes = load_function_nodes(conn, snapshot.snapshot_id)
+    weights = role_weights(nodes)
+    scored = [(node, weighted_jaccard(node.callee_roles, roles, weights)) for node in nodes]
+    ranked = sorted((pair for pair in scored if pair[1] >= threshold), key=itemgetter(1), reverse=True)
+    return ranked[:limit]
+
+
+def path_matches_prefix(source_path: str, prefix: str) -> bool:
+    """Match a stored (repo-prefixed) path against a repo-relative or repo-prefixed prefix."""
+    if source_path.startswith(prefix):
+        return True
+    _, _, repo_relative = source_path.partition("/")
+    return repo_relative.startswith(prefix)
+
+
 def analyze_snapshot(conn: db.DbConnection, snapshot: SnapshotRef, options: AnalysisOptions) -> SnapshotResult:
     nodes = load_function_nodes(conn, snapshot.snapshot_id)
     unique, folded = dedupe_clones(nodes)
@@ -611,6 +644,10 @@ def analyze_snapshot(conn: db.DbConnection, snapshot: SnapshotRef, options: Anal
         )
         for members in clusters
     ]
+    if options.path_prefix:
+        # Filter before ranking so the limit is spent on groups that touch the caller's area.
+        prefix = options.path_prefix
+        groups = [group for group in groups if any(path_matches_prefix(m.source_path, prefix) for m in group.members)]
     # Actionable groups first, then net value; LOC is only a tiebreak, never the target.
     ranked = rank_groups(groups)
     return SnapshotResult(
@@ -654,6 +691,11 @@ def _group_to_json(group: MotifGroup) -> dict[str, object]:
             "low_coherence": group.low_coherence,
         },
     }
+
+
+def group_to_json(group: MotifGroup) -> dict[str, object]:
+    """Public structured form of one motif group (for the MCP tool and JSON CLI)."""
+    return _group_to_json(group)
 
 
 def render_json(results: Sequence[SnapshotResult]) -> str:
@@ -742,6 +784,7 @@ def render_text(results: Sequence[SnapshotResult]) -> str:
 class AnalyzeNamespace(argparse.Namespace):
     collection: str | None = None
     repo: str | None = None
+    path_prefix: str | None = None
     threshold: float = DEFAULT_THRESHOLD
     min_roles: int = DEFAULT_MIN_ROLES
     min_members: int = DEFAULT_MIN_MEMBERS
@@ -757,6 +800,11 @@ def _analyze_parser() -> argparse.ArgumentParser:
     )
     _ = parser.add_argument("--collection", help="Restrict to one collection/workspace.")
     _ = parser.add_argument("--repo", help="Restrict to one repo within the collection(s).")
+    _ = parser.add_argument(
+        "--path-prefix",
+        dest="path_prefix",
+        help="Only report groups with a member under this path prefix (repo-relative or repo-prefixed).",
+    )
     _ = parser.add_argument(
         "--threshold",
         type=float,
@@ -785,12 +833,15 @@ def _analyze_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _select_snapshots(snapshots: Sequence[SnapshotRef], parsed: AnalyzeNamespace) -> list[SnapshotRef]:
+def select_snapshots(
+    snapshots: Sequence[SnapshotRef], *, collection: str | None, repo: str | None
+) -> list[SnapshotRef]:
+    """Snapshots matching an optional collection/repo scope (public: CLI and MCP)."""
     selected: list[SnapshotRef] = []
     for snapshot in snapshots:
-        if parsed.collection is not None and snapshot.collection != parsed.collection:
+        if collection is not None and snapshot.collection != collection:
             continue
-        if parsed.repo is not None and snapshot.repo != parsed.repo:
+        if repo is not None and snapshot.repo != repo:
             continue
         selected.append(snapshot)
     return selected
@@ -804,13 +855,14 @@ def compression_main(argv: list[str] | None = None) -> int:
         min_roles=parsed.min_roles,
         min_members=parsed.min_members,
         limit=parsed.limit,
+        path_prefix=parsed.path_prefix,
     )
     try:
         with mcp_db.connect() as conn:
             if not mcp_db.code_intel_tables_exist(conn):
                 _ = sys.stderr.write("pci-analyze: no code-intelligence tables; run pci-index first\n")
                 return 1
-            snapshots = _select_snapshots(latest_snapshots(conn), parsed)
+            snapshots = select_snapshots(latest_snapshots(conn), collection=parsed.collection, repo=parsed.repo)
             if not snapshots:
                 _ = sys.stderr.write("pci-analyze: no matching snapshots found\n")
                 return 1

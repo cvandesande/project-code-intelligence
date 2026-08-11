@@ -3543,5 +3543,50 @@ class BlastRadiusToolContractTests(unittest.TestCase):
         self.assertIn("symbol_not_found", kinds)
 
 
+class FindRedundancyToolContractTests(unittest.TestCase):
+    def test_advertised_as_read_tool(self) -> None:
+        self.assertIn("find_redundancy", TOOL_DEFINITIONS)
+        self.assertIn("find_redundancy", TOOL_INPUT_MODELS)
+        self.assertFalse(TOOL_DEFINITIONS["find_redundancy"].write_tool)
+        names = {cast("dict[str, object]", tool)["name"] for tool in mcp_tools.advertised_tools()}
+        self.assertIn("find_redundancy", names)
+
+    def test_input_rejects_unknown_property(self) -> None:
+        with self.assertRaises((McpProtocolError, McpProtocolTypeError)):
+            _ = validate_tool_arguments(TOOL_DEFINITIONS["find_redundancy"], {"limit": 5, "bogus": 1})
+
+    def test_input_accepts_prefix_and_limit(self) -> None:
+        validated = validate_tool_arguments(
+            TOOL_DEFINITIONS["find_redundancy"], {"source_path_prefix": "src/pkg", "limit": 3}
+        )
+        self.assertEqual(cast("dict[str, object]", validated)["source_path_prefix"], "src/pkg")
+
+    def test_input_rejects_limit_over_maximum(self) -> None:
+        with self.assertRaises((McpProtocolError, McpProtocolTypeError)):
+            _ = validate_tool_arguments(TOOL_DEFINITIONS["find_redundancy"], {"limit": 51})
+
+    def test_reports_when_schema_not_initialized(self) -> None:
+        with (
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=False),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(FakeConnection())),
+        ):
+            response = mcp_tools.tool_find_redundancy({})
+        self.assertIn("error", mcp_text_payload(response))
+
+    def test_empty_scope_warns_and_finds_nothing(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[])])  # latest_snapshots -> no snapshots
+        with (
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_find_redundancy({"repo": "absent"})
+        payload = mcp_text_payload(response)
+        self.assertEqual(payload["found"], False)
+        self.assertEqual(payload["count"], 0)
+        warnings = cast("list[object]", payload["warnings"])
+        kinds = {cast("dict[str, object]", warning)["kind"] for warning in warnings}
+        self.assertIn("empty_repo_scope", kinds)
+
+
 if __name__ == "__main__":
     _ = unittest.main()

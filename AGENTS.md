@@ -4,19 +4,35 @@ This repo has a project-code-intelligence MCP server. For non-trivial code
 discovery, use it before broad rg/find or speculative file reads. Use rg/direct
 reads for known small files and final verification.
 
-Before you remove or rename a definition (function, class, method), call the
-`blast_radius` MCP tool for that symbol first. Treat its callers, test
-coverage, and entry-point/orphan flags as evidence (not a verdict), and verify
-live callers in source before finalizing the cut. The evidence hook injects the
-same bundle on an edit-delete as a backstop, but pulling it up front is
-cheaper than undoing a bad removal.
+Before you remove or rename a definition (function, class, method), or change
+one's signature, call the `blast_radius` MCP tool for that symbol first. All
+three break callers the same way, and the tool answers all three with one
+query. Treat its callers, test coverage, and entry-point/orphan flags as
+evidence (not a verdict), and verify live callers in source before finalizing
+the change. The evidence hook injects the same bundle on an edit-delete as a
+backstop, but pulling it up front is cheaper than undoing a bad removal.
 
-Before you add a new function or class, semantic-search the index first
-(`search_code_intel_semantic`) for an existing equivalent, and reuse or extend
-it rather than duplicating. `blast_radius` guards removals; this guards
-additions (anti-slop). Additions have no push hook by design -- the pull check
-is cheaper than embedding every edit, and you are already reasoning about the
-code you are about to write.
+Before you add a new function or class, call the `search_code_intel_semantic`
+MCP tool for what it would do first. Treat the hits as candidate equivalents
+(not a verdict), and read the closest one in source before you write: reuse or
+extend it rather than duplicating. To ask the same question about the code
+already indexed, `find_redundancy` reports groups of functions that repeat one
+call-shape, ranked by whether collapsing them is worth it.
+
+The add side has a hook too, but do not rely on it. On an edit that adds a
+single definition it reports existing functions with the same IDF-weighted
+call-shape. Measured twice, over 30 blind reimplementations each -- a model given only a
+signature and docstring, never the body, which is what writing new code
+actually looks like -- it fires on 11-13% of them. The ranking is far better
+than the score: the function being duplicated is the top hit of 1385 in about
+60% of cases and in the top 3 in 64-70%. But a real reimplementation scores
+0.36-0.39 median, which is inside the score range of unrelated code, so no
+threshold turns that ranking into a reliable trigger. At 0.40 recall reaches
+about 0.5 and 18-27% of genuinely new functions fire too. The threshold is set where the hook is quiet and
+usually right when it does fire, which means silent on almost every real
+duplicate. Treat silence as no evidence. The pull check above is the one that
+works. Shape is also not meaning: two functions that call the same small helper
+set score high whatever they do.
 
 This repository builds `project-code-intelligence`: an MCP server that gives
 coding agents structured access to indexed Git repositories — semantic

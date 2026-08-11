@@ -249,6 +249,31 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
             "additionalProperties": False,
         },
     ),
+    "find_redundancy": ToolDefinition(
+        "Groups of functions that repeat one call-shape motif, ranked by net value "
+        "(redundancy removed minus abstraction cost), each with a recommendation and a "
+        "shared-helper flag. Shape comes from heuristic call edges, so it is evidence, "
+        "not a verdict -- verify in source. Call before adding a function that may already exist.",
+        {
+            "type": "object",
+            "properties": {
+                "source_path_prefix": {
+                    "type": "string",
+                    "description": "Only groups with a member under this prefix; repo-relative or repo-prefixed.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50,
+                    "description": "Maximum groups per snapshot; default 10.",
+                },
+                "collection": {"type": "string", "description": _COLLECTION_DESC},
+                "repo": {"type": "string"},
+                "verbose": {"type": "boolean"},
+            },
+            "additionalProperties": False,
+        },
+    ),
     "list_code_intel_files": ToolDefinition(
         "List indexed files. Compact by default.",
         {
