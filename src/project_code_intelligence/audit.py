@@ -56,6 +56,9 @@ if TYPE_CHECKING:
 # a larger group. The blind set's highest NON-duplicate pair scored 0.9876
 # (a designed records-table/snapshot-table parallel), so the gate sits above
 # it. Groups at or above are near-certain; everything else is unranked.
+# Replicated on a Rust repo (n=20 blind, 2026-08-11): max_text did not separate
+# real from junk in 0.25-0.94 (a real group at 0.25, junk at 0.74); overall
+# precision there 12/20 (60%).
 NEAR_CERTAIN_TEXT = 0.99
 
 
@@ -149,7 +152,14 @@ def snapshot_staleness(conn: db.DbConnection, snapshot_id: int) -> Json | None:
 
 
 def load_definitions(conn: db.DbConnection, snapshot_id: int) -> list[tuple[str, str]]:
-    """(symbol, source_path) for every non-test source function/method definition."""
+    """(symbol, source_path) for every non-test source function/method definition.
+
+    Trait-impl methods (records carrying ``impl_trait`` metadata) are excluded:
+    every type implementing a trait defines the same qualified name
+    (``Default::default`` in N files), which is language mechanics, not
+    duplication. Measured on a Rust repo 2026-08-11: they were ~100% of the
+    duplicate-name section's noise.
+    """
     rows = conn.execute(
         """
         SELECT r.symbol, r.source_path
@@ -161,6 +171,7 @@ def load_definitions(conn: db.DbConnection, snapshot_id: int) -> list[tuple[str,
           AND r.symbol IS NOT NULL
           AND r.symbol_kind IN ('function', 'method', 'shell_function')
           AND r.file_role != 'test'
+          AND r.metadata ->> 'impl_trait' IS NULL
           AND f.is_source = true
           AND f.is_test = false
         """,
@@ -314,7 +325,8 @@ def render_result(result: AuditResult) -> list[str]:
         "### Redundancy candidates",
         f"_{result.redundancy.functions_analyzed} functions analyzed, "
         f"{result.redundancy.clones_folded} exact clones folded_",
-        "Measured on this repo: ~42% of groups are real duplicates (n=40 labeled, 26 blind). "
+        "Measured precision: ~42% of groups are real duplicates on a Python repo "
+        "(n=40 labeled, 26 blind); 60% on a Rust repo (n=20, blind). "
         "Only near-identical body text is near-certain; every other group needs a source read. "
         "The candidate list is UNRANKED -- order carries no confidence.",
         "",
