@@ -4,15 +4,14 @@ import io
 import json
 import os
 import unittest
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, cast
+from typing import cast
 from unittest import mock
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-from project_code_intelligence.hooks import detect, install, runtime
+from project_code_intelligence.exceptions import DatabaseConnectionError
+from project_code_intelligence.hooks import detect, install, runtime, similar
 from project_code_intelligence.hooks.opencode_assets import OPENCODE_FILES
 
 
@@ -36,6 +35,23 @@ class DetectTests(unittest.TestCase):
         self.assertTrue(detect.is_source_path("a/b.py"))
         self.assertFalse(detect.is_source_path("notes.md"))
 
+    def test_definition_slice_stops_before_the_next_definition(self) -> None:
+        """The slice is a query vector, so a neighbouring signature must not bleed into it."""
+        text = "def wanted(x):\n    y = x\n    return y\n\ndef other():\n    pass\n"
+        self.assertEqual(
+            detect.definition_slices(text, ["wanted"]), {"wanted": "def wanted(x):\n    y = x\n    return y"}
+        )
+
+    def test_definition_slice_handles_braces_and_misses(self) -> None:
+        self.assertEqual(
+            detect.definition_slices("sh_fn() {\n  echo hi\n}\n", ["sh_fn"]), {"sh_fn": "sh_fn() {\n  echo hi"}
+        )
+        self.assertEqual(detect.definition_slices("def a():\n pass\n", ["absent"]), {})
+
+    def test_definition_slice_caps_runaway_bodies(self) -> None:
+        text = "def big():\n" + "".join(f"    line{i} = {i}\n" for i in range(200))
+        self.assertEqual(len(detect.definition_slices(text, ["big"], max_lines=10)["big"].splitlines()), 10)
+
 
 def _write_event(path: Path, content: str) -> dict[str, object]:
     return {
@@ -43,6 +59,14 @@ def _write_event(path: Path, content: str) -> dict[str, object]:
         "tool_name": "Write",
         "tool_input": {"file_path": str(path), "content": content},
     }
+
+
+_Nearest = Callable[[Mapping[str, str]], "list[similar.Hit]"]
+
+
+def _no_hits(_slices: Mapping[str, str]) -> list[similar.Hit]:
+    """Stub for similar.nearest: the query ran and nothing cleared the gate."""
+    return []
 
 
 class _StubReports:
@@ -92,14 +116,62 @@ class EvidenceRuntimeTests(unittest.TestCase):
         self.assertEqual(self._run("opencode", event, reports), "")
         self.assertEqual(reports.calls, [])
 
-    def test_added_definition_gets_reminder_without_index_query(self) -> None:
-        reports = _StubReports({})
-        event = {"filePath": "a.py", "oldString": "", "newString": "def brand_new():\n pass\n"}
-        text = self._run("opencode", event, reports)
+    def _run_add(self, event: Mapping[str, object], nearest: _Nearest) -> str:
+        """Add-branch run with the index query stubbed -- these tests must never depend on a
+        reachable database or embedding endpoint."""
+        with mock.patch.object(runtime.similar, "nearest", nearest):
+            return self._run("opencode", event, _StubReports({}))
+
+    def test_no_close_hit_says_the_check_ran_and_states_its_own_weakness(self) -> None:
+        """It must not claim no check was run, and must not read as proof of absence."""
+        event = {"filePath": "a.py", "oldString": "", "newString": "def brand_new():\n x = 1\n return x\n"}
+        text = self._run_add(event, _no_hits)
         self.assertIn("[pci add-side", text)
         self.assertIn("brand_new", text)
-        self.assertIn("search_code_intel_semantic", text)
-        self.assertEqual(reports.calls, [])  # a reminder, not a duplicate check
+        self.assertIn("check ran", text)
+        self.assertIn("not proof", text)
+        self.assertNotIn("No duplicate check was run", text)
+
+    def test_added_definition_shows_prior_art_when_the_index_has_a_close_hit(self) -> None:
+        hit = runtime.similar.Hit(
+            added_name="brand_new",
+            symbol="existing_helper",
+            source_path="repo/src/pkg/mod.py",
+            line_start=42,
+            distance=0.18,
+        )
+        event = {"filePath": "a.py", "oldString": "", "newString": "def brand_new():\n x = 1\n return x\n"}
+        text = self._run_add(event, lambda _slices: [hit])
+        self.assertIn("existing_helper", text)
+        self.assertIn("0.18", text)
+        self.assertIn("evidence, not a finding", text)
+
+    def test_added_definition_query_failure_warns_and_never_stays_silent(self) -> None:
+        """A skipped check must not read as 'nothing found' -- that is the dangerous direction."""
+
+        def explode(_slices: Mapping[str, str]) -> list[similar.Hit]:
+            raise DatabaseConnectionError("could not connect to pci_x")
+
+        event = {"filePath": "a.py", "oldString": "", "newString": "def brand_new():\n x = 1\n return x\n"}
+        text = self._run_add(event, explode)
+        self.assertIn("could not run", text)
+        self.assertIn("could not connect to pci_x", text)
+        self.assertIn("brand_new", text)
+
+    def test_added_definition_embeds_only_the_new_definition(self) -> None:
+        """A Write payload is the whole file; the gate was calibrated on single definitions."""
+        seen: list[dict[str, str]] = []
+
+        def capture(slices: Mapping[str, str]) -> list[similar.Hit]:
+            seen.append(dict(slices))
+            return []
+
+        payload = "import os\n\n\ndef untouched():\n return 1\n\n\ndef brand_new():\n x = 2\n return x\n"
+        event = {"filePath": "a.py", "oldString": "def untouched():\n return 1\n", "newString": payload}
+        _ = self._run_add(event, capture)
+        self.assertEqual(list(seen[0]), ["brand_new"])
+        self.assertNotIn("untouched", seen[0]["brand_new"])
+        self.assertNotIn("import os", seen[0]["brand_new"])
 
     def test_added_test_case_gets_no_reminder(self) -> None:
         reports = _StubReports({})
@@ -167,10 +239,14 @@ class EvidenceRuntimeTests(unittest.TestCase):
             self.assertEqual(self._run("claude", event, reports), "")
         self.assertEqual(reports.calls, [])
 
-    def test_claude_write_new_file_reminds_but_never_queries_index(self) -> None:
-        """A new file removes nothing, so it takes the add branch: reminder, no blast radius."""
+    def test_claude_write_new_file_takes_the_add_branch(self) -> None:
+        """A new file removes nothing, so it takes the add branch, never blast radius.
+
+        similar.nearest is stubbed: the add branch does query the index now, and a unit test
+        must not depend on a reachable database or embedding endpoint to decide the branch.
+        """
         reports = _StubReports({"gone": ["should not appear"]})
-        with TemporaryDirectory() as tmp:
+        with TemporaryDirectory() as tmp, mock.patch.object(runtime.similar, "nearest", _no_hits):
             event = _write_event(Path(tmp) / "new.py", "def fresh():\n    return 1\n")
             text = self._run("claude", event, reports)
         self.assertIn("[pci add-side", text)

@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence import evidence, process
-from project_code_intelligence.exceptions import DatabaseConnectionError
-from project_code_intelligence.hooks import detect
+from project_code_intelligence.exceptions import DatabaseConnectionError, McpProtocolError
+from project_code_intelligence.hooks import detect, similar
 
 if TYPE_CHECKING:
     from typing import IO
@@ -37,21 +37,42 @@ _MAX_SYMBOLS = 2
 _NEIGHBORS = 0
 _LOCK_NAME = "pci-reindex.lock"
 
-# There is deliberately no add-side DETECTOR. Measured twice over 30 blind
-# reimplementations each, call-shape overlap fires on 11-13% of real duplicates and no
-# threshold separates them from novel code (see HANDOFF.md / git history for the full
-# record). The add-side check stays the pull path: search_code_intel_semantic before
-# writing, find_redundancy for what is already indexed.
+# The add side runs a SEMANTIC query, not a call-shape one. Call-shape overlap was the
+# original attempt and was deleted in 052a303: it fired on 11-13% of real duplicates and no
+# threshold separated them from novel code. Embedding distance measured far better on the
+# same ground truth -- see hooks/similar.py for the numbers and for why its gate is a
+# per-language constant rather than a universal one.
 #
-# What the add branch below does emit is the REMINDER, not a verdict: it makes no claim
-# that the new definition duplicates anything, it only restates the AGENTS.md rule at the
-# moment it applies. AGENTS.md loads once per session and then sinks under the
-# transcript; this arrives adjacent to the edit. Cheap, no index query, no threshold.
+# _REMINDER is the fallback, and it is what the hook emits whenever the query cannot run or
+# returns nothing above the gate. It makes no claim that the new definition duplicates
+# anything; it restates the AGENTS.md rule at the moment it applies, since AGENTS.md loads
+# once per session and then sinks under the transcript. Silence is never an option on this
+# path: a skipped check reads as "checked, nothing found", which is the dangerous direction.
 _REMINDER = (
     "[pci add-side -- this edit defines {names}. Per AGENTS.md, call "
     "search_code_intel_semantic for what it does before writing, and read the closest hit "
     "in source: reuse or extend it rather than duplicating. No duplicate check was run; "
     "this is a reminder, not a finding.]"
+)
+# Distinct from _REMINDER on purpose: when the query ran, saying "no duplicate check was
+# run" is false, and the honest version has to state its own weakness. At the shipped gate
+# the check keeps 69% of real prior art, so ~1 in 3 genuine duplicates produces this text.
+_NO_HITS = (
+    "[pci add-side -- this edit defines {names}. A similarity check ran against the index "
+    "and found nothing close enough to show. That check misses roughly a third of real "
+    "duplicates, so it is weak evidence of absence, not proof: if this is a well-trodden "
+    "area, search yourself with search_code_intel_semantic before finalizing.]"
+)
+_PRIOR_ART = (
+    "[pci add-side -- this edit defines {names}. The index holds these nearby definitions "
+    "(closest first, embedding distance; the index may predate this edit):\n{hits}\n"
+    "Read the closest in source and reuse or extend it rather than duplicating. Ranked by "
+    "similarity, not verified -- evidence, not a finding.]"
+)
+_QUERY_FAILED = (
+    "[pci add-side -- this edit defines {names}, but the duplicate check could not run: "
+    "{reason} (cwd {cwd}). Search for prior art yourself with search_code_intel_semantic "
+    "before finalizing; do not read this as 'nothing found'.]"
 )
 _MAX_ADDED = 3
 # Test code is exempt: a new test case has no prior art to reuse, so the reminder is pure
@@ -150,6 +171,31 @@ def _build_block(removed: list[str], max_symbols: int) -> str | None:
     return header + "\n" + "\n---\n".join(report.rstrip("\n") for report in reports)
 
 
+def _add_side_block(new_string: str, added: list[str], names: str) -> str:
+    """Prior-art hits for what this edit adds, or the reminder if none can be shown.
+
+    Only the added definitions are embedded, never the edit payload: on a Write the payload
+    is the whole file, and the gate in ``similar`` was calibrated on single-definition
+    queries, so a blended vector would sit at distances it does not describe.
+
+    Every failure degrades to text, never to silence. A missing index or a dead embedding
+    endpoint reads as "no duplicates here" if the hook stays quiet, which is exactly the
+    wrong inference to hand an agent mid-edit.
+    """
+    slices = detect.definition_slices(new_string, added)
+    if not slices:
+        return _REMINDER.format(names=names)
+    try:
+        hits = similar.nearest(slices)
+    except (DatabaseConnectionError, McpProtocolError, OSError) as exc:
+        reason = str(exc).splitlines()[0] if str(exc).strip() else type(exc).__name__
+        return _QUERY_FAILED.format(names=names, reason=reason, cwd=Path.cwd())
+    if not hits:
+        return _NO_HITS.format(names=names)
+    repo = Path.cwd().name
+    return _PRIOR_ART.format(names=names, hits="\n".join(hit.render(repo) for hit in hits))
+
+
 def _emit_evidence(agent: Agent, block: str, out: IO[str], *, event_name: str) -> None:
     if agent == "claude":
         # Echo the firing event (PreToolUse/PostToolUse) so hookSpecificOutput matches it.
@@ -180,7 +226,12 @@ def run_evidence(agent: Agent, *, stdin: IO[str] | None = None, stdout: IO[str] 
         if added:
             names = ", ".join(added[:_MAX_ADDED])
             overflow = f" (+{len(added) - _MAX_ADDED} more)" if len(added) > _MAX_ADDED else ""
-            _emit_evidence(agent, _REMINDER.format(names=names + overflow), out_stream, event_name=event_name)
+            _emit_evidence(
+                agent,
+                _add_side_block(new_string, added[:_MAX_ADDED], names + overflow),
+                out_stream,
+                event_name=event_name,
+            )
         return 0
     block = _build_block(removed, _MAX_SYMBOLS)
     if block is None:
