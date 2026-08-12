@@ -65,7 +65,9 @@ LANGUAGE_GATES = {"rust": 0.34}
 # Shown lines, across all added definitions together. The injection shares a ~15-line
 # budget with the reminder text and fires on every add, so it stays small.
 MAX_HITS = 3
-PER_DEFINITION = 2
+# Fetched rows per added definition, before dedupe collapses split chunks of one function;
+# display stays bounded by MAX_HITS regardless.
+PER_DEFINITION = 4
 
 # Trait-impl methods stay IN: excluding them (as the duplicate-names audit does) made the
 # hook blind to a near-verbatim copy of a rustls trait impl measured at distance 0.098.
@@ -107,10 +109,13 @@ def snapshot_for(snapshots: list[analyze.SnapshotRef], file_path: str) -> analyz
     """
     cwd = Path.cwd().resolve()
     root = status.source_git_root(Path(file_path).resolve())
-    for snap in snapshots:
-        snap_root = cwd if snap.repo in {".", cwd.name} else (cwd / snap.repo).resolve()
-        if root == snap_root:
-            return snap
+    matches = [
+        snap for snap in snapshots if root == (cwd if snap.repo in {".", cwd.name} else (cwd / snap.repo).resolve())
+    ]
+    if matches:
+        # '.' and the cwd basename label the same root when a repo was indexed both ways;
+        # the newest snapshot is the live one.
+        return max(matches, key=lambda snap: snap.snapshot_id)
     raise UnindexedRepoError(str(root) if root else file_path)
 
 
@@ -172,6 +177,10 @@ def nearest(slices: Mapping[str, str], *, language: str | None = None, file_path
     """
     limit = gate(language)
     hits: list[Hit] = []
+    # Long functions are indexed as a whole-body chunk PLUS overlapping split chunks under
+    # the same symbol; without this, one match renders as several rows. Rows arrive
+    # distance-ordered per query, so first seen is the closest.
+    seen: set[tuple[str, str, str]] = set()
     with mcp_db.connect() as conn:
         snapshots = analyze.latest_snapshots(conn)
         if not snapshots:
@@ -191,6 +200,10 @@ def nearest(slices: Mapping[str, str], *, language: str | None = None, file_path
                 # "this is similar to itself" is noise, not prior art.
                 if symbol.replace("::", ".").rpartition(".")[2] == added_name:
                     continue
+                key = (added_name, symbol, source_path)
+                if key in seen:
+                    continue
+                seen.add(key)
                 hits.append(
                     Hit(
                         added_name=added_name,
