@@ -12,6 +12,7 @@ from unittest import mock
 
 from project_code_intelligence import analyze
 from project_code_intelligence.exceptions import DatabaseConnectionError
+from project_code_intelligence.hooks import cli as hooks_cli
 from project_code_intelligence.hooks import detect, install, runtime, similar
 from project_code_intelligence.hooks.opencode_assets import OPENCODE_FILES
 
@@ -168,6 +169,21 @@ class SimilarTests(unittest.TestCase):
         """An in-place rewrite matches its own indexed chunk; 'similar to itself' is noise."""
         hits = SimilarTests._nearest([[_row("Klass.brand_new", 0.01), _row("other", 0.10)]])
         self.assertEqual([hit.symbol for hit in hits], ["other"])
+
+    def test_rust_path_self_match_is_dropped_and_near_miss_names_are_kept(self) -> None:
+        """The split must handle :: paths; a longer name (verify_server_cert vs
+        verify_server_certificate) is NOT a self-match and must survive."""
+        rows = [_row("crate::mod::Trait::brand_new", 0.01), _row("Trait::brand_new_thing", 0.10)]
+        hits = SimilarTests._nearest([rows])
+        self.assertEqual([hit.symbol for hit in hits], ["Trait::brand_new_thing"])
+
+    def test_trait_impl_methods_are_not_filtered_from_prior_art(self) -> None:
+        """A near-verbatim copy of a rustls trait impl (distance 0.098) was invisible while
+        the add-side SQL carried the audit's impl_trait exclusion. Names-audit noise
+        reasoning does not transfer to a distance query; the gate handles siblings."""
+        source = Path(similar.__file__).read_text(encoding="utf-8")
+        query = source.split('_SQL = """', 1)[1].split('"""', 1)[0]
+        self.assertNotIn("impl_trait", query)
 
     def test_rows_with_unusable_columns_are_skipped_not_crashed(self) -> None:
         hits = SimilarTests._nearest([
@@ -511,6 +527,31 @@ class InstallClaudeTests(unittest.TestCase):
             settings = Path(tmp) / ".claude" / "settings.json"
             outcome = install.install_claude(settings, uninstall=True, dry_run=False)
             self.assertEqual(outcome.action, "unchanged")
+
+
+def _prompt_scope_in(cwd: Path, reply: str) -> bool:
+    with (
+        mock.patch.object(Path, "cwd", return_value=cwd),
+        mock.patch.object(hooks_cli.sys, "stdin", io.StringIO(reply)),
+        mock.patch.object(hooks_cli.sys, "stderr", io.StringIO()),
+    ):
+        return hooks_cli.prompt_claude_scope()
+
+
+class PromptClaudeScopeTests(unittest.TestCase):
+    def test_non_project_cwd_defaults_to_user_scope(self) -> None:
+        with TemporaryDirectory() as tmp:
+            self.assertTrue(_prompt_scope_in(Path(tmp), ""))
+
+    def test_project_reply_p_selects_project_scope(self) -> None:
+        with TemporaryDirectory() as tmp:
+            (Path(tmp) / ".git").mkdir()
+            self.assertFalse(_prompt_scope_in(Path(tmp), "p\n"))
+
+    def test_project_default_reply_selects_user_scope(self) -> None:
+        with TemporaryDirectory() as tmp:
+            (Path(tmp) / ".git").mkdir()
+            self.assertTrue(_prompt_scope_in(Path(tmp), "\n"))
 
 
 def _post_commit_path(repo: Path) -> Path:
