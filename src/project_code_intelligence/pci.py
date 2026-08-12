@@ -1,8 +1,10 @@
 """``pci``: one binary fronting every pci-* command.
 
-Each subcommand lazily imports and calls the same entry point its legacy
-``pci-<name>`` binary uses. The legacy binaries stay installed as
-compatibility shims for configs, git hooks, and scripts that reference them.
+Each subcommand lazily imports and calls the same entry point the legacy
+``pci-<name>`` binaries used. `pci` is the only installed executable; systems
+installed before the single-binary change keep their pci-* shims (same entry
+points, so configs and git hooks that reference them keep working) until they
+upgrade -- internal callers fall back to those names when `pci` is absent.
 """
 
 from __future__ import annotations

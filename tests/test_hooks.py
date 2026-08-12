@@ -137,8 +137,10 @@ def _fake_embedding(_text: str) -> tuple[str, int]:
 def _one_hit(hit: similar.Hit) -> _Nearest:
     """Stub for similar.nearest returning a single canned hit."""
 
-    def nearest(_slices: Mapping[str, str], *, language: str | None = None) -> list[similar.Hit]:
-        _ = language
+    def nearest(
+        _slices: Mapping[str, str], *, language: str | None = None, file_path: str | None = None
+    ) -> list[similar.Hit]:
+        _ = language, file_path
         return [hit]
 
     return nearest
@@ -225,6 +227,29 @@ class SimilarTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {similar.GATE_ENV: "not-a-number"}):
             self.assertAlmostEqual(similar.gate(), similar.GATE)
 
+    def test_snapshot_selection_follows_the_files_git_root(self) -> None:
+        """A file under a nested clone must query THAT repo's snapshot, and must raise when
+        no snapshot covers it -- a no-hit against the wrong repo's index carries near-zero
+        information and must not render as a calibrated no-hit."""
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "ws"
+            (workspace / ".git").mkdir(parents=True)
+            nested = workspace / "nested"
+            (nested / ".git").mkdir(parents=True)
+            snapshots = [
+                analyze.SnapshotRef(snapshot_id=1, collection="c", repo="ws"),
+                analyze.SnapshotRef(snapshot_id=2, collection="c", repo="nested"),
+            ]
+            cwd = Path.cwd()
+            os.chdir(workspace)
+            try:
+                self.assertEqual(similar.snapshot_for(snapshots, "a.py").snapshot_id, 1)
+                self.assertEqual(similar.snapshot_for(snapshots, str(nested / "src" / "b.rs")).snapshot_id, 2)
+                with self.assertRaises(similar.UnindexedRepoError):
+                    _ = similar.snapshot_for(snapshots[:1], str(nested / "src" / "b.rs"))
+            finally:
+                os.chdir(cwd)
+
     def test_render_strips_the_repo_prefix(self) -> None:
         hit = similar.Hit(added_name="new", symbol="old", source_path="repo/src/a.py", line_start=7, distance=0.123)
         self.assertEqual(hit.render("repo"), "  0.12  old  src/a.py:7  (vs your new)")
@@ -241,9 +266,11 @@ def _write_event(path: Path, content: str) -> dict[str, object]:
 _Nearest = Callable[..., "list[similar.Hit]"]
 
 
-def _no_hits(_slices: Mapping[str, str], *, language: str | None = None) -> list[similar.Hit]:
+def _no_hits(
+    _slices: Mapping[str, str], *, language: str | None = None, file_path: str | None = None
+) -> list[similar.Hit]:
     """Stub for similar.nearest: the query ran and nothing cleared the gate."""
-    _ = language
+    _ = language, file_path
     return []
 
 
@@ -327,8 +354,10 @@ class EvidenceRuntimeTests(unittest.TestCase):
     def test_added_definition_query_failure_warns_and_never_stays_silent(self) -> None:
         """A skipped check must not read as 'nothing found' -- that is the dangerous direction."""
 
-        def explode(_slices: Mapping[str, str], *, language: str | None = None) -> list[similar.Hit]:
-            _ = language
+        def explode(
+            _slices: Mapping[str, str], *, language: str | None = None, file_path: str | None = None
+        ) -> list[similar.Hit]:
+            _ = language, file_path
             raise DatabaseConnectionError("could not connect to pci_x")
 
         event = {"filePath": "a.py", "oldString": "", "newString": "def brand_new():\n x = 1\n return x\n"}
@@ -337,12 +366,31 @@ class EvidenceRuntimeTests(unittest.TestCase):
         self.assertIn("could not connect to pci_x", text)
         self.assertIn("brand_new", text)
 
+    def test_file_outside_indexed_repos_gets_the_distinct_message(self) -> None:
+        """Not the calibrated no-hit: the index holds none of this repo's code."""
+
+        def unindexed(
+            _slices: Mapping[str, str], *, language: str | None = None, file_path: str | None = None
+        ) -> list[similar.Hit]:
+            _ = language, file_path
+            raise similar.UnindexedRepoError("/ws/nested")
+
+        event = {"filePath": "nested/a.py", "oldString": "", "newString": "def brand_new():\n x = 1\n return x\n"}
+        text = self._run_add(event, unindexed)
+        self.assertIn("outside the indexed repos", text)
+        self.assertIn("/ws/nested", text)
+        self.assertIn("brand_new", text)
+        self.assertNotIn("similarity check ran", text)
+
     def test_added_definition_embeds_only_the_new_definition(self) -> None:
         """A Write payload is the whole file; the gate was calibrated on single definitions."""
         seen: list[dict[str, str]] = []
         languages: list[str | None] = []
 
-        def capture(slices: Mapping[str, str], *, language: str | None = None) -> list[similar.Hit]:
+        def capture(
+            slices: Mapping[str, str], *, language: str | None = None, file_path: str | None = None
+        ) -> list[similar.Hit]:
+            _ = file_path
             seen.append(dict(slices))
             languages.append(language)
             return []

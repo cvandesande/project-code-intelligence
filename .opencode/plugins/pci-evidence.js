@@ -14,10 +14,10 @@
 // which is a change to this adapter's shape, not a one-line addition. Claude is
 // unaffected: its hook is registered on PreToolUse for Edit and Write both.
 
-import { SOURCE_EXT, removedDefinitions, hookBin, runHook } from "../lib/pci-evidence-logic.js"
+import { SOURCE_EXT, removedDefinitions, hookCmd, runHook } from "../lib/pci-evidence-logic.js"
 
 export const PciEvidence = async ({ directory }) => {
-  const bin = hookBin(directory)
+  const cmd = hookCmd(directory)
   return {
     "tool.execute.after": async (input, output) => {
       if (input.tool !== "edit") return
@@ -36,7 +36,7 @@ export const PciEvidence = async ({ directory }) => {
         oldString: args.oldString,
         newString: args.newString,
       })
-      const text = (await runHook(bin, ["run", "--agent", "opencode", "--behavior", "evidence"], event)).trim()
+      const text = (await runHook(cmd, ["run", "--agent", "opencode", "--behavior", "evidence"], event)).trim()
       if (text) output.output += "\n\n" + text
     },
   }

@@ -21,6 +21,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -69,6 +70,14 @@ _PRIOR_ART = (
     "(closest first, embedding distance; the index may predate this edit):\n{hits}\n"
     "Read the closest in source and reuse or extend it rather than duplicating. Ranked by "
     "similarity, not verified -- evidence, not a finding.]"
+)
+# Distinct from _NO_HITS on purpose: a similarity query against an index that holds none
+# of the file's repo returns a no-hit that carries near-zero information, and rendering it
+# as the calibrated no-hit above would launder that emptiness into weak evidence.
+_OUTSIDE_INDEX = (
+    "[pci add-side -- this edit defines {names}, but {root} is outside the indexed repos, "
+    "so no duplicate check ran against its code. Index it (pci index) or search prior art "
+    "yourself; do not read this as 'nothing found'.]"
 )
 _QUERY_FAILED = (
     "[pci add-side -- this edit defines {names}, but the duplicate check could not run: "
@@ -189,7 +198,9 @@ def _add_side_block(file_path: str, new_string: str, added: list[str], names: st
     try:
         # The gate is language-dependent, and inventory.language_for is the same mapping the
         # indexer used, so the query is gated the way the corpus it searches was measured.
-        hits = similar.nearest(slices, language=inventory.language_for(file_path))
+        hits = similar.nearest(slices, language=inventory.language_for(file_path), file_path=file_path)
+    except similar.UnindexedRepoError as exc:
+        return _OUTSIDE_INDEX.format(names=names, root=exc)
     except (DatabaseConnectionError, McpProtocolError, OSError) as exc:
         reason = str(exc).splitlines()[0] if str(exc).strip() else type(exc).__name__
         return _QUERY_FAILED.format(names=names, reason=reason, cwd=Path.cwd())
@@ -246,12 +257,20 @@ def run_evidence(agent: Agent, *, stdin: IO[str] | None = None, stdout: IO[str] 
 # --- reindex --------------------------------------------------------------------
 
 
-def _index_bin(repo: Path) -> str:
+def _index_command(repo: Path) -> list[str]:
+    """Command prefix that runs the indexer: `pci index` where available, with the legacy
+    pci-index shim as the fallback for systems installed before the single-binary change."""
     configured = os.environ.get("PCI_INDEX_BIN")
     if configured:
-        return configured
-    local = repo / ".venv" / "bin" / "pci-index"
-    return str(local) if local.exists() else "pci-index"
+        return [configured]
+    for name, extra in (("pci", ["index"]), ("pci-index", [])):
+        local = repo / ".venv" / "bin" / name
+        if local.exists():
+            return [str(local), *extra]
+        found = shutil.which(name)
+        if found:
+            return [found, *extra]
+    return ["pci-index"]
 
 
 def _lock_path(repo: Path) -> Path:
@@ -277,7 +296,7 @@ def run_reindex(repo: Path) -> int:
             return 0  # another reindex is in flight; it will pick up the latest state
         try:
             _ = process.run(
-                [_index_bin(repo), str(repo)],
+                [*_index_command(repo), str(repo)],
                 process.RunOptions(cwd=repo, stdout=process.DEVNULL, stderr=process.DEVNULL),
             )
         except (process.SubprocessError, OSError):

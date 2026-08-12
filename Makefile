@@ -187,16 +187,19 @@ tool-install: ## Install or upgrade the pci-* binaries with uv
 	    *) printf '  Skipped. Run `uv tool update-shell` (or add %s to PATH manually) when ready.\n' "$$bindir" >&2 ;; \
 	  esac; \
 	else \
-	  printf '  Run `uv tool update-shell` (or add it to PATH manually) so the pci-* commands are found.\n' >&2; \
+	  printf '  Run `uv tool update-shell` (or add it to PATH manually) so the pci command is found.\n' >&2; \
 	fi
 
-tool-uninstall: ## Clean local services/cache and uninstall the pci-* binaries
+tool-uninstall: ## Clean local services/cache and uninstall the pci binary
 	@bindir=$$(uv tool dir --bin 2>/dev/null) || bindir=""; \
-	doctor=$$(command -v pci-doctor 2>/dev/null) || doctor=""; \
-	if [ -z "$$doctor" ] && [ -n "$$bindir" ] && [ -x "$$bindir/pci-doctor" ]; then doctor="$$bindir/pci-doctor"; fi; \
+	doctor=""; \
+	if pci=$$(command -v pci 2>/dev/null); then doctor="$$pci doctor"; \
+	elif [ -n "$$bindir" ] && [ -x "$$bindir/pci" ]; then doctor="$$bindir/pci doctor"; \
+	elif legacy=$$(command -v pci-doctor 2>/dev/null); then doctor="$$legacy"; \
+	elif [ -n "$$bindir" ] && [ -x "$$bindir/pci-doctor" ]; then doctor="$$bindir/pci-doctor"; fi; \
 	if [ -n "$$doctor" ]; then \
-	  "$$doctor" --clean; \
+	  $$doctor --clean; \
 	else \
-	  printf 'warning: pci-doctor not found; skipping local service/cache cleanup before uninstall\n' >&2; \
+	  printf 'warning: pci doctor not found; skipping local service/cache cleanup before uninstall\n' >&2; \
 	fi
 	uv tool uninstall project-code-intelligence

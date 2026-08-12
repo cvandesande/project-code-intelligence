@@ -30,11 +30,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from project_code_intelligence import analyze
 from project_code_intelligence.mcp import db as mcp_db
-from project_code_intelligence.mcp import semantic
+from project_code_intelligence.mcp import semantic, status
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -87,6 +88,32 @@ _SQL = """
 """
 
 
+class UnindexedRepoError(Exception):
+    """The edited file's git repository is not in the indexed collection.
+
+    A no-hit against an index that holds none of the file's repo carries near-zero
+    information, so the caller must render this differently from a calibrated no-hit --
+    the same distinction staleness gets.
+    """
+
+
+def snapshot_for(snapshots: list[analyze.SnapshotRef], file_path: str) -> analyze.SnapshotRef:
+    """The snapshot whose repo contains ``file_path``, judged by the file's own git root.
+
+    The indexer stores ``repo`` as a path relative to the workspace root (the hook's cwd),
+    except a single-repo index run as ``pci-index .``, which stores the cwd's basename.
+    A file under a nested clone resolves to that clone's git root, which matches no
+    snapshot when only the workspace repo is indexed -- exactly the case this must flag.
+    """
+    cwd = Path.cwd().resolve()
+    root = status.source_git_root(Path(file_path).resolve())
+    for snap in snapshots:
+        snap_root = cwd if snap.repo in {".", cwd.name} else (cwd / snap.repo).resolve()
+        if root == snap_root:
+            return snap
+    raise UnindexedRepoError(str(root) if root else file_path)
+
+
 @dataclass(frozen=True)
 class Hit:
     """One indexed definition close to something the edit is adding."""
@@ -129,11 +156,16 @@ def gate(language: str | None = None) -> float:
     return LANGUAGE_GATES.get(language or "", GATE)
 
 
-def nearest(slices: Mapping[str, str], *, language: str | None = None) -> list[Hit]:
+def nearest(slices: Mapping[str, str], *, language: str | None = None, file_path: str | None = None) -> list[Hit]:
     """Indexed definitions closest to each added definition, best first, gate applied.
 
     ``language`` selects the gate: see LANGUAGE_GATES on why the cut-off cannot be one
     constant. Omitting it uses the Python-calibrated default.
+
+    ``file_path`` selects the snapshot: the query runs against the snapshot of the repo
+    that contains the file, and raises UnindexedRepoError when no snapshot does -- a
+    no-hit against the wrong repo's index must not be rendered as a calibrated no-hit.
+    Omitting it keeps the old behaviour (first snapshot).
 
     Raises whatever the index or embedding endpoint raises -- the caller decides whether a
     failure means silence or a warning, and for this hook it must never mean silence.
@@ -144,7 +176,7 @@ def nearest(slices: Mapping[str, str], *, language: str | None = None) -> list[H
         snapshots = analyze.latest_snapshots(conn)
         if not snapshots:
             return []
-        snapshot = snapshots[0]
+        snapshot = snapshot_for(snapshots, file_path) if file_path else snapshots[0]
         for added_name, code in slices.items():
             vector, _dimensions = semantic.query_embedding(code)
             rows = conn.execute(_SQL, [vector, snapshot.snapshot_id, PER_DEFINITION]).fetchall()
