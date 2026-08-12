@@ -133,6 +133,16 @@ def _fake_embedding(_text: str) -> tuple[str, int]:
     return "[0]", 1
 
 
+def _one_hit(hit: similar.Hit) -> _Nearest:
+    """Stub for similar.nearest returning a single canned hit."""
+
+    def nearest(_slices: Mapping[str, str], *, language: str | None = None) -> list[similar.Hit]:
+        _ = language
+        return [hit]
+
+    return nearest
+
+
 def _row(symbol: str, distance: float, *, line: object = 10, path: str = "repo/src/pkg/mod.py") -> dict[str, object]:
     return {"symbol": symbol, "source_path": path, "line_start": line, "distance": distance}
 
@@ -179,6 +189,19 @@ class SimilarTests(unittest.TestCase):
         ):
             self.assertEqual(similar.nearest({"a": "def a():\n    pass"}), [])
 
+    def test_rust_gets_a_higher_gate_than_python(self) -> None:
+        """One constant does not transfer: at Python's 0.25 the hook was silent on a Rust pair
+        a blind validation had labelled duplicates (true hit at 0.26)."""
+        self.assertGreater(similar.gate("rust"), similar.gate("python"))
+        self.assertAlmostEqual(similar.gate("python"), similar.GATE)
+        self.assertAlmostEqual(similar.gate("go"), similar.GATE)  # unmeasured -> base
+        self.assertAlmostEqual(similar.gate(None), similar.GATE)
+
+    def test_env_override_beats_the_language_default(self) -> None:
+        """A repo that has calibrated its own value must win over the shipped table."""
+        with mock.patch.dict(os.environ, {similar.GATE_ENV: "0.55"}):
+            self.assertAlmostEqual(similar.gate("rust"), 0.55)
+
     def test_gate_env_override_is_read_and_bad_values_ignored(self) -> None:
         """The gate does not transfer across languages, so a repo must be able to retune it."""
         with mock.patch.dict(os.environ, {similar.GATE_ENV: "0.40"}):
@@ -199,11 +222,12 @@ def _write_event(path: Path, content: str) -> dict[str, object]:
     }
 
 
-_Nearest = Callable[[Mapping[str, str]], "list[similar.Hit]"]
+_Nearest = Callable[..., "list[similar.Hit]"]
 
 
-def _no_hits(_slices: Mapping[str, str]) -> list[similar.Hit]:
+def _no_hits(_slices: Mapping[str, str], *, language: str | None = None) -> list[similar.Hit]:
     """Stub for similar.nearest: the query ran and nothing cleared the gate."""
+    _ = language
     return []
 
 
@@ -279,7 +303,7 @@ class EvidenceRuntimeTests(unittest.TestCase):
             distance=0.18,
         )
         event = {"filePath": "a.py", "oldString": "", "newString": "def brand_new():\n x = 1\n return x\n"}
-        text = self._run_add(event, lambda _slices: [hit])
+        text = self._run_add(event, _one_hit(hit))
         self.assertIn("existing_helper", text)
         self.assertIn("0.18", text)
         self.assertIn("evidence, not a finding", text)
@@ -287,7 +311,8 @@ class EvidenceRuntimeTests(unittest.TestCase):
     def test_added_definition_query_failure_warns_and_never_stays_silent(self) -> None:
         """A skipped check must not read as 'nothing found' -- that is the dangerous direction."""
 
-        def explode(_slices: Mapping[str, str]) -> list[similar.Hit]:
+        def explode(_slices: Mapping[str, str], *, language: str | None = None) -> list[similar.Hit]:
+            _ = language
             raise DatabaseConnectionError("could not connect to pci_x")
 
         event = {"filePath": "a.py", "oldString": "", "newString": "def brand_new():\n x = 1\n return x\n"}
@@ -299,9 +324,11 @@ class EvidenceRuntimeTests(unittest.TestCase):
     def test_added_definition_embeds_only_the_new_definition(self) -> None:
         """A Write payload is the whole file; the gate was calibrated on single definitions."""
         seen: list[dict[str, str]] = []
+        languages: list[str | None] = []
 
-        def capture(slices: Mapping[str, str]) -> list[similar.Hit]:
+        def capture(slices: Mapping[str, str], *, language: str | None = None) -> list[similar.Hit]:
             seen.append(dict(slices))
+            languages.append(language)
             return []
 
         payload = "import os\n\n\ndef untouched():\n return 1\n\n\ndef brand_new():\n x = 2\n return x\n"
@@ -310,6 +337,8 @@ class EvidenceRuntimeTests(unittest.TestCase):
         self.assertEqual(list(seen[0]), ["brand_new"])
         self.assertNotIn("untouched", seen[0]["brand_new"])
         self.assertNotIn("import os", seen[0]["brand_new"])
+        # The gate is language-dependent, so the edited file's language has to reach nearest.
+        self.assertEqual(languages, ["python"])
 
     def test_added_test_case_gets_no_reminder(self) -> None:
         reports = _StubReports({})

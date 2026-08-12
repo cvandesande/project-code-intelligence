@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from project_code_intelligence import evidence, process
+from project_code_intelligence import evidence, inventory, process
 from project_code_intelligence.exceptions import DatabaseConnectionError, McpProtocolError
 from project_code_intelligence.hooks import detect, similar
 
@@ -171,7 +171,7 @@ def _build_block(removed: list[str], max_symbols: int) -> str | None:
     return header + "\n" + "\n---\n".join(report.rstrip("\n") for report in reports)
 
 
-def _add_side_block(new_string: str, added: list[str], names: str) -> str:
+def _add_side_block(file_path: str, new_string: str, added: list[str], names: str) -> str:
     """Prior-art hits for what this edit adds, or the reminder if none can be shown.
 
     Only the added definitions are embedded, never the edit payload: on a Write the payload
@@ -186,7 +186,9 @@ def _add_side_block(new_string: str, added: list[str], names: str) -> str:
     if not slices:
         return _REMINDER.format(names=names)
     try:
-        hits = similar.nearest(slices)
+        # The gate is language-dependent, and inventory.language_for is the same mapping the
+        # indexer used, so the query is gated the way the corpus it searches was measured.
+        hits = similar.nearest(slices, language=inventory.language_for(file_path))
     except (DatabaseConnectionError, McpProtocolError, OSError) as exc:
         reason = str(exc).splitlines()[0] if str(exc).strip() else type(exc).__name__
         return _QUERY_FAILED.format(names=names, reason=reason, cwd=Path.cwd())
@@ -228,7 +230,7 @@ def run_evidence(agent: Agent, *, stdin: IO[str] | None = None, stdout: IO[str] 
             overflow = f" (+{len(added) - _MAX_ADDED} more)" if len(added) > _MAX_ADDED else ""
             _emit_evidence(
                 agent,
-                _add_side_block(new_string, added[:_MAX_ADDED], names + overflow),
+                _add_side_block(file_path, new_string, added[:_MAX_ADDED], names + overflow),
                 out_stream,
                 event_name=event_name,
             )

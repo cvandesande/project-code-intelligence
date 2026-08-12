@@ -45,6 +45,22 @@ if TYPE_CHECKING:
 # with the agent's own reading, so the tighter half of the usable range wins.
 GATE = 0.25
 GATE_ENV = "PCI_ADD_SIDE_GATE"
+
+# Per-language gates, because one constant demonstrably does not transfer. Rust's whole
+# distance distribution sat ~0.09 above Python's on both measured sides (known duplicates
+# 0.331 vs 0.215, arbitrary nearest neighbour 0.242 vs 0.210), and at the Python-calibrated
+# 0.25 the hook was silent on a Rust pair a blind validation had labelled duplicates -- it
+# needed 0.40 to fire, with the true hit at 0.26.
+#
+# 0.34 is EXTRAPOLATED (0.25 + the measured shift), not measured: the blind-labelling
+# protocol that produced 0.25 has not been run on a Rust repo, so the labelled noise
+# distribution there is unknown. It is a calibrated starting point that fires, which beats a
+# constant that is silent. Confirm it by running that protocol per repo, and override with
+# PCI_ADD_SIDE_GATE meanwhile.
+#
+# Unlisted languages fall back to GATE, which is equally unmeasured for them -- Go, C, JS,
+# TS, Java and shell have had no corpus at all. Treat their hits as indicative.
+LANGUAGE_GATES = {"rust": 0.34}
 # Shown lines, across all added definitions together. The injection shares a ~15-line
 # budget with the reminder text and fires on every add, so it stays small.
 MAX_HITS = 3
@@ -95,25 +111,32 @@ def _coerce_distance(value: object) -> float | None:
     return float(value)
 
 
-def gate() -> float:
-    """The distance cut-off, overridable per repo -- see the module docstring on why one
-    constant cannot serve two languages."""
+def gate(language: str | None = None) -> float:
+    """The distance cut-off for one edit's language.
+
+    Precedence: PCI_ADD_SIDE_GATE (a repo that has calibrated its own value), then the
+    per-language default, then GATE. An unparseable override falls back rather than raising --
+    a malformed env var must not take the hook down mid-edit.
+    """
     configured = os.environ.get(GATE_ENV, "").strip()
-    if not configured:
-        return GATE
-    try:
-        return float(configured)
-    except ValueError:
-        return GATE
+    if configured:
+        try:
+            return float(configured)
+        except ValueError:
+            pass
+    return LANGUAGE_GATES.get(language or "", GATE)
 
 
-def nearest(slices: Mapping[str, str]) -> list[Hit]:
+def nearest(slices: Mapping[str, str], *, language: str | None = None) -> list[Hit]:
     """Indexed definitions closest to each added definition, best first, gate applied.
+
+    ``language`` selects the gate: see LANGUAGE_GATES on why the cut-off cannot be one
+    constant. Omitting it uses the Python-calibrated default.
 
     Raises whatever the index or embedding endpoint raises -- the caller decides whether a
     failure means silence or a warning, and for this hook it must never mean silence.
     """
-    limit = gate()
+    limit = gate(language)
     hits: list[Hit] = []
     with mcp_db.connect() as conn:
         snapshots = analyze.latest_snapshots(conn)
