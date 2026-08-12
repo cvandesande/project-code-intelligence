@@ -617,7 +617,24 @@ class InstallClaudeTests(unittest.TestCase):
             groups = cast("list[object]", cast("dict[str, object]", _read_json_file(settings)["hooks"])["PreToolUse"])
             self.assertEqual(len(groups), 1)
             handler = cast("dict[str, object]", cast("list[object]", cast("dict[str, object]", groups[0])["hooks"])[0])
-            self.assertIn("--target", cast("list[object]", handler["args"]))
+            # Claude Code ignores an "args" key: everything must be in the command string.
+            self.assertNotIn("args", handler)
+            self.assertIn("--target claude", cast("str", handler["command"]))
+
+    def test_install_writes_single_command_string(self) -> None:
+        with TemporaryDirectory() as tmp:
+            settings = Path(tmp) / ".claude" / "settings.json"
+            _ = install.install_claude(settings, uninstall=False, dry_run=False)
+            groups = cast("list[object]", cast("dict[str, object]", _read_json_file(settings)["hooks"])["PreToolUse"])
+            handler = cast("dict[str, object]", cast("list[object]", cast("dict[str, object]", groups[0])["hooks"])[0])
+            self.assertNotIn("args", handler)
+            command = cast("str", handler["command"])
+            self.assertIn("run --target claude --behavior evidence", command)
+            # A reinstall recognizes the command-string spelling as ours.
+            second = install.install_claude(settings, uninstall=False, dry_run=False)
+            self.assertEqual(second.action, "updated")
+            groups2 = cast("list[object]", cast("dict[str, object]", _read_json_file(settings)["hooks"])["PreToolUse"])
+            self.assertEqual(len(groups2), 1)
 
     def test_uninstall_on_clean_config_is_unchanged(self) -> None:
         with TemporaryDirectory() as tmp:
