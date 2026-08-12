@@ -14,6 +14,7 @@ Both operations are idempotent and reversible (``--uninstall``).
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import sys
 from dataclasses import dataclass, field
@@ -115,7 +116,14 @@ def _is_pci_handler(handler: object) -> bool:
     obj = _as_object(handler)
     if obj.get("type") != "command":
         return False
+    # Current spelling: one command string. Legacy spelling: command + "args"
+    # list (Claude Code ignores "args", so those installs were inert).
     args = [item for item in _as_list(obj.get("args")) if isinstance(item, str)]
+    if not args and isinstance(command := obj.get("command"), str):
+        try:
+            args = shlex.split(command)[1:]
+        except ValueError:
+            return False
     if args and args[0] == "hook":  # consolidated `pci hook run ...` spelling
         args = args[1:]
     if not args or args[0] != "run":
@@ -142,7 +150,13 @@ def _strip_pci_groups(groups: list[object]) -> list[object]:
 def _evidence_group(command: list[str]) -> dict[str, object]:
     return {
         "matcher": _CLAUDE_EDIT_MATCHER,
-        "hooks": [{"type": "command", "command": command[0], "args": [*command[1:], *_EVIDENCE_ARGS]}],
+        # Claude Code's hook schema takes one command string; an "args" key is ignored.
+        "hooks": [
+            {
+                "type": "command",
+                "command": shlex.join([*command, *_EVIDENCE_ARGS]),
+            }
+        ],
     }
 
 
