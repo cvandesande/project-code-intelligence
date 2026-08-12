@@ -17,6 +17,7 @@ as "no callers found", which is the dangerous direction.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
@@ -78,6 +79,15 @@ _OUTSIDE_INDEX = (
     "[pci add-side -- this edit defines {names}, but {root} is outside the indexed repos, "
     "so no duplicate check ran against its code. Index it (pci index) or search prior art "
     "yourself; do not read this as 'nothing found'.]"
+)
+# Static practice text, appended to every add-side message. It restates the minimal-change
+# ladder at the moment new code is written, the same delivery ponytail's benchmark showed
+# cuts LOC/tokens (prompt-only, -54% LOC on feature tasks). PCI_HOOK_PRACTICE=0 turns it
+# off so an A/B run can measure the text alone against the evidence-only baseline.
+_PRACTICE = (
+    "[pci practice -- write the smallest change that works: reuse an existing definition, "
+    "then the standard library, then a platform feature, before new code. Do not add "
+    "abstractions, options, or scaffolding for needs that are not in the task.]"
 )
 _QUERY_FAILED = (
     "[pci add-side -- this edit defines {names}, but the duplicate check could not run: "
@@ -210,6 +220,12 @@ def _add_side_block(file_path: str, new_string: str, added: list[str], names: st
     return _PRIOR_ART.format(names=names, hits="\n".join(hit.render(repo) for hit in hits))
 
 
+def _with_practice(block: str) -> str:
+    if os.environ.get("PCI_HOOK_PRACTICE", "1").lower() in {"0", "false", "off"}:
+        return block
+    return block + "\n" + _PRACTICE
+
+
 def _emit_evidence(agent: Agent, block: str, out: IO[str], *, event_name: str) -> None:
     if agent == "claude":
         # Echo the firing event (PreToolUse/PostToolUse) so hookSpecificOutput matches it.
@@ -221,6 +237,10 @@ def _emit_evidence(agent: Agent, block: str, out: IO[str], *, event_name: str) -
 
 
 def run_evidence(agent: Agent, *, stdin: IO[str] | None = None, stdout: IO[str] | None = None) -> int:
+    # Full off-switch: lets a benchmark or a user silence the evidence hook for one
+    # session without touching the installed agent config.
+    if os.environ.get("PCI_HOOK_DISABLE", "").lower() in {"1", "true", "on"}:
+        return 0
     in_stream: IO[str] = stdin if stdin is not None else cast("IO[str]", sys.stdin)
     out_stream: IO[str] = stdout if stdout is not None else cast("IO[str]", sys.stdout)
     event = _read_json(in_stream)
@@ -242,7 +262,7 @@ def run_evidence(agent: Agent, *, stdin: IO[str] | None = None, stdout: IO[str] 
             overflow = f" (+{len(added) - _MAX_ADDED} more)" if len(added) > _MAX_ADDED else ""
             _emit_evidence(
                 agent,
-                _add_side_block(file_path, new_string, added[:_MAX_ADDED], names + overflow),
+                _with_practice(_add_side_block(file_path, new_string, added[:_MAX_ADDED], names + overflow)),
                 out_stream,
                 event_name=event_name,
             )
@@ -278,13 +298,50 @@ def _lock_path(repo: Path) -> Path:
     return (git_dir if git_dir.is_dir() else repo) / _LOCK_NAME
 
 
+_MARKER_NAME = "pci-reindex.json"
+
+
+def write_reindex_markers(repo_paths: list[Path], collection: str | None) -> None:
+    """Record the index invocation in each indexed repo so the post-commit hook
+    can replay it. Without this, a hook in a repo indexed as part of a multi-repo
+    workspace would reindex it standalone -- into a different database/collection."""
+    payload = json.dumps({"cwd": str(Path.cwd()), "repo_paths": [str(p) for p in repo_paths], "collection": collection})
+    for repo in repo_paths:
+        git_dir = repo / ".git"
+        if git_dir.is_dir():
+            with contextlib.suppress(OSError):
+                _ = (git_dir / _MARKER_NAME).write_text(payload, encoding="utf-8")
+
+
+def reindex_target(repo: Path) -> tuple[Path, list[str]]:
+    """Resolve (cwd, index args) for a reindex: the workspace invocation recorded
+    at index time, or the repo alone when no valid marker exists."""
+    try:
+        data = cast("object", json.loads((repo / ".git" / _MARKER_NAME).read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return repo, [str(repo)]
+    marker = _as_object(data)
+    cwd = marker.get("cwd")
+    raw = marker.get("repo_paths")
+    if not (isinstance(cwd, str) and Path(cwd).is_dir() and isinstance(raw, list)):
+        return repo, [str(repo)]
+    raw_paths = cast("list[object]", raw)
+    paths = [p for p in raw_paths if isinstance(p, str) and Path(p).is_dir()]
+    if not paths or len(paths) != len(raw_paths):
+        return repo, [str(repo)]
+    collection = marker.get("collection")
+    args = ["--collection", collection, *paths] if isinstance(collection, str) else paths
+    return Path(cwd), args
+
+
 def run_reindex(repo: Path) -> int:
     """Run pci-index for ``repo`` unless another run holds the lock.
 
     Blocking by design: callers run this in the background (an async agent hook
     or a debounced detached spawn), and the lock coalesces overlapping calls.
     """
-    lock_path = _lock_path(repo)
+    workspace, index_args = reindex_target(repo)
+    lock_path = _lock_path(workspace)
     try:
         lock_file = lock_path.open("w")
     except OSError:
@@ -296,8 +353,8 @@ def run_reindex(repo: Path) -> int:
             return 0  # another reindex is in flight; it will pick up the latest state
         try:
             _ = process.run(
-                [*_index_command(repo), str(repo)],
-                process.RunOptions(cwd=repo, stdout=process.DEVNULL, stderr=process.DEVNULL),
+                [*_index_command(repo), *index_args],
+                process.RunOptions(cwd=workspace, stdout=process.DEVNULL, stderr=process.DEVNULL),
             )
         except (process.SubprocessError, OSError):
             return 0  # binary missing / not runnable -> stay silent, index just not refreshed

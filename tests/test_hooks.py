@@ -343,6 +343,19 @@ class EvidenceRuntimeTests(unittest.TestCase):
         self.assertIn("not proof", text)
         self.assertNotIn("No duplicate check was run", text)
 
+    def test_add_side_carries_practice_text_and_env_turns_it_off(self) -> None:
+        event = {"filePath": "a.py", "oldString": "", "newString": "def brand_new():\n x = 1\n return x\n"}
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PCI_HOOK_PRACTICE", None)
+            self.assertIn("[pci practice", self._run_add(event, _no_hits))
+        with mock.patch.dict(os.environ, {"PCI_HOOK_PRACTICE": "0"}):
+            self.assertNotIn("[pci practice", self._run_add(event, _no_hits))
+
+    def test_hook_disable_env_silences_everything(self) -> None:
+        event = {"filePath": "a.py", "oldString": "", "newString": "def brand_new():\n x = 1\n return x\n"}
+        with mock.patch.dict(os.environ, {"PCI_HOOK_DISABLE": "1"}):
+            self.assertEqual(self._run_add(event, _no_hits), "")
+
     def test_added_definition_shows_prior_art_when_the_index_has_a_close_hit(self) -> None:
         hit = runtime.similar.Hit(
             added_name="brand_new",
@@ -684,6 +697,48 @@ class InstallGitTests(unittest.TestCase):
             self.assertTrue(_post_commit_path(repo).exists())
             _ = install.install_git(repo, uninstall=True, dry_run=False)
             self.assertFalse(_post_commit_path(repo).exists())
+
+
+class ReindexMarkerTests(unittest.TestCase):
+    @staticmethod
+    def _repo(root: Path, name: str) -> Path:
+        repo = root / name
+        (repo / ".git").mkdir(parents=True)
+        return repo
+
+    def test_marker_round_trip_replays_workspace_invocation(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp).resolve()
+            repo_a = self._repo(workspace, "repo-a")
+            repo_b = self._repo(workspace, "repo-b")
+            with mock.patch.object(Path, "cwd", return_value=workspace):
+                runtime.write_reindex_markers([repo_a, repo_b], "my-workspace")
+            cwd, args = runtime.reindex_target(repo_b)
+            self.assertEqual(cwd, workspace)
+            self.assertEqual(args, ["--collection", "my-workspace", str(repo_a), str(repo_b)])
+
+    def test_marker_without_collection_omits_flag(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp).resolve()
+            repo = self._repo(workspace, "repo")
+            with mock.patch.object(Path, "cwd", return_value=workspace):
+                runtime.write_reindex_markers([repo], None)
+            cwd, args = runtime.reindex_target(repo)
+            self.assertEqual((cwd, args), (workspace, [str(repo)]))
+
+    def test_missing_or_invalid_marker_falls_back_to_repo(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = self._repo(Path(tmp).resolve(), "repo")
+            self.assertEqual(runtime.reindex_target(repo), (repo, [str(repo)]))
+            _ = (repo / ".git" / "pci-reindex.json").write_text("not json", encoding="utf-8")
+            self.assertEqual(runtime.reindex_target(repo), (repo, [str(repo)]))
+
+    def test_marker_with_vanished_workspace_falls_back(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = self._repo(Path(tmp).resolve(), "repo")
+            payload = json.dumps({"cwd": str(Path(tmp) / "gone"), "repo_paths": [str(repo)], "collection": None})
+            _ = (repo / ".git" / "pci-reindex.json").write_text(payload, encoding="utf-8")
+            self.assertEqual(runtime.reindex_target(repo), (repo, [str(repo)]))
 
 
 if __name__ == "__main__":
