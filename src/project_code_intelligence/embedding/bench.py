@@ -12,7 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from project_code_intelligence import config, http_client, power
+from rich.console import Group
+from rich.text import Text
+
+from project_code_intelligence import config, console_ui, http_client, power
 from project_code_intelligence.embeddings import (
     http_error_detail,
     resolve_embedding_endpoint_model,
@@ -564,56 +567,78 @@ def result_json(result: BenchmarkResult) -> JsonObject:
     return payload
 
 
-def print_human_result(result: BenchmarkResult) -> None:
+def _power_rows(result: BenchmarkResult) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    for measurement in result.power_measurements:
+        if measurement.average_watts is None or measurement.energy_joules is None:
+            rows.append((
+                f"power {measurement.label}",
+                f"unavailable ({measurement.note or 'no reading'}) · source: {measurement.source}",
+            ))
+            continue
+        joules_per_text = measurement.energy_joules / result.total_texts
+        joules_per_kchar = measurement.energy_joules / (result.total_chars / 1000.0)
+        texts_per_joule = result.total_texts / measurement.energy_joules if measurement.energy_joules > 0 else 0.0
+        detail = (
+            f"{measurement.average_watts:.3f} W avg, "
+            f"{measurement.energy_joules:.3f} J total, "
+            f"{joules_per_kchar:.4f} J/kchar, "
+            f"{joules_per_text:.4f} J/text, "
+            f"{texts_per_joule:.3f} texts/J · "
+            f"source: {measurement.source} ({measurement.source_type}, samples={measurement.samples})"
+        )
+        if measurement.note:
+            detail += f" · note: {measurement.note}"
+        rows.append((f"power {measurement.label}", detail))
+    return rows
+
+
+def result_rows(result: BenchmarkResult) -> list[tuple[str, str]]:
     data = result_json(result)
     latency = data["latency_seconds"]
     if not isinstance(latency, dict):
         raise TypeError("latency summary must be an object")
-    write_stdout("Embedding endpoint benchmark")
-    write_stdout(f"endpoint: {result.endpoint}")
-    write_stdout(f"model: {result.model}")
+    rows: list[tuple[str, str]] = [
+        ("endpoint", str(result.endpoint)),
+        ("model", str(result.model)),
+    ]
     if result.response_model:
-        write_stdout(f"response model: {result.response_model}")
-    write_stdout(f"vector dimensions: {result.vector_dimensions}")
-    write_stdout(f"input source: {result.input_source}")
-    write_stdout(
-        "input chars: "
-        f"{result.input_stats.count} texts, "
-        f"p50 {result.input_stats.p50_chars}, "
-        f"p95 {result.input_stats.p95_chars}, "
-        f"max {result.input_stats.max_chars}"
-    )
-    write_stdout(f"batch size: {result.batch_size}")
-    write_stdout(f"runs: {result.runs} warmup: {result.warmup} text chars: {result.text_chars}")
-    write_stdout(f"total: {data['total_seconds']}s for {result.total_texts} texts / {result.total_chars} chars")
-    write_stdout(
-        "throughput: "
-        f"{data['requests_per_second']} req/s, "
-        f"{data['chars_per_second']} chars/s, "
-        f"{data['texts_per_second']} texts/s"
-    )
-    write_stdout(f"latency: min {latency['min']}s, p50 {latency['p50']}s, p95 {latency['p95']}s, max {latency['max']}s")
-    if result.power_measurements:
-        write_stdout("power:")
-        for measurement in result.power_measurements:
-            if measurement.average_watts is None or measurement.energy_joules is None:
-                write_stdout(f"  {measurement.label}: unavailable ({measurement.note or 'no reading'})")
-                write_stdout(f"    source: {measurement.source}")
-                continue
-            joules_per_text = measurement.energy_joules / result.total_texts
-            joules_per_kchar = measurement.energy_joules / (result.total_chars / 1000.0)
-            texts_per_joule = result.total_texts / measurement.energy_joules if measurement.energy_joules > 0 else 0.0
-            write_stdout(
-                f"  {measurement.label}: "
-                f"{measurement.average_watts:.3f} W avg, "
-                f"{measurement.energy_joules:.3f} J total, "
-                f"{joules_per_kchar:.4f} J/kchar, "
-                f"{joules_per_text:.4f} J/text, "
-                f"{texts_per_joule:.3f} texts/J"
-            )
-            write_stdout(f"    source: {measurement.source} ({measurement.source_type}, samples={measurement.samples})")
-            if measurement.note:
-                write_stdout(f"    note: {measurement.note}")
+        rows.append(("response model", str(result.response_model)))
+    rows += [
+        ("dimensions", str(result.vector_dimensions)),
+        ("input source", str(result.input_source)),
+        (
+            "input chars",
+            f"{result.input_stats.count} texts, p50 {result.input_stats.p50_chars}, "
+            f"p95 {result.input_stats.p95_chars}, max {result.input_stats.max_chars}",
+        ),
+        ("batch size", str(result.batch_size)),
+        ("runs", f"{result.runs} warmup: {result.warmup} text chars: {result.text_chars}"),
+        ("total", f"{data['total_seconds']}s for {result.total_texts} texts / {result.total_chars} chars"),
+        (
+            "throughput",
+            f"{data['requests_per_second']} req/s, {data['chars_per_second']} chars/s, "
+            f"{data['texts_per_second']} texts/s",
+        ),
+        ("latency", f"min {latency['min']}s, p50 {latency['p50']}s, p95 {latency['p95']}s, max {latency['max']}s"),
+        *_power_rows(result),
+    ]
+    return rows
+
+
+def print_human_result(result: BenchmarkResult) -> None:
+    rows = result_rows(result)
+    if not console_ui.should_emit_pretty(sys.stdout):
+        write_stdout("Embedding endpoint benchmark")
+        for label, detail in rows:
+            write_stdout(f"{label}: {detail}")
+        return
+    console = console_ui.build_console()
+    grid = console_ui.section_grid()
+    for label, detail in rows:
+        console_ui.add_row(grid, label, detail)
+    header = console_ui.header_row("pci bench · embedding endpoint", "ok", "done")
+    console.print(console_ui.main_panel(Group(header, Text(), grid)))
 
 
 def configured_power_sensors(parsed: BenchNamespace) -> list[power.PowerSensorSource]:
