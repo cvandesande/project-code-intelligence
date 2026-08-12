@@ -45,6 +45,7 @@ dependencies = [
 ]
 
 [project.scripts]
+pci = "project_code_intelligence.pci:main"
 pci-index = "project_code_intelligence.cli:index_main"
 pci-analyze = "project_code_intelligence.analyze:main"
 pci-evidence = "project_code_intelligence.evidence:main"
