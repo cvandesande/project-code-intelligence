@@ -43,21 +43,26 @@ export function removedDefinitions(oldString, newString) {
   return [...before].filter((name) => !after.has(name))
 }
 
-// Resolve the pci-hook binary: explicit override, repo venv, then PATH.
-export function hookBin(directory) {
+// Resolve the hook command prefix: explicit override, repo venv, then PATH.
+// Prefers the single `pci` binary (`pci hook ...`); the legacy pci-hook shim is
+// the fallback for systems installed before the single-binary change.
+export function hookCmd(directory) {
   const configured = process.env.PCI_HOOK_BIN
-  if (configured) return configured
-  const local = `${directory}/.venv/bin/pci-hook`
-  return existsSync(local) ? local : "pci-hook"
+  if (configured) return [configured]
+  const pci = `${directory}/.venv/bin/pci`
+  if (existsSync(pci)) return [pci, "hook"]
+  const legacy = `${directory}/.venv/bin/pci-hook`
+  if (existsSync(legacy)) return [legacy]
+  return ["pci", "hook"]
 }
 
-// Run `pci-hook` with args, feeding `input` on stdin; resolve trimmed stdout
-// ("" on any error, so callers stay silent and never break the edit).
-export function runHook(bin, args, input) {
+// Run the hook command with args, feeding `input` on stdin; resolve trimmed
+// stdout ("" on any error, so callers stay silent and never break the edit).
+export function runHook(cmd, args, input) {
   return new Promise((resolve) => {
     let child
     try {
-      child = spawn(bin, args, { stdio: ["pipe", "pipe", "ignore"] })
+      child = spawn(cmd[0], [...cmd.slice(1), ...args], { stdio: ["pipe", "pipe", "ignore"] })
     } catch {
       resolve("")
       return
@@ -89,10 +94,10 @@ EVIDENCE_JS = r"""// PCI evidence hook.
 // which is a change to this adapter's shape, not a one-line addition. Claude is
 // unaffected: its hook is registered on PreToolUse for Edit and Write both.
 
-import { SOURCE_EXT, removedDefinitions, hookBin, runHook } from "../lib/pci-evidence-logic.js"
+import { SOURCE_EXT, removedDefinitions, hookCmd, runHook } from "../lib/pci-evidence-logic.js"
 
 export const PciEvidence = async ({ directory }) => {
-  const bin = hookBin(directory)
+  const cmd = hookCmd(directory)
   return {
     "tool.execute.after": async (input, output) => {
       if (input.tool !== "edit") return
@@ -111,7 +116,7 @@ export const PciEvidence = async ({ directory }) => {
         oldString: args.oldString,
         newString: args.newString,
       })
-      const text = (await runHook(bin, ["run", "--agent", "opencode", "--behavior", "evidence"], event)).trim()
+      const text = (await runHook(cmd, ["run", "--agent", "opencode", "--behavior", "evidence"], event)).trim()
       if (text) output.output += "\n\n" + text
     },
   }
@@ -128,7 +133,7 @@ REINDEX_JS = r"""// PCI background reindex hook (debounced, opt-in).
 // serialises runs with a lock. Tunable: PCI_REINDEX_DEBOUNCE_MS (5000).
 
 import { spawn } from "node:child_process"
-import { SOURCE_EXT, hookBin } from "../lib/pci-evidence-logic.js"
+import { SOURCE_EXT, hookCmd } from "../lib/pci-evidence-logic.js"
 
 const DEBOUNCE_MS = Number(process.env.PCI_REINDEX_DEBOUNCE_MS) || 5000
 const WRITE_TOOLS = new Set(["edit", "write"])
@@ -136,7 +141,7 @@ const WRITE_TOOLS = new Set(["edit", "write"])
 export const PciReindex = async ({ directory }) => {
   // Opt-in: default reindex path is the git post-commit hook.
   if (!process.env.PCI_REINDEX_ON_EDIT) return {}
-  const bin = hookBin(directory)
+  const cmd = hookCmd(directory)
   let timer = null
   let running = false
   let pending = false
@@ -144,7 +149,8 @@ export const PciReindex = async ({ directory }) => {
   const runIndex = () => {
     running = true
     pending = false
-    const child = spawn(bin, ["run", "--agent", "opencode", "--behavior", "reindex", "--repo", directory], {
+    const args = [...cmd.slice(1), "run", "--agent", "opencode", "--behavior", "reindex", "--repo", directory]
+    const child = spawn(cmd[0], args, {
       cwd: directory,
       stdio: "ignore",
     })

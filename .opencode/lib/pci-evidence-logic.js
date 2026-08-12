@@ -33,21 +33,26 @@ export function removedDefinitions(oldString, newString) {
   return [...before].filter((name) => !after.has(name))
 }
 
-// Resolve the pci-hook binary: explicit override, repo venv, then PATH.
-export function hookBin(directory) {
+// Resolve the hook command prefix: explicit override, repo venv, then PATH.
+// Prefers the single `pci` binary (`pci hook ...`); the legacy pci-hook shim is
+// the fallback for systems installed before the single-binary change.
+export function hookCmd(directory) {
   const configured = process.env.PCI_HOOK_BIN
-  if (configured) return configured
-  const local = `${directory}/.venv/bin/pci-hook`
-  return existsSync(local) ? local : "pci-hook"
+  if (configured) return [configured]
+  const pci = `${directory}/.venv/bin/pci`
+  if (existsSync(pci)) return [pci, "hook"]
+  const legacy = `${directory}/.venv/bin/pci-hook`
+  if (existsSync(legacy)) return [legacy]
+  return ["pci", "hook"]
 }
 
-// Run `pci-hook` with args, feeding `input` on stdin; resolve trimmed stdout
-// ("" on any error, so callers stay silent and never break the edit).
-export function runHook(bin, args, input) {
+// Run the hook command with args, feeding `input` on stdin; resolve trimmed
+// stdout ("" on any error, so callers stay silent and never break the edit).
+export function runHook(cmd, args, input) {
   return new Promise((resolve) => {
     let child
     try {
-      child = spawn(bin, args, { stdio: ["pipe", "pipe", "ignore"] })
+      child = spawn(cmd[0], [...cmd.slice(1), ...args], { stdio: ["pipe", "pipe", "ignore"] })
     } catch {
       resolve("")
       return

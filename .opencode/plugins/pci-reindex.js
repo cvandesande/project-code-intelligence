@@ -8,7 +8,7 @@
 // serialises runs with a lock. Tunable: PCI_REINDEX_DEBOUNCE_MS (5000).
 
 import { spawn } from "node:child_process"
-import { SOURCE_EXT, hookBin } from "../lib/pci-evidence-logic.js"
+import { SOURCE_EXT, hookCmd } from "../lib/pci-evidence-logic.js"
 
 const DEBOUNCE_MS = Number(process.env.PCI_REINDEX_DEBOUNCE_MS) || 5000
 const WRITE_TOOLS = new Set(["edit", "write"])
@@ -16,7 +16,7 @@ const WRITE_TOOLS = new Set(["edit", "write"])
 export const PciReindex = async ({ directory }) => {
   // Opt-in: default reindex path is the git post-commit hook.
   if (!process.env.PCI_REINDEX_ON_EDIT) return {}
-  const bin = hookBin(directory)
+  const cmd = hookCmd(directory)
   let timer = null
   let running = false
   let pending = false
@@ -24,7 +24,8 @@ export const PciReindex = async ({ directory }) => {
   const runIndex = () => {
     running = true
     pending = false
-    const child = spawn(bin, ["run", "--agent", "opencode", "--behavior", "reindex", "--repo", directory], {
+    const args = [...cmd.slice(1), "run", "--agent", "opencode", "--behavior", "reindex", "--repo", directory]
+    const child = spawn(cmd[0], args, {
       cwd: directory,
       stdio: "ignore",
     })

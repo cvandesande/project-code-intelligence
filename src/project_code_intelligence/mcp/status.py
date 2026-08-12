@@ -524,7 +524,9 @@ def _package_version() -> str | None:
         return None
 
 
-def _source_git_root(module_path: Path) -> Path | None:
+def source_git_root(module_path: Path) -> Path | None:
+    """Nearest ancestor of ``module_path`` containing .git (dir or worktree file). Shared
+    with hooks/similar.py, which resolves an edited file to its enclosing repo."""
     for candidate in (module_path.parent, *module_path.parents):
         if (candidate / ".git").exists():
             return candidate
@@ -532,7 +534,7 @@ def _source_git_root(module_path: Path) -> Path | None:
 
 
 def _source_git_commit(module_path: Path) -> str | None:
-    git_root = _source_git_root(module_path)
+    git_root = source_git_root(module_path)
     if git_root is None:
         return None
     commit = git_utils.run_git(git_root, ["rev-parse", "HEAD"])

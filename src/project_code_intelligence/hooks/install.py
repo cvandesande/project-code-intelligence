@@ -56,11 +56,14 @@ def _hook_command() -> list[str]:
     invoked = Path(sys.argv[0]) if sys.argv and sys.argv[0] else None
     if invoked is not None and invoked.name.startswith("pci-hook") and invoked.exists():
         return [str(invoked.resolve())]
-    beside_python = Path(sys.executable).with_name("pci-hook")
-    if beside_python.exists():
-        return [str(beside_python)]
-    found = shutil.which("pci-hook")
-    return [found or "pci-hook"]
+    for name, extra in (("pci", ["hook"]), ("pci-hook", [])):
+        beside_python = Path(sys.executable).with_name(name)
+        if beside_python.exists():
+            return [str(beside_python), *extra]
+        found = shutil.which(name)
+        if found:
+            return [found, *extra]
+    return ["pci", "hook"]
 
 
 def _as_object(value: object) -> dict[str, object]:

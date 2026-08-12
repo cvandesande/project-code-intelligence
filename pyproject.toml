@@ -44,21 +44,12 @@ dependencies = [
   "mlx-lm>=0.20; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
+# Single executable: every pci-* spelling is a `pci` subcommand. Systems that
+# installed an older version keep their pci-* shims until they upgrade; the
+# internal callers (hook runtime, installers, opencode assets) fall back to
+# those legacy names when `pci` is absent.
 [project.scripts]
 pci = "project_code_intelligence.pci:main"
-pci-index = "project_code_intelligence.cli:index_main"
-pci-analyze = "project_code_intelligence.analyze:main"
-pci-evidence = "project_code_intelligence.evidence:main"
-pci-hook = "project_code_intelligence.hooks.cli:main"
-pci-context = "project_code_intelligence.context:main"
-pci-ingest-code = "project_code_intelligence.ingest_code_intel:cli_main"
-pci-llama-embed = "project_code_intelligence.embedding.llama:main"
-pci-apple-embed-server = "project_code_intelligence.embedding.apple_embed_server:main"
-pci-fastembed-server = "project_code_intelligence.embedding.fastembed_server:main"
-pci-embedding-bench = "project_code_intelligence.embedding.bench:main"
-pci-doctor = "project_code_intelligence.doctor:main"
-pci-mcp = "project_code_intelligence.server:main"
-pci-mcp-smoke = "project_code_intelligence.cli:mcp_smoke_main"
 
 [project.optional-dependencies]
 local-embeddings = [
