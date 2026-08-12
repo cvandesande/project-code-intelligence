@@ -33,9 +33,24 @@ _COMMANDS: dict[str, tuple[str, str, list[str]]] = {
     "fastembed-server": ("project_code_intelligence.embedding.fastembed_server", "main", []),
 }
 
+# `pci services <verb>` translates to the doctor flags that already start/stop
+# the local database and embedding backend.
+_SERVICES = {"start": ["--start"], "stop": ["--stop"], "status": []}
+
+
+def resolve(command: str, rest: list[str]) -> tuple[tuple[str, str, list[str]], list[str]] | None:
+    if command == "services":
+        verb = rest[0] if rest else "status"
+        flags = _SERVICES.get(verb)
+        if flags is None:
+            return None
+        return ("project_code_intelligence.doctor", "main", flags), rest[1:]
+    entry = _COMMANDS.get(command)
+    return (entry, rest) if entry is not None else None
+
 
 def _usage(stream: IO[str]) -> None:
-    lines = "\n  ".join(sorted(_COMMANDS))
+    lines = "\n  ".join(sorted([*_COMMANDS, "services (start|stop|status)"]))
     _ = stream.write(f"usage: pci <command> [args...]\n\ncommands:\n  {lines}\n")
 
 
@@ -44,13 +59,13 @@ def main(argv: list[str] | None = None) -> int:
     if not args or args[0] in {"-h", "--help"}:
         _usage(sys.stdout if args else sys.stderr)
         return 0 if args else 2
-    command, rest = args[0], args[1:]
-    entry = _COMMANDS.get(command)
-    if entry is None:
-        _ = sys.stderr.write(f"pci: unknown command {command!r}\n")
+    command = args[0]
+    resolved = resolve(command, args[1:])
+    if resolved is None:
+        _ = sys.stderr.write(f"pci: unknown command {' '.join(args[:2])!r}\n")
         _usage(sys.stderr)
         return 2
-    module_name, attr, prefix = entry
+    (module_name, attr, prefix), rest = resolved
     func = cast("Callable[[], object]", getattr(importlib.import_module(module_name), attr))
     sys.argv = [f"pci {command}", *prefix, *rest]
     result = func()
