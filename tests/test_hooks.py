@@ -187,6 +187,12 @@ class SimilarTests(unittest.TestCase):
         query = source.split('_SQL = """', 1)[1].split('"""', 1)[0]
         self.assertNotIn("impl_trait", query)
 
+    def test_split_chunks_of_one_function_render_once(self) -> None:
+        """Long functions index as a whole-body chunk plus overlapping split chunks under
+        the same symbol; one match must not render as several rows."""
+        hits = SimilarTests._nearest([[_row("long_fn", 0.10), _row("long_fn", 0.12), _row("other", 0.15)]])
+        self.assertEqual([(h.symbol, h.distance) for h in hits], [("long_fn", 0.10), ("other", 0.15)])
+
     def test_rows_with_unusable_columns_are_skipped_not_crashed(self) -> None:
         hits = SimilarTests._nearest([
             [_row("ok", 0.10, line=None), {"symbol": None, "source_path": None, "line_start": 1, "distance": 0.1}]
