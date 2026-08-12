@@ -44,7 +44,14 @@ class InstallOutcome:
 
 
 def _hook_command() -> str:
-    """Absolute path to this pci-hook, so the agent config does not depend on PATH."""
+    """Absolute path to pci-hook, so the agent config does not depend on PATH.
+
+    Prefer the uv-tool shim (`make tool-install`) over a repo .venv binary:
+    the shim survives venv rebuilds and works from any directory.
+    """
+    tool_shim = Path.home() / ".local" / "bin" / "pci-hook"
+    if tool_shim.exists():
+        return str(tool_shim)
     invoked = Path(sys.argv[0]) if sys.argv and sys.argv[0] else None
     if invoked is not None and invoked.name.startswith("pci-hook") and invoked.exists():
         return str(invoked.resolve())

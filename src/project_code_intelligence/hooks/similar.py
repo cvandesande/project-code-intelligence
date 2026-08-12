@@ -66,6 +66,9 @@ LANGUAGE_GATES = {"rust": 0.34}
 MAX_HITS = 3
 PER_DEFINITION = 2
 
+# Trait-impl methods stay IN: excluding them (as the duplicate-names audit does) made the
+# hook blind to a near-verbatim copy of a rustls trait impl measured at distance 0.098.
+# Name-noise reasoning does not transfer to a distance query; the gate handles siblings.
 _SQL = """
     SELECT r.symbol, r.source_path, r.line_start, r.embedding <=> %s::vector AS distance
     FROM project_code_intel_records r
@@ -76,7 +79,6 @@ _SQL = """
       AND r.symbol IS NOT NULL
       AND r.symbol_kind IN ('function', 'method')
       AND r.file_role != 'test'
-      AND r.metadata ->> 'impl_trait' IS NULL
       AND f.is_source = true
       AND f.is_test = false
       AND r.embedding IS NOT NULL
@@ -155,7 +157,7 @@ def nearest(slices: Mapping[str, str], *, language: str | None = None) -> list[H
                 # The added definition is not in the index yet on a PreToolUse, but an
                 # in-place rewrite of an existing function would match itself. Drop it:
                 # "this is similar to itself" is noise, not prior art.
-                if symbol.rpartition(".")[2] == added_name:
+                if symbol.replace("::", ".").rpartition(".")[2] == added_name:
                     continue
                 hits.append(
                     Hit(

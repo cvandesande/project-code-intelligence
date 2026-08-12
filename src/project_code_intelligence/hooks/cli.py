@@ -46,16 +46,16 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pci-hook", description="Install and run pci editor-agent hooks.")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    install = sub.add_parser("install", help="Wire the pci hooks into an agent's config.")
-    _ = install.add_argument("--agent", required=True, choices=_AGENTS)
+    install = sub.add_parser("install", help="Wire the pci hooks into a target's config.")
+    _ = install.add_argument("--target", "--agent", dest="agent", required=True, choices=_AGENTS)
     _ = install.add_argument("--project", help="Project directory to install into (default: current directory).")
     _ = install.add_argument("--user", action="store_true", help="Claude only: install to user settings (~/.claude).")
     _ = install.add_argument("--uninstall", action="store_true", help="Remove the pci hooks instead of adding them.")
     _ = install.add_argument("--dry-run", action="store_true", help="Report what would change without writing.")
     _ = install.add_argument("--color", choices=("auto", "always", "never"), default="auto")
 
-    run = sub.add_parser("run", help="Runtime invoked by the agent hook (reads stdin, writes stdout).")
-    _ = run.add_argument("--agent", required=True, choices=_AGENTS)
+    run = sub.add_parser("run", help="Runtime invoked by the installed hook (reads stdin, writes stdout).")
+    _ = run.add_argument("--target", "--agent", dest="agent", required=True, choices=_AGENTS)
     _ = run.add_argument("--behavior", required=True, choices=_BEHAVIORS)
     _ = run.add_argument("--repo", help="Repository root for reindex (default: current directory).")
     return parser
@@ -82,12 +82,33 @@ def _render_outcome(outcome: install_mod.InstallOutcome, *, dry_run: bool, color
     console.print(console_ui.main_panel(Group(header, grid)))
 
 
+def prompt_claude_scope() -> bool:
+    """Ask user vs project scope. Returns True for user (global) scope."""
+    cwd = Path.cwd().resolve()
+    is_project = (cwd / ".git").exists() or (cwd / ".claude").is_dir()
+    if not is_project:
+        _ = sys.stderr.write(f"pci-hook: {cwd} does not look like a project; installing to user settings (~/.claude)\n")
+        return True
+    _ = sys.stderr.write(
+        "Install Claude Code hooks where?\n"
+        "  [g] globally (~/.claude/settings.json)\n"
+        f"  [p] this project ({cwd / '.claude' / 'settings.json'})\n"
+        "Choice [g/p]: "
+    )
+    reply = sys.stdin.readline().strip().lower()
+    return reply not in {"p", "project"}
+
+
 def _run_install(parsed: HookNamespace) -> int:
     if parsed.user and parsed.agent != "claude":
         _ = sys.stderr.write("pci-hook: --user applies to Claude only\n")
         return 2
     if parsed.agent == "claude":
-        if parsed.user:
+        user_scope = parsed.user
+        interactive = sys.stdin.isatty() and sys.stderr.isatty()
+        if not user_scope and parsed.project is None and not parsed.uninstall and interactive:
+            user_scope = prompt_claude_scope()
+        if user_scope:
             settings = Path.home() / ".claude" / "settings.json"
         else:
             settings = Path(parsed.project or ".").resolve() / ".claude" / "settings.json"
