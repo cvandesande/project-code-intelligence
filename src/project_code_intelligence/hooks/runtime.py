@@ -55,13 +55,14 @@ _REMINDER = (
     "this is a reminder, not a finding.]"
 )
 # Distinct from _REMINDER on purpose: when the query ran, saying "no duplicate check was
-# run" is false, and the honest version has to state its own weakness. At the shipped gate
-# the check keeps 69% of real prior art, so ~1 in 3 genuine duplicates produces this text.
+# run" is false, and the honest version has to state its own weakness. The copy stays
+# generic: recall is calibration- and language-specific (69% on this repo's Python gate,
+# unmeasured elsewhere -- see similar.py), so no number belongs in text shipped everywhere.
 _NO_HITS = (
     "[pci add-side -- this edit defines {names}. A similarity check ran against the index "
-    "and found nothing close enough to show. That check misses roughly a third of real "
-    "duplicates, so it is weak evidence of absence, not proof: if this is a well-trodden "
-    "area, search yourself with search_code_intel_semantic before finalizing.]"
+    "and found nothing close enough to show. The check misses some real duplicates, so it "
+    "is weak evidence of absence, not proof: if this is a well-trodden area, search "
+    "yourself with search_code_intel_semantic before finalizing.]"
 )
 _PRIOR_ART = (
     "[pci add-side -- this edit defines {names}. The index holds these nearby definitions "

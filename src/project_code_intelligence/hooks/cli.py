@@ -1,7 +1,7 @@
 """``pci-hook`` command: install the hooks, and serve as the hook runtime.
 
-    pci-hook install --agent opencode|claude [--project DIR | --user]
-    pci-hook run     --agent opencode|claude --behavior evidence|reindex
+    pci hook install --target opencode|claude|git [--project DIR | --user]
+    pci hook run     --target opencode|claude|git --behavior evidence|reindex
 
 ``install`` renders a Rich summary panel in the shared pci style; ``run`` is
 machine-facing and writes only the agent's injection payload to stdout.
@@ -74,7 +74,7 @@ _ACTION_PILL: dict[str, PillKind] = {
 def _render_outcome(outcome: install_mod.InstallOutcome, *, dry_run: bool, color: bool) -> None:
     console = console_ui.build_console(color=color)
     pill_label = ("would " if dry_run else "") + outcome.action
-    header = console_ui.header_row(f"pci-hook install · {outcome.agent}", _ACTION_PILL[outcome.action], pill_label)
+    header = console_ui.header_row(f"pci hook install · {outcome.agent}", _ACTION_PILL[outcome.action], pill_label)
     grid = console_ui.section_grid()
     console_ui.add_row(grid, "target", outcome.target)
     for label, detail in outcome.rows:
