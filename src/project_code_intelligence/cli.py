@@ -17,6 +17,7 @@ from project_code_intelligence.embeddings import (
     resolve_embedding_endpoint_model,
 )
 from project_code_intelligence.exceptions import ConfigError
+from project_code_intelligence.hooks import runtime as hook_runtime
 
 DEFAULT_EMBED_RECORD_TYPES = (
     "code_chunk,package_definition,config_symbol,patch_hunk,dts_node,"
@@ -383,7 +384,16 @@ def index_main(argv: list[str] | None = None) -> int:
     if parsed.json:
         os.environ["PCI_OUTPUT"] = "json"
     _ = progress.set_emitter(progress.detect_progress_mode(requested="json" if parsed.json else None))
-    return ingest_code_intel.cli_main(forwarded)
+    rc = ingest_code_intel.cli_main(forwarded)
+    if rc == 0 and parsed.repo_paths and not (parsed.dry_run or is_reset or is_init_db):
+        # Pin the collection actually used (explicit flag or inferred), so a hook
+        # replay cannot drift if its environment infers differently.
+        collection = forwarded[forwarded.index("--collection") + 1] if "--collection" in forwarded else None
+        hook_runtime.write_reindex_markers(
+            [Path(path).expanduser().resolve(strict=False) for path in parsed.repo_paths],
+            collection,
+        )
+    return rc
 
 
 class McpSmokeNamespace(argparse.Namespace):
