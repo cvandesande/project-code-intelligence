@@ -522,6 +522,36 @@ class InstallClaudeTests(unittest.TestCase):
             groups_after = cast("list[object]", hooks_after["PostToolUse"])
             self.assertEqual(len(groups_after), 1)
 
+    def test_legacy_agent_config_is_recognized_and_migrated(self) -> None:
+        """Pre-consolidation installs wrote pci-hook + --agent; a reinstall must
+        treat them as ours (update, not duplicate) and rewrite to the new spelling."""
+        with TemporaryDirectory() as tmp:
+            settings = Path(tmp) / ".claude" / "settings.json"
+            settings.parent.mkdir(parents=True)
+            legacy = {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Edit|Write",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "/old/.venv/bin/pci-hook",
+                                    "args": ["run", "--agent", "claude", "--behavior", "evidence"],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+            _ = settings.write_text(json.dumps(legacy), encoding="utf-8")
+            outcome = install.install_claude(settings, uninstall=False, dry_run=False)
+            self.assertEqual(outcome.action, "updated")
+            groups = cast("list[object]", cast("dict[str, object]", _read_json_file(settings)["hooks"])["PreToolUse"])
+            self.assertEqual(len(groups), 1)
+            handler = cast("dict[str, object]", cast("list[object]", cast("dict[str, object]", groups[0])["hooks"])[0])
+            self.assertIn("--target", cast("list[object]", handler["args"]))
+
     def test_uninstall_on_clean_config_is_unchanged(self) -> None:
         with TemporaryDirectory() as tmp:
             settings = Path(tmp) / ".claude" / "settings.json"

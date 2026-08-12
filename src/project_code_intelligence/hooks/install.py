@@ -23,9 +23,8 @@ from typing import cast
 from project_code_intelligence.hooks.opencode_assets import OPENCODE_FILES
 
 # Claude evidence fires PreToolUse (preventive); reindex is on the git post-commit hook, not here.
-_MIN_PCI_ARGS = 4  # run --agent <name> ...
 _CLAUDE_EDIT_MATCHER = "Edit|Write"
-_EVIDENCE_ARGS = ["run", "--agent", "claude", "--behavior", "evidence"]
+_EVIDENCE_ARGS = ["run", "--target", "claude", "--behavior", "evidence"]
 
 # Managed block markers so post-commit edits never clobber a user's own script.
 _POSTCOMMIT_BEGIN = "# >>> pci-hook reindex (managed) >>>"
@@ -43,23 +42,25 @@ class InstallOutcome:
 # --- shared helpers -------------------------------------------------------------
 
 
-def _hook_command() -> str:
-    """Absolute path to pci-hook, so the agent config does not depend on PATH.
+def _hook_command() -> list[str]:
+    """Absolute command prefix invoking the hook runtime, PATH-independent.
 
-    Prefer the uv-tool shim (`make tool-install`) over a repo .venv binary:
-    the shim survives venv rebuilds and works from any directory.
+    Prefer the consolidated ``pci hook`` via the uv-tool shim (`make
+    tool-install`): it survives venv rebuilds and works from any directory.
+    Legacy pci-hook binaries are the fallback for installs without the shim.
     """
-    tool_shim = Path.home() / ".local" / "bin" / "pci-hook"
-    if tool_shim.exists():
-        return str(tool_shim)
+    for name, extra in (("pci", ["hook"]), ("pci-hook", [])):
+        tool_shim = Path.home() / ".local" / "bin" / name
+        if tool_shim.exists():
+            return [str(tool_shim), *extra]
     invoked = Path(sys.argv[0]) if sys.argv and sys.argv[0] else None
     if invoked is not None and invoked.name.startswith("pci-hook") and invoked.exists():
-        return str(invoked.resolve())
+        return [str(invoked.resolve())]
     beside_python = Path(sys.executable).with_name("pci-hook")
     if beside_python.exists():
-        return str(beside_python)
+        return [str(beside_python)]
     found = shutil.which("pci-hook")
-    return found or "pci-hook"
+    return [found or "pci-hook"]
 
 
 def _as_object(value: object) -> dict[str, object]:
@@ -112,12 +113,15 @@ def _is_pci_handler(handler: object) -> bool:
     if obj.get("type") != "command":
         return False
     args = [item for item in _as_list(obj.get("args")) if isinstance(item, str)]
-    return (
-        len(args) >= _MIN_PCI_ARGS
-        and args[0] == "run"
-        and "--agent" in args
-        and args[args.index("--agent") + 1] == "claude"
-    )
+    if args and args[0] == "hook":  # consolidated `pci hook run ...` spelling
+        args = args[1:]
+    if not args or args[0] != "run":
+        return False
+    for flag in ("--target", "--agent"):  # --agent: configs from pre-consolidation installs
+        if flag in args:
+            index = args.index(flag)
+            return len(args) > index + 1 and args[index + 1] == "claude"
+    return False
 
 
 def _strip_pci_groups(groups: list[object]) -> list[object]:
@@ -132,10 +136,10 @@ def _strip_pci_groups(groups: list[object]) -> list[object]:
     return cleaned
 
 
-def _evidence_group(command: str) -> dict[str, object]:
+def _evidence_group(command: list[str]) -> dict[str, object]:
     return {
         "matcher": _CLAUDE_EDIT_MATCHER,
-        "hooks": [{"type": "command", "command": command, "args": list(_EVIDENCE_ARGS)}],
+        "hooks": [{"type": "command", "command": command[0], "args": [*command[1:], *_EVIDENCE_ARGS]}],
     }
 
 
@@ -172,7 +176,7 @@ def install_claude(settings_path: Path, *, uninstall: bool, dry_run: bool) -> In
         command = _hook_command()
         pre.append(_evidence_group(command))
         action = "updated" if existed else "installed"
-        rows = [("PreToolUse", f"{_CLAUDE_EDIT_MATCHER} -> evidence"), ("command", command)]
+        rows = [("PreToolUse", f"{_CLAUDE_EDIT_MATCHER} -> evidence"), ("command", " ".join(command))]
 
     _assign_event(hooks, "PreToolUse", pre)
     _assign_event(hooks, "PostToolUse", post)
@@ -240,11 +244,9 @@ def install_git(repo: Path, *, uninstall: bool, dry_run: bool) -> InstallOutcome
     if not base.endswith("\n"):
         base += "\n"
     # Background it so `git commit` returns immediately; pci-hook serialises with a lock.
-    block = (
-        f"{_POSTCOMMIT_BEGIN}\n"
-        f'{command} run --agent git --behavior reindex --repo "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 &\n'
-        f"{_POSTCOMMIT_END}\n"
-    )
+    command_line = " ".join(command)
+    reindex = f'{command_line} run --target git --behavior reindex --repo "$(git rev-parse --show-toplevel)"'
+    block = f"{_POSTCOMMIT_BEGIN}\n{reindex} >/dev/null 2>&1 &\n{_POSTCOMMIT_END}\n"
     if not dry_run:
         hook_path.parent.mkdir(parents=True, exist_ok=True)
         _ = hook_path.write_text(base + block, encoding="utf-8")
@@ -253,5 +255,5 @@ def install_git(repo: Path, *, uninstall: bool, dry_run: bool) -> InstallOutcome
         "git",
         "updated" if had_block else "installed",
         str(hook_path),
-        [("post-commit", str(hook_path)), ("command", command)],
+        [("post-commit", str(hook_path)), ("command", command_line)],
     )
