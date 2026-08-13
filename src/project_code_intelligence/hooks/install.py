@@ -26,6 +26,9 @@ from project_code_intelligence.hooks.opencode_assets import OPENCODE_FILES
 # Claude evidence fires PreToolUse (preventive); reindex is on the git post-commit hook, not here.
 _CLAUDE_EDIT_MATCHER = "Edit|Write"
 _EVIDENCE_ARGS = ["run", "--target", "claude", "--behavior", "evidence"]
+# The banner announces the regime once per session; matcher mirrors session (re)starts.
+_CLAUDE_SESSION_MATCHER = "startup|resume|clear|compact"
+_BANNER_ARGS = ["run", "--target", "claude", "--behavior", "banner"]
 
 # Managed block markers so post-commit edits never clobber a user's own script.
 _POSTCOMMIT_BEGIN = "# >>> pci-hook reindex (managed) >>>"
@@ -160,6 +163,13 @@ def _evidence_group(command: list[str]) -> dict[str, object]:
     }
 
 
+def _banner_group(command: list[str]) -> dict[str, object]:
+    return {
+        "matcher": _CLAUDE_SESSION_MATCHER,
+        "hooks": [{"type": "command", "command": shlex.join([*command, *_BANNER_ARGS])}],
+    }
+
+
 def _load_settings(path: Path) -> dict[str, object]:
     if not path.exists():
         return {}
@@ -185,19 +195,28 @@ def install_claude(settings_path: Path, *, uninstall: bool, dry_run: bool) -> In
     pre = _strip_pci_groups(_as_list(hooks.get("PreToolUse")))
     post = _strip_pci_groups(_as_list(hooks.get("PostToolUse")))
     stop = _strip_pci_groups(_as_list(hooks.get("Stop")))
+    session = _strip_pci_groups(_as_list(hooks.get("SessionStart")))
 
     if uninstall:
         action = "removed" if existed else "unchanged"
-        rows = [("PreToolUse", "evidence")] if existed else [("state", "no pci hooks present")]
+        rows = (
+            [("PreToolUse", "evidence"), ("SessionStart", "banner")] if existed else [("state", "no pci hooks present")]
+        )
     else:
         command = _hook_command()
         pre.append(_evidence_group(command))
+        session.append(_banner_group(command))
         action = "updated" if existed else "installed"
-        rows = [("PreToolUse", f"{_CLAUDE_EDIT_MATCHER} -> evidence"), ("command", " ".join(command))]
+        rows = [
+            ("PreToolUse", f"{_CLAUDE_EDIT_MATCHER} -> evidence"),
+            ("SessionStart", f"{_CLAUDE_SESSION_MATCHER} -> banner"),
+            ("command", " ".join(command)),
+        ]
 
     _assign_event(hooks, "PreToolUse", pre)
     _assign_event(hooks, "PostToolUse", post)
     _assign_event(hooks, "Stop", stop)
+    _assign_event(hooks, "SessionStart", session)
     if hooks:
         data["hooks"] = hooks
     else:
