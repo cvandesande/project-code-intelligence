@@ -333,23 +333,25 @@ class EvidenceRuntimeTests(unittest.TestCase):
         with mock.patch.object(runtime.similar, "nearest", nearest):
             return self._run("opencode", event, _StubReports({}))
 
-    def test_no_close_hit_says_the_check_ran_and_states_its_own_weakness(self) -> None:
-        """It must not claim no check was run, and must not read as proof of absence."""
+    def test_no_close_hit_is_silent(self) -> None:
+        """Nothing actionable means no interruption; the banner carries the standing rule."""
         event = {"filePath": "a.py", "oldString": "", "newString": "def brand_new():\n x = 1\n return x\n"}
-        text = self._run_add(event, _no_hits)
-        self.assertIn("[pci add-side", text)
-        self.assertIn("brand_new", text)
-        self.assertIn("check ran", text)
-        self.assertIn("not proof", text)
-        self.assertNotIn("No duplicate check was run", text)
+        self.assertEqual(self._run_add(event, _no_hits), "")
 
     def test_add_side_carries_practice_text_and_env_turns_it_off(self) -> None:
+        hit = runtime.similar.Hit(
+            added_name="brand_new",
+            symbol="existing_helper",
+            source_path="repo/src/pkg/mod.py",
+            line_start=42,
+            distance=0.18,
+        )
         event = {"filePath": "a.py", "oldString": "", "newString": "def brand_new():\n x = 1\n return x\n"}
         with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("PCI_HOOK_PRACTICE", None)
-            self.assertIn("[pci practice", self._run_add(event, _no_hits))
+            _ = os.environ.pop("PCI_HOOK_PRACTICE", None)
+            self.assertIn("[pci practice", self._run_add(event, _one_hit(hit)))
         with mock.patch.dict(os.environ, {"PCI_HOOK_PRACTICE": "0"}):
-            self.assertNotIn("[pci practice", self._run_add(event, _no_hits))
+            self.assertNotIn("[pci practice", self._run_add(event, _one_hit(hit)))
 
     def test_hook_disable_env_silences_everything(self) -> None:
         event = {"filePath": "a.py", "oldString": "", "newString": "def brand_new():\n x = 1\n return x\n"}
@@ -496,7 +498,10 @@ class EvidenceRuntimeTests(unittest.TestCase):
         must not depend on a reachable database or embedding endpoint to decide the branch.
         """
         reports = _StubReports({"gone": ["should not appear"]})
-        with TemporaryDirectory() as tmp, mock.patch.object(runtime.similar, "nearest", _no_hits):
+        hit = runtime.similar.Hit(
+            added_name="fresh", symbol="existing", source_path="repo/a.py", line_start=1, distance=0.2
+        )
+        with TemporaryDirectory() as tmp, mock.patch.object(runtime.similar, "nearest", _one_hit(hit)):
             event = _write_event(Path(tmp) / "new.py", "def fresh():\n    return 1\n")
             text = self._run("claude", event, reports)
         self.assertIn("[pci add-side", text)
@@ -561,8 +566,24 @@ class InstallClaudeTests(unittest.TestCase):
             data = _read_json_file(settings)
             hooks = cast("dict[str, object]", data["hooks"])
             self.assertEqual(len(cast("list[object]", hooks["PreToolUse"])), 1)
+            self.assertEqual(len(cast("list[object]", hooks["SessionStart"])), 1)
             self.assertNotIn("PostToolUse", hooks)  # evidence is preventive now
             self.assertNotIn("Stop", hooks)  # reindex moved to the git post-commit hook
+
+    def test_uninstall_removes_the_banner_group(self) -> None:
+        with TemporaryDirectory() as tmp:
+            settings = Path(tmp) / ".claude" / "settings.json"
+            _ = install.install_claude(settings, uninstall=False, dry_run=False)
+            _ = install.install_claude(settings, uninstall=True, dry_run=False)
+            self.assertNotIn("hooks", _read_json_file(settings))
+
+    def test_banner_runtime_wraps_session_start_context(self) -> None:
+        out = io.StringIO()
+        self.assertEqual(runtime.run_banner("claude", stdout=out), 0)
+        payload = cast("dict[str, object]", json.loads(out.getvalue()))
+        hook_out = cast("dict[str, object]", payload["hookSpecificOutput"])
+        self.assertEqual(hook_out["hookEventName"], "SessionStart")
+        self.assertIn("PCI RADAR MODE ACTIVE", cast("str", hook_out["additionalContext"]))
 
     def test_install_preserves_foreign_hooks(self) -> None:
         with TemporaryDirectory() as tmp:

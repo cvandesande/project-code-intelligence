@@ -45,34 +45,19 @@ _LOCK_NAME = "pci-reindex.lock"
 # same ground truth -- see hooks/similar.py for the numbers and for why its gate is a
 # per-language constant rather than a universal one.
 #
-# _REMINDER is the fallback, and it is what the hook emits whenever the query cannot run or
-# returns nothing above the gate. It makes no claim that the new definition duplicates
-# anything; it restates the AGENTS.md rule at the moment it applies, since AGENTS.md loads
-# once per session and then sinks under the transcript. Silence is never an option on this
-# path: a skipped check reads as "checked, nothing found", which is the dangerous direction.
-_REMINDER = (
-    "[pci add-side -- this edit defines {names}. Per AGENTS.md, call "
-    "search_code_intel_semantic for what it does before writing, and read the closest hit "
-    "in source: reuse or extend it rather than duplicating. No duplicate check was run; "
-    "this is a reminder, not a finding.]"
-)
-# Distinct from _REMINDER on purpose: when the query ran, saying "no duplicate check was
-# run" is false, and the honest version has to state its own weakness. The copy stays
-# generic: recall is calibration- and language-specific (69% on this repo's Python gate,
-# unmeasured elsewhere -- see similar.py), so no number belongs in text shipped everywhere.
-_NO_HITS = (
-    "[pci add-side -- this edit defines {names}. A similarity check ran against the index "
-    "and found nothing close enough to show. The check misses some real duplicates, so it "
-    "is weak evidence of absence, not proof: if this is a well-trodden area, search "
-    "yourself with search_code_intel_semantic before finalizing.]"
-)
+# No-candidate paths (query ran and found nothing above the gate, or no definition slice
+# could be extracted) stay SILENT: a message with nothing actionable in it interrupts the
+# agent for no decision. The known cost, accepted deliberately (2026-08-13): recall is
+# imperfect (69% on this repo's Python gate -- see similar.py), so silence now also covers
+# some real duplicates. The banner carries the standing "search before you write" rule;
+# only actionable output (hits, or a check that could not run) interrupts an edit.
 _PRIOR_ART = (
     "[pci add-side -- this edit defines {names}. The index holds these nearby definitions "
     "(closest first, embedding distance; the index may predate this edit):\n{hits}\n"
     "Read the closest in source and reuse or extend it rather than duplicating. Ranked by "
     "similarity, not verified -- evidence, not a finding.]"
 )
-# Distinct from _NO_HITS on purpose: a similarity query against an index that holds none
+# Not silent like the no-hit path on purpose: a similarity query against an index that holds none
 # of the file's repo returns a no-hit that carries near-zero information, and rendering it
 # as the calibrated no-hit above would launder that emptiness into weak evidence.
 _OUTSIDE_INDEX = (
@@ -191,20 +176,19 @@ def _build_block(removed: list[str], max_symbols: int) -> str | None:
     return header + "\n" + "\n---\n".join(report.rstrip("\n") for report in reports)
 
 
-def _add_side_block(file_path: str, new_string: str, added: list[str], names: str) -> str:
-    """Prior-art hits for what this edit adds, or the reminder if none can be shown.
+def _add_side_block(file_path: str, new_string: str, added: list[str], names: str) -> str | None:
+    """Prior-art hits for what this edit adds; None (silence) when there are none to show.
 
     Only the added definitions are embedded, never the edit payload: on a Write the payload
     is the whole file, and the gate in ``similar`` was calibrated on single-definition
     queries, so a blended vector would sit at distances it does not describe.
 
-    Every failure degrades to text, never to silence. A missing index or a dead embedding
-    endpoint reads as "no duplicates here" if the hook stays quiet, which is exactly the
-    wrong inference to hand an agent mid-edit.
+    Failures still degrade to text, never to silence: a missing index or a dead embedding
+    endpoint would otherwise read the same as a clean check that never happened.
     """
     slices = detect.definition_slices(new_string, added)
     if not slices:
-        return _REMINDER.format(names=names)
+        return None
     try:
         # The gate is language-dependent, and inventory.language_for is the same mapping the
         # indexer used, so the query is gated the way the corpus it searches was measured.
@@ -215,7 +199,7 @@ def _add_side_block(file_path: str, new_string: str, added: list[str], names: st
         reason = str(exc).splitlines()[0] if str(exc).strip() else type(exc).__name__
         return _QUERY_FAILED.format(names=names, reason=reason, cwd=Path.cwd())
     if not hits:
-        return _NO_HITS.format(names=names)
+        return None
     repo = Path.cwd().name
     return _PRIOR_ART.format(names=names, hits="\n".join(hit.render(repo) for hit in hits))
 
@@ -260,17 +244,43 @@ def run_evidence(agent: Agent, *, stdin: IO[str] | None = None, stdout: IO[str] 
         if added:
             names = ", ".join(added[:_MAX_ADDED])
             overflow = f" (+{len(added) - _MAX_ADDED} more)" if len(added) > _MAX_ADDED else ""
-            _emit_evidence(
-                agent,
-                _with_practice(_add_side_block(file_path, new_string, added[:_MAX_ADDED], names + overflow)),
-                out_stream,
-                event_name=event_name,
-            )
+            block = _add_side_block(file_path, new_string, added[:_MAX_ADDED], names + overflow)
+            if block is not None:
+                _emit_evidence(agent, _with_practice(block), out_stream, event_name=event_name)
         return 0
     block = _build_block(removed, _MAX_SYMBOLS)
     if block is None:
         return 0
     _emit_evidence(agent, block, out_stream, event_name=event_name)
+    return 0
+
+
+# --- banner ---------------------------------------------------------------------
+
+# Session-start banner: a named regime + persona, the delivery frame ponytail uses.
+# Measurement note (2026-08-13, 4 tasks x 6 conditions x 2 reps, Haiku): no reproducible
+# LOC or test-pass effect vs baseline at that sample size -- shipped as requested UX, not
+# as a measured win. Details in the harness results
+# (~/pci-measurement-harness/hook-practice-ab/), not in this repo.
+_BANNER = (
+    "PCI RADAR MODE ACTIVE. You edit with radar: the index has swept every definition in "
+    "this repo, and the evidence hook pings you with nearby prior art on every edit. Do "
+    "not fly blind -- sweep before you build (search_code_intel_semantic), reuse or "
+    "extend what the radar shows, and check blast_radius before you remove. Write the "
+    "smallest change that works: an existing definition, then the standard library, then "
+    "a platform feature, before new code; no abstractions or scaffolding for needs that "
+    "are not in the task. Never cut input validation, error handling, or anything "
+    "explicitly requested. RADAR stays on for the whole session."
+)
+
+
+def run_banner(agent: Agent, *, stdout: IO[str] | None = None) -> int:
+    out: IO[str] = stdout if stdout is not None else cast("IO[str]", sys.stdout)
+    if agent == "claude":
+        payload = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": _BANNER}}
+        _ = out.write(json.dumps(payload))
+        return 0
+    _ = out.write(_BANNER)
     return 0
 
 

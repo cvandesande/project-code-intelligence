@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from project_code_intelligence.console_ui import PillKind
 
 _AGENTS = ("opencode", "claude", "git")
-_BEHAVIORS = ("evidence", "reindex")
+_BEHAVIORS = ("evidence", "reindex", "banner")
 _COLOR_FORCE: dict[str, bool | None] = {"auto": None, "always": True, "never": False}
 
 
@@ -128,6 +128,8 @@ def _run_runtime(parsed: HookNamespace) -> int:
     agent = parsed.agent or "opencode"
     if parsed.behavior == "reindex":
         return runtime.run_reindex(Path(parsed.repo or ".").resolve())
+    if parsed.behavior == "banner":
+        return runtime.run_banner(agent)
     return runtime.run_evidence(agent)
 
 
