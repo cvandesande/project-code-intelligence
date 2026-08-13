@@ -107,6 +107,16 @@ class QueuedConnection:
         return self.cursors.pop(0)
 
 
+def _git_show_current_branch_returns_main(_root: object, args: list[str]) -> str:
+    """Fake ``run_git``: fixture snapshots below are stamped branch "main", so the
+    live checkout must answer the same for `branch --show-current` calls, else the
+    branch_mismatch check in mcp/status.py fires spuriously. Other git calls
+    (rev-parse HEAD, rev-list --count) keep answering "abc123" like the old
+    ``return_value="abc123"`` stub did.
+    """
+    return "main" if args[:2] == ["branch", "--show-current"] else "abc123"
+
+
 def mcp_text_payload(response: object) -> dict[str, object]:
     if not isinstance(response, dict):
         raise TypeError("response should be an object")
@@ -2166,7 +2176,7 @@ class McpStatusWarningTests(unittest.TestCase):
             patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_db, "table_regclass_exists", return_value=False),
             patch.object(mcp_status, "schema_migration_versions", return_value=[]),
-            patch.object(git_utils, "run_git", return_value="abc123"),
+            patch.object(git_utils, "run_git", side_effect=_git_show_current_branch_returns_main),
             patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_code_intel_status({})
@@ -2251,7 +2261,7 @@ class McpStatusWarningTests(unittest.TestCase):
             patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_db, "table_regclass_exists", return_value=False),
             patch.object(mcp_status, "schema_migration_versions", return_value=[]),
-            patch.object(git_utils, "run_git", return_value="abc123"),
+            patch.object(git_utils, "run_git", side_effect=_git_show_current_branch_returns_main),
             patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_code_intel_status({})
@@ -2761,7 +2771,7 @@ class McpToolShapeTests(unittest.TestCase):
                     patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
                     patch.object(mcp_db, "table_regclass_exists", return_value=False),
                     patch.object(mcp_status, "schema_migration_versions", return_value=[]),
-                    patch.object(git_utils, "run_git", return_value="abc123"),
+                    patch.object(git_utils, "run_git", side_effect=_git_show_current_branch_returns_main),
                     patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
                 ):
                     response = mcp_tools.tool_code_intel_status(args)
@@ -2781,6 +2791,53 @@ class McpToolShapeTests(unittest.TestCase):
                 self.assertNotIn("records_by_type", payload)
                 self.assertNotIn("language_breakdown", payload)
                 self.assertNotIn("static_findings", payload)
+
+    def test_status_flags_branch_mismatch_when_commit_matches_but_branch_differs(self) -> None:
+        # Same commit as live HEAD, but the snapshot is stamped "main" while the
+        # live checkout has since moved to "feature": head_status must go
+        # "stale" with reason "branch_mismatch", not "current".
+        created_at = datetime.now(timezone.utc) - timedelta(seconds=42)
+        conn = QueuedConnection([
+            FakeCursor(
+                many=[
+                    {
+                        "id": 1,
+                        "collection": "zod",
+                        "repo": "zod",
+                        "repo_role": "project",
+                        "branch": "main",
+                        "commit_sha": "abc123",
+                        "tree_sha": "tree123",
+                        "dirty": False,
+                        "metadata": {"embed_record_types": ["code_chunk"], "large": "omitted"},
+                        "created_at": created_at,
+                    }
+                ]
+            ),
+            FakeCursor(many=[]),
+            FakeCursor(many=[{"record_type": "code_chunk", "count": 1, "embedded_records": 1}]),
+            FakeCursor(many=[]),
+            FakeCursor(many=[]),
+            FakeCursor(many=[]),
+        ])
+
+        def fake_run_git(_root: object, args: list[str]) -> str:
+            return "feature" if args[:2] == ["branch", "--show-current"] else "abc123"
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "table_regclass_exists", return_value=False),
+            patch.object(mcp_status, "schema_migration_versions", return_value=[]),
+            patch.object(git_utils, "run_git", side_effect=fake_run_git),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_code_intel_status({"include_snapshots": True})
+
+        payload = mcp_text_payload(response)
+        snapshots = cast("list[dict[str, object]]", payload["snapshots"])
+        self.assertEqual(snapshots[0]["head_status"], "stale")
+        self.assertEqual(snapshots[0]["head_status_reason"], "branch_mismatch")
 
     def test_status_omits_redundant_scope_when_scoped(self) -> None:
         conn = QueuedConnection([
@@ -2960,7 +3017,7 @@ class McpToolShapeTests(unittest.TestCase):
             patch.object(mcp_db, "table_regclass_exists", return_value=False),
             patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
             patch.object(Path, "cwd", return_value=Path("/work/project-code-intelligence")),
-            patch.object(git_utils, "run_git", side_effect=[None, "b6071fc0"]) as run_git,
+            patch.object(git_utils, "run_git", side_effect=[None, "b6071fc0", None, None]) as run_git,
         ):
             response = mcp_tools.tool_code_intel_status({"collection": "zod", "repo": "zod"})
 
@@ -3134,7 +3191,7 @@ class McpStatusQueryabilityTests(unittest.TestCase):
             patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_db, "table_regclass_exists", return_value=False),
             patch.object(mcp_status, "schema_migration_versions", return_value=[]),
-            patch.object(git_utils, "run_git", return_value="abc123"),
+            patch.object(git_utils, "run_git", side_effect=_git_show_current_branch_returns_main),
             patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_code_intel_status({})
@@ -3192,7 +3249,7 @@ class McpStatusQueryabilityTests(unittest.TestCase):
             patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
             patch.object(mcp_db, "table_regclass_exists", return_value=False),
             patch.object(mcp_status, "schema_migration_versions", return_value=[]),
-            patch.object(git_utils, "run_git", return_value="abc123"),
+            patch.object(git_utils, "run_git", side_effect=_git_show_current_branch_returns_main),
             patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
         ):
             response = mcp_tools.tool_code_intel_status({})
@@ -3745,6 +3802,54 @@ class FindRedundancyToolContractTests(unittest.TestCase):
         groups = cast("list[dict[str, object]]", payload["groups"])
         self.assertEqual(groups[0]["typed_variants"], True)
         self.assertEqual(groups[0]["recommendation"], "leave-as-is")
+
+    @staticmethod
+    def _two_branch_rows() -> list[object]:
+        return [
+            {"id": 1, "collection": "default", "repo": "demo", "branch": "main"},
+            {"id": 2, "collection": "default", "repo": "demo", "branch": "feature"},
+        ]
+
+    def test_branch_arg_filters_snapshots_to_that_branch(self) -> None:
+        # A branch given as an argument keeps only the same-branch snapshot.
+        snapshot_result = analyze.SnapshotResult(label="default/demo", groups=(), functions_analyzed=0, clones_folded=0)
+        conn = QueuedConnection([FakeCursor(many=self._two_branch_rows())])
+        with (
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(analyze, "analyze_snapshot", return_value=snapshot_result) as analyze_snapshot,
+        ):
+            _ = mcp_tools.tool_find_redundancy({"branch": "feature"})
+        analyzed_snapshots = [cast("analyze.SnapshotRef", call.args[1]) for call in analyze_snapshot.call_args_list]
+        self.assertEqual([s.snapshot_id for s in analyzed_snapshots], [2])
+
+    def test_branch_arg_with_no_match_warns_empty_scope(self) -> None:
+        # A branch given as an argument that matches nothing gets no silent
+        # fallback for MCP callers; it warns instead (unlike the CLI heuristic).
+        conn = QueuedConnection([FakeCursor(many=self._two_branch_rows())])
+        with (
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_find_redundancy({"branch": "nope"})
+        payload = mcp_text_payload(response)
+        self.assertEqual(payload["found"], False)
+        warnings = cast("list[object]", payload["warnings"])
+        kinds = {cast("dict[str, object]", warning)["kind"] for warning in warnings}
+        self.assertIn("empty_repo_scope", kinds)
+
+    def test_no_branch_arg_collapses_to_newest_per_repo(self) -> None:
+        # No branch given: process one snapshot per repo (the newest), not one per branch.
+        snapshot_result = analyze.SnapshotResult(label="default/demo", groups=(), functions_analyzed=0, clones_folded=0)
+        conn = QueuedConnection([FakeCursor(many=self._two_branch_rows())])
+        with (
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+            patch.object(analyze, "analyze_snapshot", return_value=snapshot_result) as analyze_snapshot,
+        ):
+            _ = mcp_tools.tool_find_redundancy({})
+        analyzed_snapshots = [cast("analyze.SnapshotRef", call.args[1]) for call in analyze_snapshot.call_args_list]
+        self.assertEqual([s.snapshot_id for s in analyzed_snapshots], [2])
 
 
 if __name__ == "__main__":

@@ -23,9 +23,11 @@ import re
 import sys
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence.exceptions import DatabaseConnectionError
+from project_code_intelligence.git_utils import run_git
 from project_code_intelligence.mcp import db as mcp_db
 
 if TYPE_CHECKING:
@@ -606,6 +608,7 @@ class SnapshotRef:
     snapshot_id: int
     collection: str
     repo: str
+    branch: str | None = None
 
 
 def coerce_str(value: object) -> str | None:
@@ -621,12 +624,17 @@ def coerce_int(value: object) -> int | None:
 
 
 def latest_snapshots(conn: db.DbConnection) -> list[SnapshotRef]:
+    """One row per (collection, repo, branch), newest first within each group.
+
+    A null branch (legacy snapshots indexed before branch was stamped) is its
+    own group, distinct from any named branch.
+    """
     rows = conn.execute(
         """
-        SELECT DISTINCT ON (collection, repo)
-               id, collection, repo
+        SELECT DISTINCT ON (collection, repo, branch)
+               id, collection, repo, branch
         FROM project_code_intel_snapshots
-        ORDER BY collection, repo, created_at DESC, id DESC
+        ORDER BY collection, repo, branch, created_at DESC, id DESC
         """
     ).fetchall()
     out: list[SnapshotRef] = []
@@ -634,10 +642,36 @@ def latest_snapshots(conn: db.DbConnection) -> list[SnapshotRef]:
         snapshot_id = coerce_int(row["id"])
         collection = coerce_str(row["collection"])
         repo = coerce_str(row["repo"])
+        branch = coerce_str(row.get("branch"))
         if snapshot_id is None or collection is None or repo is None:
             continue
-        out.append(SnapshotRef(snapshot_id=snapshot_id, collection=collection, repo=repo))
+        out.append(SnapshotRef(snapshot_id=snapshot_id, collection=collection, repo=repo, branch=branch))
     return out
+
+
+def newest_per_repo(snapshots: Sequence[SnapshotRef]) -> list[SnapshotRef]:
+    """Collapse to one snapshot per (collection, repo), keeping the highest snapshot_id.
+
+    ``latest_snapshots`` already returns the newest snapshot per branch, so the
+    only remaining tie-break across branches is snapshot_id (higher id = indexed
+    later, since ids are assigned in insertion order).
+    """
+    best: dict[tuple[str, str], SnapshotRef] = {}
+    for snapshot in snapshots:
+        key = (snapshot.collection, snapshot.repo)
+        current = best.get(key)
+        if current is None or snapshot.snapshot_id > current.snapshot_id:
+            best[key] = snapshot
+    return list(best.values())
+
+
+def resolve_repo_branch(repo_root: Path) -> str | None:
+    """Current checkout branch of a repo, or None if detached/not a git repo.
+
+    Reuses the same git call ingest stamps onto snapshots (inventory.py), so
+    CLI/MCP branch resolution stays consistent with what was indexed.
+    """
+    return run_git(repo_root, ["branch", "--show-current"])
 
 
 def _callees_by_source(conn: db.DbConnection, snapshot_id: int) -> dict[str, list[str]]:
@@ -1062,17 +1096,58 @@ def _analyze_parser() -> argparse.ArgumentParser:
 
 
 def select_snapshots(
-    snapshots: Sequence[SnapshotRef], *, collection: str | None, repo: str | None
+    snapshots: Sequence[SnapshotRef],
+    *,
+    collection: str | None,
+    repo: str | None,
+    branch: str | None = None,
 ) -> list[SnapshotRef]:
-    """Snapshots matching an optional collection/repo scope (public: CLI and MCP)."""
+    """Snapshots matching an optional collection/repo/branch scope (public: CLI and MCP).
+
+    ``branch`` keeps only same-branch snapshots when given; it does not fall
+    back on a miss -- callers wanting a same-branch-or-newest fallback should
+    check for an empty result and retry with ``branch=None``, then
+    ``newest_per_repo``.
+    """
     selected: list[SnapshotRef] = []
     for snapshot in snapshots:
         if collection is not None and snapshot.collection != collection:
             continue
         if repo is not None and snapshot.repo != repo:
             continue
+        if branch is not None and snapshot.branch != branch:
+            continue
         selected.append(snapshot)
     return selected
+
+
+def resolve_and_select_snapshots(
+    all_snapshots: Sequence[SnapshotRef],
+    *,
+    collection: str | None,
+    repo: str | None,
+    branch: str | None,
+) -> tuple[list[SnapshotRef], bool]:
+    """Scope snapshots by branch, collapsing to newest-per-repo as needed (public: CLI and MCP).
+
+    ``branch`` is the branch resolved for the current working tree (``None``
+    when it cannot be resolved: detached HEAD, non-git cwd, missing git). When
+    ``branch`` is ``None``, this always collapses to one snapshot per repo --
+    there is no branch to key on, so keeping every branch's snapshot would
+    silently double-process repos. When ``branch`` is given but matches no
+    snapshot, this falls back to newest-per-repo across all branches.
+
+    Returns ``(snapshots, branch_miss)`` where ``branch_miss`` is ``True`` when
+    a resolved branch matched no snapshot and the fallback was used; callers
+    should warn in that case.
+    """
+    if branch is None:
+        return newest_per_repo(select_snapshots(all_snapshots, collection=collection, repo=repo)), False
+    snapshots = select_snapshots(all_snapshots, collection=collection, repo=repo, branch=branch)
+    if not snapshots:
+        fallback = newest_per_repo(select_snapshots(all_snapshots, collection=collection, repo=repo))
+        return fallback, True
+    return snapshots, False
 
 
 def compression_main(argv: list[str] | None = None) -> int:
@@ -1090,7 +1165,13 @@ def compression_main(argv: list[str] | None = None) -> int:
             if not mcp_db.code_intel_tables_exist(conn):
                 _ = sys.stderr.write("pci-analyze: no code-intelligence tables; run pci-index first\n")
                 return 1
-            snapshots = select_snapshots(latest_snapshots(conn), collection=parsed.collection, repo=parsed.repo)
+            all_snapshots = latest_snapshots(conn)
+            branch = resolve_repo_branch(Path.cwd())
+            snapshots, branch_miss = resolve_and_select_snapshots(
+                all_snapshots, collection=parsed.collection, repo=parsed.repo, branch=branch
+            )
+            if branch_miss:
+                _ = sys.stderr.write(f"pci-analyze: no snapshot on branch {branch!r}; using newest per repo\n")
             if not snapshots:
                 _ = sys.stderr.write("pci-analyze: no matching snapshots found\n")
                 return 1

@@ -23,6 +23,7 @@ from psycopg.errors import InsufficientPrivilege
 
 from project_code_intelligence import config, db, profile_context, progress
 from project_code_intelligence import runtime as runtime_state
+from project_code_intelligence.analyze import resolve_repo_branch
 from project_code_intelligence.code_profiles import load_profile
 from project_code_intelligence.common import (
     database_scope_path_for_root_repos,
@@ -47,7 +48,7 @@ from project_code_intelligence.embeddings import (
     resolve_embedding_endpoint_model,
     start_record_preembedding,
 )
-from project_code_intelligence.git_utils import workspace_root
+from project_code_intelligence.git_utils import run_git, workspace_root
 from project_code_intelligence.inventory import DiscoveryReuse, discover_files, make_snapshot
 from project_code_intelligence.models import (
     DEFAULT_EMBED_RECORD_TYPES,
@@ -98,6 +99,7 @@ from project_code_intelligence.storage import (
     pre_resolve_edge_targets,
     previous_file_state_signature,
     previous_file_states,
+    prune_dead_branch_snapshots,
     prune_old_snapshots,
     replace_repos,
     resolve_edge_targets,
@@ -189,6 +191,7 @@ class CliArgs:
     mcp_config: str | None
     mcp_server_name: str | None
     show_parser_failures: bool
+    repo_scan_root: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -203,6 +206,7 @@ class IngestPlan:
     embedding_requested: bool
     preembedding_requested: bool
     mode: str
+    repo_scan_roots: dict[str, Path] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -232,6 +236,7 @@ class RepoIngestConfig:
     previous_snapshot_id: int | None = None
     previous_files: dict[str, PreviousFileState] | None = None
     mode: str = "full"
+    scan_root: Path | None = None
 
 
 @dataclass
@@ -313,6 +318,7 @@ class CliNamespace(argparse.Namespace):
     mcp_config: str | None
     mcp_server_name: str | None
     show_parser_failures: bool
+    repo_scan_root: list[str]
 
 
 def json_int(obj: JsonObject, key: str) -> int:
@@ -522,7 +528,7 @@ def count_reused_unchanged_files(files: list[IntelFile], previous_files: dict[st
 def ingest_repo(config: RepoIngestConfig) -> RepoIngest:
     progress_event("code_intel_repo_scan_started", repo=config.repo, mode=config.mode)
     started = time.monotonic()
-    snapshot = make_snapshot(config.root, config.repo, config.collection)
+    snapshot = make_snapshot(config.root, config.repo, config.collection, scan_root=config.scan_root)
     runtime_state.active_metrics.add("scan_git_seconds", time.monotonic() - started)
     previous_files = config.previous_files or {}
     previous_signatures = previous_signatures_from_states(previous_files)
@@ -537,6 +543,7 @@ def ingest_repo(config: RepoIngestConfig) -> RepoIngest:
         config.root,
         snapshot,
         config.max_file_bytes,
+        scan_root=config.scan_root,
         reuse=DiscoveryReuse(
             previous_files=previous_files,
             reuse_unchanged_blobs=config.mode == "incremental" and bool(previous_files),
@@ -720,6 +727,16 @@ def build_parser() -> argparse.ArgumentParser:
             "with this flag, paths are appended below it (capped in the panel, full list in --json output)."
         ),
     )
+    _ = parser.add_argument(
+        "--repo-scan-root",
+        action="append",
+        default=[],
+        metavar="REPO=PATH",
+        help=(
+            "Scan PATH on disk for REPO instead of <root>/REPO, while still stamping REPO as its "
+            "identity. Used to reindex a linked git worktree under its main repo's identity."
+        ),
+    )
     return parser
 
 
@@ -767,6 +784,7 @@ def parse_cli_args(argv: list[str] | None = None) -> CliArgs:
         mcp_config=parsed.mcp_config,
         mcp_server_name=parsed.mcp_server_name,
         show_parser_failures=parsed.show_parser_failures,
+        repo_scan_root=parsed.repo_scan_root,
     )
 
 
@@ -807,6 +825,15 @@ def validate_args(args: CliArgs, *, embedding_requested: bool) -> None:
         raise ValueError("--mcp-config cannot be combined with --dry-run")
 
 
+def parse_repo_scan_roots(values: list[str]) -> dict[str, Path]:
+    """{repo: path} from repeated ``--repo-scan-root REPO=PATH`` flags."""
+    out: dict[str, Path] = {}
+    for value in values:
+        repo, _, path = value.partition("=")
+        out[repo] = Path(path)
+    return out
+
+
 def build_ingest_plan(args: CliArgs) -> IngestPlan:
     profile = load_profile(args.profile)
     set_active_profile(profile)
@@ -832,6 +859,7 @@ def build_ingest_plan(args: CliArgs) -> IngestPlan:
         embedding_requested=embedding_requested,
         preembedding_requested=preembedding_requested,
         mode=mode,
+        repo_scan_roots=parse_repo_scan_roots(args.repo_scan_root),
     )
 
 
@@ -1456,7 +1484,12 @@ def previous_repo_states(plan: IngestPlan) -> dict[str, tuple[int | None, dict[s
         return record_repo_modes({repo: (None, {}, "full", "requested") for repo in plan.repos})
     try:
         with db.connect() as conn:
-            return record_repo_modes({repo: previous_repo_state(conn, plan.collection, repo) for repo in plan.repos})
+            return record_repo_modes({
+                repo: previous_repo_state(
+                    conn, plan.collection, repo, resolve_repo_branch(plan.repo_scan_roots.get(repo, plan.root / repo))
+                )
+                for repo in plan.repos
+            })
     except (db.DatabaseConnectionError, db.OperationalError) as exc:
         progress_event("code_intel_incremental_unavailable", error=str(exc))
         return record_repo_modes({repo: (None, {}, "full", "db_unavailable") for repo in plan.repos})
@@ -1483,8 +1516,9 @@ def previous_repo_state(
     conn: db.DbConnection,
     collection: str,
     repo: str,
+    branch: str | None = None,
 ) -> tuple[int | None, dict[str, PreviousFileState], str, str]:
-    previous = latest_snapshot_info(conn, collection, repo)
+    previous = latest_snapshot_info(conn, collection, repo, branch=branch)
     metadata = previous.get("metadata") if previous else None
     metadata_obj = metadata if isinstance(metadata, dict) else None
     if previous and snapshot_versions_compatible(metadata_obj):
@@ -1528,6 +1562,7 @@ def scan_repositories(
                 previous_snapshot_id=previous_snapshot_id,
                 previous_files=previous_files,
                 mode=repo_mode,
+                scan_root=plan.repo_scan_roots.get(repo),
             )
         )
         ingests.append(ingest)
@@ -2095,8 +2130,22 @@ def main(argv: list[str] | None = None) -> int:
         with db.connect(readonly=False) as conn:
             for repo in repo_names:
                 deleted = prune_old_snapshots(conn, collection, repo, keep=args.prune_keep)
-                if deleted > 0:
-                    progress_event("code_intel_prune", collection=collection, repo=repo, deleted=deleted)
+                repo_root = args.root if repo == "." else args.root / repo
+                dead_deleted = 0
+                refs = run_git(repo_root, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+                # No refs (git missing, not a repo, or genuinely branch-less) means "no
+                # evidence of what's live" -- skip GC rather than treat every branch as dead.
+                if refs is not None:
+                    live_branches = {line for line in refs.splitlines() if line}
+                    dead_deleted = prune_dead_branch_snapshots(conn, collection, repo, live_branches)
+                if deleted > 0 or dead_deleted > 0:
+                    progress_event(
+                        "code_intel_prune",
+                        collection=collection,
+                        repo=repo,
+                        deleted=deleted,
+                        dead_branch_snapshots_pruned=dead_deleted,
+                    )
     return result
 
 

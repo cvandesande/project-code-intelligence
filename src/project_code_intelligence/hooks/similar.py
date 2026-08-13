@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from project_code_intelligence import analyze
+from project_code_intelligence import analyze, git_utils
 from project_code_intelligence.mcp import db as mcp_db
 from project_code_intelligence.mcp import semantic, status
 
@@ -109,13 +109,25 @@ def snapshot_for(snapshots: list[analyze.SnapshotRef], file_path: str) -> analyz
     """
     cwd = Path.cwd().resolve()
     root = status.source_git_root(Path(file_path).resolve())
+    # A file inside a linked worktree resolves ``root`` to the worktree's own checkout,
+    # which matches no snapshot when only the main repo was indexed. Match against the
+    # main repo instead, but keep the worktree root for the branch preference below --
+    # the worktree's checked-out branch, not the main repo's, is what the edit is on.
+    main_root = root and git_utils.worktree_main_root(root)
+    match_root = main_root.resolve() if main_root else root
     matches = [
-        snap for snap in snapshots if root == (cwd if snap.repo in {".", cwd.name} else (cwd / snap.repo).resolve())
+        snap
+        for snap in snapshots
+        if match_root == (cwd if snap.repo in {".", cwd.name} else (cwd / snap.repo).resolve())
     ]
     if matches:
         # '.' and the cwd basename label the same root when a repo was indexed both ways;
-        # the newest snapshot is the live one.
-        return max(matches, key=lambda snap: snap.snapshot_id)
+        # among those, prefer the snapshot on the edited file's own checkout branch, else
+        # the newest one.
+        checkout_branch = root and analyze.resolve_repo_branch(root)
+        same_branch = [snap for snap in matches if checkout_branch is not None and snap.branch == checkout_branch]
+        pool = same_branch or matches
+        return max(pool, key=lambda snap: snap.snapshot_id)
     raise UnindexedRepoError(str(root) if root else file_path)
 
 

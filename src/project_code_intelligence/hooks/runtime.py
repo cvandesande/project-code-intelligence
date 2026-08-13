@@ -27,7 +27,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from project_code_intelligence import evidence, inventory, process
+from project_code_intelligence import evidence, git_utils, inventory, process
 from project_code_intelligence.exceptions import DatabaseConnectionError, McpProtocolError
 from project_code_intelligence.hooks import detect, similar
 
@@ -323,16 +323,12 @@ def write_reindex_markers(repo_paths: list[Path], collection: str | None) -> Non
                 _ = (git_dir / _MARKER_NAME).write_text(payload, encoding="utf-8")
 
 
-def reindex_target(repo: Path) -> tuple[Path, list[str]] | None:
-    """Resolve (cwd, index args) for a reindex from the workspace invocation
-    recorded at index time, or None when no valid marker exists.
-
-    A marker-less repo was never indexed deliberately from that path (every
-    `pci index` run writes one), so a reindex there would full-index into a
-    fresh collection. Git worktrees hit this: they inherit the parent repo's
-    post-commit hook, but `.git` is a file, so no marker is ever present."""
+def _read_marker(git_dir: Path) -> tuple[Path, list[str], str | None] | None:
+    """Validated (cwd, repo_paths, collection) from a marker file in ``git_dir``, or
+    None on any I/O, parse, or shape problem. Shared by the direct and worktree paths
+    through ``reindex_target`` so the validation rules live in exactly one place."""
     try:
-        data = cast("object", json.loads((repo / ".git" / _MARKER_NAME).read_text(encoding="utf-8")))
+        data = cast("object", json.loads((git_dir / _MARKER_NAME).read_text(encoding="utf-8")))
     except (OSError, ValueError):
         return None
     marker = _as_object(data)
@@ -345,8 +341,53 @@ def reindex_target(repo: Path) -> tuple[Path, list[str]] | None:
     if not paths or len(paths) != len(raw_paths):
         return None
     collection = marker.get("collection")
-    args = ["--collection", collection, *paths] if isinstance(collection, str) else paths
-    return Path(cwd), args
+    return Path(cwd), paths, collection if isinstance(collection, str) else None
+
+
+def _worktree_reindex_target(repo: Path) -> tuple[Path, list[str]] | None:
+    """(cwd, index args) for a commit made inside a linked worktree, reindexing that
+    worktree's checkout under its MAIN repo's collection/repo identity -- never a new
+    collection keyed on the worktree's own directory name.
+
+    The worktree's own `.git` is a file, so its marker lives with the main repo instead
+    (worktrees never get their own marker -- write_reindex_markers only writes into
+    directory `.git`s). Only replay when the main repo's resolved root is itself one of
+    that marker's `repo_paths`: this is the same "was this path indexed on purpose"
+    guard `reindex_target` applies to the non-worktree case, so an unrelated worktree
+    whose main repo happens to have some other marker still safely no-ops.
+    """
+    main_root = git_utils.worktree_main_root(repo)
+    if main_root is None:
+        return None
+    marker = _read_marker(main_root / ".git")
+    if marker is None:
+        return None
+    cwd, paths, collection = marker
+    resolved_main = main_root.resolve()
+    if resolved_main not in {Path(p).resolve() for p in paths}:
+        return None
+    collection_args = ["--collection", collection] if collection is not None else []
+    return cwd, [*collection_args, "--worktree", f"{resolved_main}={repo.resolve()}"]
+
+
+def reindex_target(repo: Path) -> tuple[Path, list[str]] | None:
+    """Resolve (cwd, index args) for a reindex from the workspace invocation
+    recorded at index time, or None when no valid marker exists.
+
+    A marker-less repo was never indexed deliberately from that path (every
+    `pci index` run writes one), so a reindex there would full-index into a
+    fresh collection. Git worktrees hit this differently: `.git` is a file there, so
+    no marker is ever written for the worktree itself -- see _worktree_reindex_target,
+    which replays against the MAIN repo's marker instead."""
+    git_entry = repo / ".git"
+    if not git_entry.is_dir():
+        return _worktree_reindex_target(repo)
+    marker = _read_marker(git_entry)
+    if marker is None:
+        return None
+    cwd, paths, collection = marker
+    args = ["--collection", collection, *paths] if collection is not None else paths
+    return cwd, args
 
 
 def run_reindex(repo: Path) -> int:

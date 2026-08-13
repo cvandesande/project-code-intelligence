@@ -794,18 +794,61 @@ def stamp_embed_types(conn: db.DbConnection, snapshot_ids: list[int], embed_type
 
 
 def prune_old_snapshots(conn: db.DbConnection, collection: str, repo: str, keep: int = 5) -> int:
+    """Delete old snapshots for (collection, repo), keeping the newest ``keep``.
+
+    Branch-aware: the newest snapshot of each distinct branch is never deleted
+    (null branch counts as one shared group), even if that pushes the total
+    kept above ``keep``. The keep-N cut applies only to the remainder -- the
+    rows that are not each branch's newest.
+    """
+    rows = conn.execute(
+        """
+        WITH ranked AS (
+            SELECT id, created_at,
+                ROW_NUMBER() OVER (
+                    PARTITION BY COALESCE(branch, '')
+                    ORDER BY created_at DESC, id DESC
+                ) AS branch_rank
+            FROM project_code_intel_snapshots
+            WHERE collection = %s AND repo = %s
+        ),
+        remainder AS (
+            SELECT id,
+                ROW_NUMBER() OVER (ORDER BY created_at DESC, id DESC) AS remainder_rank
+            FROM ranked
+            WHERE branch_rank > 1
+        )
+        DELETE FROM project_code_intel_snapshots
+        WHERE id IN (SELECT id FROM remainder WHERE remainder_rank > %s)
+        RETURNING id
+        """,
+        [collection, repo, keep],
+    ).fetchall()
+    return len(rows)
+
+
+def prune_dead_branch_snapshots(conn: db.DbConnection, collection: str, repo: str, live_branches: set[str]) -> int:
+    """Delete this repo's snapshots stamped with a branch no longer in ``live_branches``.
+
+    Never touches null-branch (legacy) snapshots, and never deletes the newest snapshot
+    overall for the repo even if its branch is not in ``live_branches`` (e.g. a git
+    for-each-ref race, or a detached-HEAD indexing run) -- losing the newest snapshot would
+    make the repo look unindexed rather than just missing one stale branch.
+    """
     rows = conn.execute(
         """
         DELETE FROM project_code_intel_snapshots
         WHERE collection = %s AND repo = %s
-          AND id NOT IN (
+          AND branch IS NOT NULL
+          AND branch <> ALL(%s)
+          AND id <> (
               SELECT id FROM project_code_intel_snapshots
               WHERE collection = %s AND repo = %s
-              ORDER BY created_at DESC
-              LIMIT %s
+              ORDER BY created_at DESC, id DESC
+              LIMIT 1
           )
         RETURNING id
         """,
-        [collection, repo, collection, repo, keep],
+        [collection, repo, list(live_branches), collection, repo],
     ).fetchall()
     return len(rows)

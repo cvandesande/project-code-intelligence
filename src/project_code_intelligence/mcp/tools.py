@@ -822,10 +822,16 @@ def tool_find_redundancy(args: Json) -> Json:
     )
     collection = optional_text(args, "collection")
     repo = optional_text(args, "repo")
+    branch = optional_text(args, "branch")
     with mcp_db.connect() as conn:
         if not mcp_db.code_intel_tables_exist(conn):
             return ok({"error": "code intelligence schema is not initialized"})
-        snapshots = analyze.select_snapshots(analyze.latest_snapshots(conn), collection=collection, repo=repo)
+        all_snapshots = analyze.latest_snapshots(conn)
+        snapshots = analyze.select_snapshots(all_snapshots, collection=collection, repo=repo, branch=branch)
+        if branch is None:
+            # No branch pinned: collapse multi-branch history to one snapshot per repo,
+            # same as before branch-keyed selection existed.
+            snapshots = analyze.newest_per_repo(snapshots)
         results = [analyze.analyze_snapshot(conn, snapshot, options) for snapshot in snapshots]
     groups: list[Json] = []
     functions_analyzed = 0
