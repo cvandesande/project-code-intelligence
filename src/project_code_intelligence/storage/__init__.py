@@ -19,6 +19,13 @@ from project_code_intelligence.storage.core import (
     resolve_edge_targets,
     stamp_embed_types,
 )
+from project_code_intelligence.storage.runs import (
+    finish_index_run,
+    heartbeat_index_run,
+    load_index_runs,
+    set_index_run_modes,
+    start_index_run,
+)
 from project_code_intelligence.storage.schema import (
     ensure_schema,
     file_signature,
@@ -39,6 +46,8 @@ __all__ = [
     "count_unresolved_edge_targets",
     "ensure_schema",
     "file_signature",
+    "finish_index_run",
+    "heartbeat_index_run",
     "insert_edges",
     "insert_files",
     "insert_parser_failures",
@@ -46,6 +55,7 @@ __all__ = [
     "insert_snapshot",
     "insert_static_runs",
     "latest_snapshot_info",
+    "load_index_runs",
     "parser_failure_metadata",
     "pre_resolvable_edge_count",
     "pre_resolve_edge_targets",
@@ -57,6 +67,8 @@ __all__ = [
     "resolve_edge_targets",
     "row_int",
     "schema_migration_versions",
+    "set_index_run_modes",
     "snapshot_versions_compatible",
     "stamp_embed_types",
+    "start_index_run",
 ]

@@ -37,6 +37,7 @@ WarningKind: TypeAlias = Literal[
     "semantic_filter_has_no_embeddings",
     "record_not_found",
     "symbol_not_found",
+    "index_run_active",
     "static_analysis_not_run",
     "overconstrained_boolean_filters",
 ]

@@ -7,6 +7,7 @@ import json
 import os
 import shlex
 import shutil
+import socket
 import sys
 import threading
 import time
@@ -62,10 +63,11 @@ from project_code_intelligence.models import (
 )
 from project_code_intelligence.parsers import parse_file
 from project_code_intelligence.profile_context import set_active_profile
-from project_code_intelligence.progress import progress_event, runtime_heartbeat
+from project_code_intelligence.progress import progress_event, run_ledger_heartbeat, runtime_heartbeat
 from project_code_intelligence.reporting import report_ingests
 from project_code_intelligence.runtime import (
     format_duration,
+    run_ledger_seconds,
     runtime_heartbeat_seconds,
 )
 from project_code_intelligence.sarif import (
@@ -83,6 +85,8 @@ from project_code_intelligence.storage import (
     count_unresolved_edge_targets,
     ensure_schema,
     file_signature,
+    finish_index_run,
+    heartbeat_index_run,
     insert_edges,
     insert_files,
     insert_parser_failures,
@@ -97,9 +101,12 @@ from project_code_intelligence.storage import (
     prune_old_snapshots,
     replace_repos,
     resolve_edge_targets,
+    set_index_run_modes,
     snapshot_versions_compatible,
     stamp_embed_types,
+    start_index_run,
 )
+from project_code_intelligence.storage.runs import active_index_run_id, set_active_index_run
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -563,6 +570,14 @@ def ingest_repo(config: RepoIngestConfig) -> RepoIngest:
     started = time.monotonic()
     records, edges, failures = parse_changed_files(files, changes.changed_paths, config=config)
     runtime_state.active_metrics.add("scan_parse_seconds", time.monotonic() - started)
+    # Stamped so a full-vs-incremental run stays diagnosable from snapshot
+    # history after its index-run ledger row is pruned.
+    snapshot.metadata.update(
+        ingest_mode=config.mode,
+        changed_files=len(changes.changed_paths),
+        unchanged_files=len(changes.unchanged_paths),
+        deleted_files=len(changes.deleted_paths),
+    )
     return RepoIngest(
         snapshot=snapshot,
         files=files,
@@ -1438,27 +1453,44 @@ def run_init_db_only(plan: IngestPlan, bootstrap: db.DatabaseBootstrapResult | N
 
 def previous_repo_states(plan: IngestPlan) -> dict[str, tuple[int | None, dict[str, PreviousFileState], str]]:
     if plan.mode != "incremental":
-        return {repo: (None, {}, "full") for repo in plan.repos}
+        return record_repo_modes({repo: (None, {}, "full", "requested") for repo in plan.repos})
     try:
         with db.connect() as conn:
-            return {repo: previous_repo_state(conn, plan.collection, repo) for repo in plan.repos}
+            return record_repo_modes({repo: previous_repo_state(conn, plan.collection, repo) for repo in plan.repos})
     except (db.DatabaseConnectionError, db.OperationalError) as exc:
         progress_event("code_intel_incremental_unavailable", error=str(exc))
-        return {repo: (None, {}, "full") for repo in plan.repos}
+        return record_repo_modes({repo: (None, {}, "full", "db_unavailable") for repo in plan.repos})
+
+
+def record_repo_modes(
+    states: dict[str, tuple[int | None, dict[str, PreviousFileState], str, str]],
+) -> dict[str, tuple[int | None, dict[str, PreviousFileState], str]]:
+    """Stamp per-repo mode (+ full-fallback reason) into the index-run ledger.
+
+    A silent fall-back to a full re-index was previously invisible; the ledger
+    row makes it diagnosable from `pci status`.
+    """
+    run_id = active_index_run_id()
+    if run_id is not None:
+        modes: JsonObject = {
+            repo: (mode if not reason else f"{mode}:{reason}") for repo, (_, _, mode, reason) in states.items()
+        }
+        set_index_run_modes(run_id, modes)
+    return {repo: (previous_id, files, mode) for repo, (previous_id, files, mode, _) in states.items()}
 
 
 def previous_repo_state(
     conn: db.DbConnection,
     collection: str,
     repo: str,
-) -> tuple[int | None, dict[str, PreviousFileState], str]:
+) -> tuple[int | None, dict[str, PreviousFileState], str, str]:
     previous = latest_snapshot_info(conn, collection, repo)
     metadata = previous.get("metadata") if previous else None
     metadata_obj = metadata if isinstance(metadata, dict) else None
     if previous and snapshot_versions_compatible(metadata_obj):
         previous_id = json_int(previous, "id")
-        return previous_id, previous_file_states(conn, previous_id), "incremental"
-    return None, {}, "full"
+        return previous_id, previous_file_states(conn, previous_id), "incremental", ""
+    return None, {}, "full", "version_mismatch" if previous else "no_previous_snapshot"
 
 
 def add_repo_ingest_metrics(ingest: RepoIngest) -> None:
@@ -2027,6 +2059,8 @@ def run_ingest_plan(plan: IngestPlan) -> int:
     bootstrap = prepare_writable_database(plan.args, embedding_requested=plan.embedding_requested)
     if plan.args.init_db_only:
         return run_init_db_only(plan, bootstrap)
+    if not plan.args.dry_run:
+        set_active_index_run(start_index_run(plan.collection, plan.repos, pid=os.getpid(), host=socket.gethostname()))
     if plan.args.embed_only:
         return run_embed_only(plan, bootstrap)
     ingests, sarif_ingest = scan_plan(plan)
@@ -2066,19 +2100,60 @@ def main(argv: list[str] | None = None) -> int:
     return result
 
 
+def write_run_ledger(phase: str | None, metrics_snapshot: JsonObject) -> None:
+    """Ledger-heartbeat writer: no-op until run_ingest_plan registers a run id."""
+    run_id = active_index_run_id()
+    if run_id is not None:
+        heartbeat_index_run(run_id, phase=phase, progress=metrics_snapshot)
+
+
+def start_heartbeat_thread(started: float, stop_event: threading.Event) -> threading.Thread | None:
+    interval = runtime_heartbeat_seconds()
+    if not interval:
+        return None
+    thread = threading.Thread(
+        target=runtime_heartbeat,
+        args=(started, stop_event, interval, runtime_state.active_metrics),
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def start_ledger_thread(stop_event: threading.Event) -> threading.Thread | None:
+    interval = run_ledger_seconds()
+    if not interval:
+        return None
+    thread = threading.Thread(
+        target=run_ledger_heartbeat,
+        args=(stop_event, interval, runtime_state.active_metrics, write_run_ledger),
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def finish_run_ledger(exit_code: int | None, *, interrupted: bool, error: str | None) -> None:
+    run_id = active_index_run_id()
+    if run_id is None:
+        return
+    finish_index_run(
+        run_id,
+        exit_code=exit_code if exit_code is not None else 1,
+        interrupted=interrupted,
+        error=error,
+        progress=runtime_state.active_metrics.snapshot(),
+    )
+    set_active_index_run(None)
+
+
 def cli_main(argv: list[str] | None = None) -> int:
     _ = runtime_state.reset_active_metrics()
+    set_active_index_run(None)
     started = time.monotonic()
     stop_heartbeat = threading.Event()
-    heartbeat_thread: threading.Thread | None = None
-    heartbeat_interval = runtime_heartbeat_seconds()
-    if heartbeat_interval:
-        heartbeat_thread = threading.Thread(
-            target=runtime_heartbeat,
-            args=(started, stop_heartbeat, heartbeat_interval, runtime_state.active_metrics),
-            daemon=True,
-        )
-        heartbeat_thread.start()
+    heartbeat_thread = start_heartbeat_thread(started, stop_heartbeat)
+    ledger_thread = start_ledger_thread(stop_heartbeat)
     exit_code: int | None = None
     interrupted = False
     deferred_stderr: str | None = None
@@ -2110,6 +2185,9 @@ def cli_main(argv: list[str] | None = None) -> int:
         stop_heartbeat.set()
         if heartbeat_thread is not None:
             heartbeat_thread.join(timeout=1)
+        if ledger_thread is not None:
+            ledger_thread.join(timeout=1)
+        finish_run_ledger(exit_code, interrupted=interrupted, error=deferred_stderr)
         elapsed = time.monotonic() - started
         with suppress(BrokenPipeError):
             _ = sys.stdout.flush()

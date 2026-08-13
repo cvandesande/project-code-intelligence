@@ -357,6 +357,11 @@ def runtime_heartbeat_seconds() -> int:
     return config.env_int("PCI_RUNTIME_HEARTBEAT_SECONDS", 300, minimum=0)
 
 
+def run_ledger_seconds() -> int:
+    """Interval for index-run ledger heartbeats to the database; 0 disables."""
+    return config.env_int("PCI_RUN_LEDGER_SECONDS", 15, minimum=0)
+
+
 def __getattr__(name: str) -> RuntimeMetrics:
     """Preserve legacy `runtime.active_metrics` reads after the class-attribute migration."""
     if name == "active_metrics":

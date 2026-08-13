@@ -2191,6 +2191,89 @@ class McpStatusWarningTests(unittest.TestCase):
             ],
         )
 
+    def test_status_include_active_runs_reports_ledger_rows_and_warning(self) -> None:
+        heartbeat = datetime.now(timezone.utc) - timedelta(seconds=5)
+        conn = QueuedConnection([
+            *[FakeCursor(many=[]) for _ in range(6)],
+            FakeCursor(
+                many=[
+                    {
+                        "id": 7,
+                        "collection": "ws",
+                        "repos": ["repo-a"],
+                        "repo_modes": {"repo-a": "full:version_mismatch"},
+                        "pid": 123,
+                        "host": "mac",
+                        "phase": "embedding",
+                        "progress": {"progress": {"phase_done": 5, "phase_total": 10}},
+                        "started_at": heartbeat,
+                        "heartbeat_at": heartbeat,
+                        "finished_at": None,
+                        "exit_code": None,
+                        "interrupted": False,
+                        "error": None,
+                        "running": True,
+                    }
+                ]
+            ),
+        ])
+
+        def regclass(_conn: object, table: str) -> bool:
+            return table == "project_code_intel_index_runs"
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "table_regclass_exists", side_effect=regclass),
+            patch.object(mcp_status, "schema_migration_versions", return_value=[]),
+            patch.object(git_utils, "run_git", return_value="abc123"),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_code_intel_status({"include_active_runs": True})
+
+        payload = mcp_text_payload(response)
+        active_runs = cast("list[dict[str, object]]", payload["active_runs"])
+        self.assertEqual(len(active_runs), 1)
+        run = active_runs[0]
+        self.assertEqual(run["phase"], "embedding")
+        self.assertEqual(run["repo_modes"], {"repo-a": "full:version_mismatch"})
+        self.assertTrue(run["running"])
+        self.assertIsInstance(run["heartbeat_age_seconds"], int)
+        self.assertIsInstance(run["heartbeat_at"], str)
+        warnings = cast("list[dict[str, object]]", payload["warnings"])
+        self.assertEqual(warnings[-1]["kind"], "index_run_active")
+        self.assertEqual(warnings[-1]["collections"], ["ws"])
+
+    def test_status_without_the_flag_omits_active_runs(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[]) for _ in range(6)])
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "table_regclass_exists", return_value=False),
+            patch.object(mcp_status, "schema_migration_versions", return_value=[]),
+            patch.object(git_utils, "run_git", return_value="abc123"),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_code_intel_status({})
+        payload = mcp_text_payload(response)
+        self.assertNotIn("active_runs", payload)
+
+    def test_status_active_runs_empty_when_table_is_absent(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[]) for _ in range(6)])
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "table_regclass_exists", return_value=False),
+            patch.object(mcp_status, "schema_migration_versions", return_value=[]),
+            patch.object(git_utils, "run_git", return_value="abc123"),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_code_intel_status({"include_active_runs": True})
+        payload = mcp_text_payload(response)
+        self.assertEqual(payload["active_runs"], [])
+        warnings = cast("list[dict[str, object]]", payload.get("warnings", []))
+        self.assertNotIn("index_run_active", [w["kind"] for w in warnings])
+
     def test_status_unknown_repo_reports_found_false_warning(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[]) for _ in range(6)])
 

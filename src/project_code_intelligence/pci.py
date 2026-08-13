@@ -30,6 +30,7 @@ _COMMANDS: dict[str, tuple[str, str, list[str]]] = {
     "ingest": ("project_code_intelligence.ingest_code_intel", "cli_main", []),
     "bench": ("project_code_intelligence.embedding.bench", "main", []),
     "smoke": ("project_code_intelligence.cli", "mcp_smoke_main", []),
+    "status": ("project_code_intelligence.status_cli", "main", []),
     "llama-embed": ("project_code_intelligence.embedding.llama", "main", []),
     "apple-embed-server": ("project_code_intelligence.embedding.apple_embed_server", "main", []),
     "fastembed-server": ("project_code_intelligence.embedding.fastembed_server", "main", []),

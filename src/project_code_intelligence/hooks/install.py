@@ -14,6 +14,7 @@ Both operations are idempotent and reversible (``--uninstall``).
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
 import sys
@@ -254,42 +255,91 @@ def _strip_managed_block(text: str) -> str:
     return "".join(out)
 
 
-def install_git(repo: Path, *, uninstall: bool, dry_run: bool) -> InstallOutcome:
+def find_nested_repos(root: Path) -> list[Path]:
+    """Git repositories nested under ``root`` (root itself excluded).
+
+    Only directories with a real ``.git`` directory count: gitfile submodules
+    keep their hooks in the superproject's git dir, so a hook written under
+    them would never run. Hidden directories are not descended into.
+    """
+    found: list[Path] = []
+    for current_dir, dir_names, _ in os.walk(root):
+        current = Path(current_dir)
+        dir_names[:] = [name for name in dir_names if not name.startswith(".")]
+        found.extend(current / name for name in dir_names if (current / name / ".git").is_dir())
+    return sorted(found)
+
+
+# post-commit does not fire on a fast-forward `git merge` -- git creates no new commit
+# object in that case, so the reindex signal is silently absent exactly when a finished
+# worktree branch lands back on the shared checkout via ff merge. post-merge exists for
+# this: git guarantees it runs after every `git merge` (fast-forward or not), so it is
+# installed alongside post-commit rather than instead of it.
+_GIT_HOOK_NAMES = ("post-commit", "post-merge")
+
+
+def _hook_paths(repo: Path) -> tuple[Path, ...]:
+    return tuple(repo / ".git" / "hooks" / name for name in _GIT_HOOK_NAMES)
+
+
+def has_git_hook(repo: Path) -> bool:
+    """True when ``repo``'s post-commit hook carries our managed block."""
     hook_path = repo / ".git" / "hooks" / "post-commit"
+    try:
+        return _POSTCOMMIT_BEGIN in hook_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
+def _install_one(hook_path: Path, *, block: str, uninstall: bool, dry_run: bool) -> tuple[str, bool]:
+    """Write/strip the managed block in a single hook file. Returns (action, had_block)."""
     existing = hook_path.read_text(encoding="utf-8") if hook_path.exists() else ""
     had_block = _POSTCOMMIT_BEGIN in existing
     base = _strip_managed_block(existing)
 
     if uninstall:
-        action = "removed" if had_block else "unchanged"
-        rows = [("post-commit", str(hook_path))] if had_block else [("state", "no pci post-commit hook present")]
-        # Drop a file that was only ever ours; keep any pre-existing user script.
         leftover_is_ours = base.strip() in {"", "#!/bin/sh"}
         if not dry_run:
             if had_block and leftover_is_ours:
                 hook_path.unlink(missing_ok=True)
             elif had_block:
                 _ = hook_path.write_text(base, encoding="utf-8")
-        return InstallOutcome("git", action, str(hook_path), rows)
+        return ("removed" if had_block else "unchanged"), had_block
 
-    command = _hook_command()
     if not base.strip():
         base = "#!/bin/sh\n"
     elif not base.startswith("#!"):
         base = "#!/bin/sh\n" + base
     if not base.endswith("\n"):
         base += "\n"
-    # Background it so `git commit` returns immediately; pci-hook serialises with a lock.
-    command_line = " ".join(command)
-    reindex = f'{command_line} run --target git --behavior reindex --repo "$(git rev-parse --show-toplevel)"'
-    block = f"{_POSTCOMMIT_BEGIN}\n{reindex} >/dev/null 2>&1 &\n{_POSTCOMMIT_END}\n"
     if not dry_run:
         hook_path.parent.mkdir(parents=True, exist_ok=True)
         _ = hook_path.write_text(base + block, encoding="utf-8")
         hook_path.chmod(0o755)
-    return InstallOutcome(
-        "git",
-        "updated" if had_block else "installed",
-        str(hook_path),
-        [("post-commit", str(hook_path)), ("command", command_line)],
-    )
+    return ("updated" if had_block else "installed"), had_block
+
+
+def install_git(repo: Path, *, uninstall: bool, dry_run: bool) -> InstallOutcome:
+    command = _hook_command()
+    command_line = " ".join(command)
+    # Background it so `git commit`/`git merge` return immediately; pci-hook serialises with a lock.
+    reindex = f'{command_line} run --target git --behavior reindex --repo "$(git rev-parse --show-toplevel)"'
+    block = f"{_POSTCOMMIT_BEGIN}\n{reindex} >/dev/null 2>&1 &\n{_POSTCOMMIT_END}\n"
+
+    results = [
+        (name, hook_path, *_install_one(hook_path, block=block, uninstall=uninstall, dry_run=dry_run))
+        for name, hook_path in zip(_GIT_HOOK_NAMES, _hook_paths(repo), strict=True)
+    ]
+    any_had_block = any(had_block for _, _, _, had_block in results)
+
+    if uninstall:
+        action = "removed" if any_had_block else "unchanged"
+        rows = [(name, str(path)) for name, path, _, had_block in results if had_block] or [
+            ("state", "no pci git hooks present")
+        ]
+        return InstallOutcome("git", action, str(repo / ".git" / "hooks"), rows)
+
+    action = "updated" if any_had_block else "installed"
+    rows = [(name, str(path)) for name, path, _, _ in results]
+    rows.append(("command", command_line))
+    return InstallOutcome("git", action, str(repo / ".git" / "hooks"), rows)

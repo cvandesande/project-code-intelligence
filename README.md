@@ -127,7 +127,7 @@ local runtimes and prints the exact startup command for each available path.
 | Path | Runtime | Notes |
 | --- | --- | --- |
 | CPU | FastEmbed | Portable default for local testing and machines without accelerator support. |
-| Apple Silicon | MLX | Native MLX embedding server (`pci-apple-embed-server`) using the GPU; Docker is still useful for Postgres. |
+| Apple Silicon | MLX | Native MLX embedding server (`pci apple-embed-server`) using the GPU; Docker is still useful for Postgres. |
 | AMD Ryzen AI NPU | Lemonade FLM | Experimental; requires supported XDNA hardware, driver, and firmware. |
 | AMD GPU | llama.cpp ROCm | Uses the `amdgpu` Compose profile. |
 | NVIDIA GPU | llama.cpp CUDA | Requires the NVIDIA driver and NVIDIA Container Toolkit. |

@@ -38,6 +38,7 @@ def _as_object(value: object) -> JsonObject:
 
 if TYPE_CHECKING:
     import threading
+    from collections.abc import Callable
 
     from rich.console import Console, RenderableType
     from rich.panel import Panel
@@ -415,7 +416,7 @@ class RichEmitter:
         return console_ui.main_panel(Group(*body))
 
 
-def _estimate_remaining_seconds(progress: JsonObject, counts: JsonObject, timing: JsonObject) -> float | None:
+def estimate_remaining_seconds(progress: JsonObject, counts: JsonObject, timing: JsonObject) -> float | None:
     phase = progress.get("phase")
     if phase == "embedding":
         rate = counts.get("embedded_records_per_second")
@@ -434,7 +435,7 @@ def _estimate_remaining_seconds(progress: JsonObject, counts: JsonObject, timing
 
 
 def _add_live_eta_row(rows: Table, progress: JsonObject, counts: JsonObject, timing: JsonObject) -> None:
-    remaining = _estimate_remaining_seconds(progress, counts, timing)
+    remaining = estimate_remaining_seconds(progress, counts, timing)
     if remaining is None or remaining <= 0:
         return
     _add_row(rows, "ETA", f"~ {_format_seconds(remaining)} remaining")
@@ -606,6 +607,21 @@ def runtime_heartbeat(
             duration=runtime_state.format_duration(elapsed),
             metrics=metrics.snapshot(),
         )
+
+
+def run_ledger_heartbeat(
+    stop_event: threading.Event,
+    interval: int,
+    metrics: runtime_state.RuntimeMetrics,
+    write: Callable[[str | None, JsonObject], None],
+) -> None:
+    """Periodically hand (active phase, metrics snapshot) to ``write``.
+
+    The writer is injected (the ingest passes the index-run DB updater) so this
+    module stays free of storage imports and tests can capture the payloads.
+    """
+    while not stop_event.wait(interval):
+        write(metrics.active_phase or None, metrics.snapshot())
 
 
 # === Final summary panel for stdout ========================================

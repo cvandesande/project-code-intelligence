@@ -25,6 +25,7 @@ class _FrameworkHooks:
     include_breakdowns = None
     include_static_summary = None
     include_runtime = None
+    include_active_runs = None
     require_exactly_one_record_selector = None
     empty_optional_strings_are_omitted = None
 
@@ -48,6 +49,7 @@ _WHITELIST = (
     _FrameworkHooks.include_breakdowns,
     _FrameworkHooks.include_static_summary,
     _FrameworkHooks.include_runtime,
+    _FrameworkHooks.include_active_runs,
     _FrameworkHooks.require_exactly_one_record_selector,
     _FrameworkHooks.empty_optional_strings_are_omitted,
     _uses_protocol_keywords,

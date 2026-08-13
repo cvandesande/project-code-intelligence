@@ -98,7 +98,9 @@ from project_code_intelligence.mcp.static import (
     static_run_scope_exists,
 )
 from project_code_intelligence.mcp.status import (
+    active_index_run_rows,
     compact_status_snapshots,
+    index_run_warnings,
     load_status_rows,
     server_runtime_identity,
     snapshot_scope_warning,
@@ -134,6 +136,7 @@ def tool_code_intel_status(args: Json) -> Json:
             return ok(missing_schema_response)
         missing_snapshot_warning = snapshot_scope_warning(conn, args)
         rows = load_status_rows(conn, filters, includes, directory_depth)
+        active_runs = active_index_run_rows(conn, scoped_collection(args)) if includes.active_runs else None
     queryability = status_queryability(
         rows.snapshots,
         rows.records_by_type,
@@ -141,7 +144,6 @@ def tool_code_intel_status(args: Json) -> Json:
         rows.file_dimensions,
         include_details=includes.queryability,
     )
-    full_snapshots = includes.snapshots and includes.verbose
     response: Json = {
         "schema_present": True,
         "schema_versions": rows.schema_versions,
@@ -153,7 +155,7 @@ def tool_code_intel_status(args: Json) -> Json:
                 omit_collection=omit_scoped_collection,
                 omit_repo=omit_scoped_repo,
             )
-            if full_snapshots
+            if includes.snapshots and includes.verbose
             else compact_status_snapshots(
                 rows.snapshots,
                 omit_collection=omit_scoped_collection,
@@ -202,6 +204,8 @@ def tool_code_intel_status(args: Json) -> Json:
         static_runs, static_findings = rows.static_rows
         response["static_runs"] = cast("JsonValue", static_runs)
         response["static_findings"] = cast("JsonValue", static_findings)
+    if active_runs is not None:
+        response["active_runs"] = cast("JsonValue", active_runs)
     if includes.runtime:
         response["runtime"] = server_runtime_identity()
     if status_repo_not_found(args, rows):
@@ -211,6 +215,7 @@ def tool_code_intel_status(args: Json) -> Json:
         [
             *status_snapshot_warnings(rows.snapshots),
             *status_scope_warnings(args, rows, missing_snapshot_warning=missing_snapshot_warning),
+            *index_run_warnings(active_runs),
         ],
     )
     return ok(response)

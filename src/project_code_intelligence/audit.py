@@ -265,6 +265,12 @@ def _staleness_lines(staleness: Json | None) -> list[str]:
         head = staleness.get("head_commit")
         head_short = head[:10] if isinstance(head, str) else "?"
         out.append(f"local HEAD is {head_short}; commit or reindex before acting on line numbers")
+    lag = staleness.get("upstream_commits_behind")
+    # A checkout can match its own index (head_status "current") while sitting on a stale
+    # branch far behind its upstream -- "current" answers "is the index stale", not "is the
+    # branch stale". Both matter: a redundancy hit against 134-commits-old code is not evidence.
+    if isinstance(lag, int) and lag > 0:
+        out.append(f"local branch is {lag} commit(s) behind its upstream -- checkout may be stale, not just the index")
     return out
 
 
@@ -394,7 +400,7 @@ def line_style(line: str) -> str | None:
 
 
 # Keys the machine output keeps from the annotated snapshot row.
-_STALENESS_KEYS = ("commit_sha", "head_status", "head_commit", "dirty", "index_age_seconds")
+_STALENESS_KEYS = ("commit_sha", "head_status", "head_commit", "dirty", "index_age_seconds", "upstream_commits_behind")
 
 
 def _group_to_compact(group: MotifGroup, repo: str) -> dict[str, object]:
