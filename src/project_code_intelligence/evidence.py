@@ -27,6 +27,7 @@ from project_code_intelligence.analyze import (
     coerce_int,
     coerce_str,
     latest_snapshots,
+    newest_per_repo,
     select_snapshots,
 )
 from project_code_intelligence.exceptions import DatabaseConnectionError
@@ -604,9 +605,14 @@ class EvidenceQuery:
 
 
 def collect_evidence(conn: db.DbConnection, query: EvidenceQuery) -> list[Evidence]:
-    """Assemble evidence bundles for every snapshot/target matching the filters."""
+    """Assemble evidence bundles for every snapshot/target matching the filters.
+
+    No checkout context is available here (this is a collection/repo filter, not a
+    file path), so this keeps the newest snapshot per repo regardless of branch.
+    """
     bundles: list[Evidence] = []
-    for snapshot in select_snapshots(latest_snapshots(conn), collection=query.collection, repo=query.repo):
+    selected = select_snapshots(latest_snapshots(conn), collection=query.collection, repo=query.repo)
+    for snapshot in newest_per_repo(selected):
         targets = resolve_targets(conn, snapshot, symbol=query.symbol, source_path=query.source_path, line=query.line)
         bundles.extend(
             build_evidence(conn, target, neighbors=query.neighbors, threshold=query.threshold) for target in targets

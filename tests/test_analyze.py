@@ -484,5 +484,78 @@ class PathPrefixMatchTests(unittest.TestCase):
         self.assertFalse(analyze.path_matches_prefix("pci/src/pkg/mcp/tools.py", "src/pkg/sarif"))
 
 
+class SelectSnapshotsTests(unittest.TestCase):
+    """Snapshot scoping by collection/repo/branch (issue #6)."""
+
+    @staticmethod
+    def _refs() -> list[analyze.SnapshotRef]:
+        return [
+            analyze.SnapshotRef(snapshot_id=1, collection="c", repo="r", branch="main"),
+            analyze.SnapshotRef(snapshot_id=2, collection="c", repo="r", branch="feature"),
+            analyze.SnapshotRef(snapshot_id=3, collection="c", repo="other", branch="main"),
+        ]
+
+    def test_branch_filter_keeps_only_matching_branch(self) -> None:
+        selected = analyze.select_snapshots(self._refs(), collection=None, repo=None, branch="feature")
+        self.assertEqual([s.snapshot_id for s in selected], [2])
+
+    def test_branch_none_keeps_all_branches(self) -> None:
+        selected = analyze.select_snapshots(self._refs(), collection="c", repo="r", branch=None)
+        self.assertEqual({s.snapshot_id for s in selected}, {1, 2})
+
+    def test_branch_with_no_match_returns_empty(self) -> None:
+        selected = analyze.select_snapshots(self._refs(), collection=None, repo=None, branch="nope")
+        self.assertEqual(selected, [])
+
+
+class NewestPerRepoTests(unittest.TestCase):
+    def test_collapses_to_highest_snapshot_id_per_repo(self) -> None:
+        refs = [
+            analyze.SnapshotRef(snapshot_id=1, collection="c", repo="r", branch="main"),
+            analyze.SnapshotRef(snapshot_id=2, collection="c", repo="r", branch="feature"),
+            analyze.SnapshotRef(snapshot_id=3, collection="c", repo="other", branch="main"),
+        ]
+        result = analyze.newest_per_repo(refs)
+        by_repo = {(s.collection, s.repo): s.snapshot_id for s in result}
+        self.assertEqual(by_repo, {("c", "r"): 2, ("c", "other"): 3})
+
+    def test_empty_input_returns_empty(self) -> None:
+        self.assertEqual(analyze.newest_per_repo([]), [])
+
+
+class ResolveAndSelectSnapshotsTests(unittest.TestCase):
+    """Branch resolution -> selection -> collapse, shared by both CLIs (issue #6 bug fix)."""
+
+    @staticmethod
+    def _refs() -> list[analyze.SnapshotRef]:
+        return [
+            analyze.SnapshotRef(snapshot_id=1, collection="c", repo="r", branch="main"),
+            analyze.SnapshotRef(snapshot_id=2, collection="c", repo="r", branch="feature"),
+            analyze.SnapshotRef(snapshot_id=3, collection="c", repo="other", branch="main"),
+        ]
+
+    def test_branch_none_collapses_to_newest_per_repo(self) -> None:
+        """Detached HEAD / non-git cwd: process one snapshot per repo, not one per branch."""
+        snapshots, branch_miss = analyze.resolve_and_select_snapshots(
+            self._refs(), collection=None, repo=None, branch=None
+        )
+        self.assertEqual({s.snapshot_id for s in snapshots}, {2, 3})
+        self.assertFalse(branch_miss)
+
+    def test_branch_given_and_matched_keeps_only_that_branch(self) -> None:
+        snapshots, branch_miss = analyze.resolve_and_select_snapshots(
+            self._refs(), collection=None, repo=None, branch="feature"
+        )
+        self.assertEqual([s.snapshot_id for s in snapshots], [2])
+        self.assertFalse(branch_miss)
+
+    def test_branch_given_and_unmatched_falls_back_to_newest_per_repo(self) -> None:
+        snapshots, branch_miss = analyze.resolve_and_select_snapshots(
+            self._refs(), collection=None, repo=None, branch="nope"
+        )
+        self.assertEqual({s.snapshot_id for s in snapshots}, {2, 3})
+        self.assertTrue(branch_miss)
+
+
 if __name__ == "__main__":
     _ = unittest.main()

@@ -22,6 +22,7 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rich.text import Text
@@ -35,7 +36,8 @@ from project_code_intelligence.analyze import (
     coerce_int,
     coerce_str,
     latest_snapshots,
-    select_snapshots,
+    resolve_and_select_snapshots,
+    resolve_repo_branch,
 )
 from project_code_intelligence.exceptions import DatabaseConnectionError
 from project_code_intelligence.mcp import db as mcp_db
@@ -488,7 +490,13 @@ def audit_main(argv: list[str] | None = None) -> int:
             if not mcp_db.code_intel_tables_exist(conn):
                 _ = sys.stderr.write("pci-analyze: no code-intelligence tables; run pci-index first\n")
                 return 1
-            snapshots = select_snapshots(latest_snapshots(conn), collection=parsed.collection, repo=parsed.repo)
+            all_snapshots = latest_snapshots(conn)
+            branch = resolve_repo_branch(Path.cwd())
+            snapshots, branch_miss = resolve_and_select_snapshots(
+                all_snapshots, collection=parsed.collection, repo=parsed.repo, branch=branch
+            )
+            if branch_miss:
+                _ = sys.stderr.write(f"pci-analyze: no snapshot on branch {branch!r}; using newest per repo\n")
             if not snapshots:
                 _ = sys.stderr.write("pci-analyze: no matching snapshots found\n")
                 return 1

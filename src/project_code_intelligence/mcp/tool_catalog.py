@@ -38,6 +38,7 @@ _BOOLEAN_FILTER_DESC = (
     "Omit boolean filters unless you want to filter for that exact boolean value; "
     "false is an active filter, not a default."
 )
+_BRANCH_DESC = "Restrict to this branch's snapshot. Omit to use the newest snapshot per repo, any branch."
 
 
 TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
@@ -275,6 +276,7 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 },
                 "collection": {"type": "string", "description": _COLLECTION_DESC},
                 "repo": {"type": "string"},
+                "branch": {"type": "string", "description": _BRANCH_DESC},
                 "verbose": {"type": "boolean"},
             },
             "additionalProperties": False,

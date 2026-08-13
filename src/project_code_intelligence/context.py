@@ -12,8 +12,10 @@ import argparse
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+from project_code_intelligence.analyze import resolve_repo_branch
 from project_code_intelligence.common import repo_relative_path
 from project_code_intelligence.exceptions import DatabaseConnectionError
 from project_code_intelligence.mcp import db as mcp_db
@@ -125,14 +127,43 @@ def _build_snapshot(annotated: Json) -> _Snapshot | None:
     )
 
 
-def _latest_snapshots(conn: db.DbConnection) -> list[_Snapshot]:
+def _pick_per_repo(snapshots: list[_Snapshot], checkout_branch: str | None) -> list[_Snapshot]:
+    """One snapshot per (collection, repo): same branch as the checkout, else newest.
+
+    Ties (no branch match) go to the highest snapshot_id, since ids are
+    assigned in insertion order.
+    """
+    best: dict[tuple[str, str], _Snapshot] = {}
+    for snapshot in snapshots:
+        key = (snapshot.collection, snapshot.repo)
+        current = best.get(key)
+        if current is None:
+            best[key] = snapshot
+            continue
+        current_matches = checkout_branch is not None and current.branch == checkout_branch
+        snapshot_matches = checkout_branch is not None and snapshot.branch == checkout_branch
+        wins = (snapshot_matches and not current_matches) or (
+            snapshot_matches == current_matches and snapshot.snapshot_id > current.snapshot_id
+        )
+        if wins:
+            best[key] = snapshot
+    return list(best.values())
+
+
+def _latest_snapshots(conn: db.DbConnection, checkout_branch: str | None = None) -> list[_Snapshot]:
+    """Newest snapshot per (collection, repo, branch), collapsed to one per repo.
+
+    ``checkout_branch`` (the caller's current git branch, if known) is
+    preferred when a same-branch snapshot exists; otherwise the newest
+    snapshot for that repo is used regardless of branch.
+    """
     rows = conn.execute(
         """
-        SELECT DISTINCT ON (collection, repo)
+        SELECT DISTINCT ON (collection, repo, branch)
                id, collection, repo, repo_role, branch, commit_sha, tree_sha,
                dirty, metadata, created_at
         FROM project_code_intel_snapshots
-        ORDER BY collection, repo, created_at DESC, id DESC
+        ORDER BY collection, repo, branch, created_at DESC, id DESC
         """
     ).fetchall()
     annotated = annotate_status_snapshots(rows)
@@ -141,7 +172,7 @@ def _latest_snapshots(conn: db.DbConnection) -> list[_Snapshot]:
         item = _build_snapshot(snapshot_json)
         if item is not None:
             out.append(item)
-    return out
+    return _pick_per_repo(out, checkout_branch)
 
 
 def _public_source_symbols(conn: db.DbConnection, snapshot_id: int) -> list[_Symbol]:
@@ -250,7 +281,7 @@ def _render_repo(snapshot: _Snapshot, symbols: list[_Symbol]) -> list[str]:
 
 
 def _build_map(conn: db.DbConnection) -> str:
-    snapshots = _latest_snapshots(conn)
+    snapshots = _latest_snapshots(conn, resolve_repo_branch(Path.cwd()))
     if not snapshots:
         return ""
     sections: list[str] = ["\n".join(_render_header(snapshots))]

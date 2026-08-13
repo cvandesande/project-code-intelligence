@@ -9,7 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from typing_extensions import TypedDict, Unpack, override
 
@@ -40,6 +40,7 @@ from project_code_intelligence.ingest_code_intel import (
     default_mcp_server_name,
     discover_plan_sarif_files,
     emit_mcp_config,
+    main,
     mcp_config_block,
     mcp_config_context,
     mcp_project_config_path,
@@ -81,6 +82,7 @@ from project_code_intelligence.sarif import (
     source_path_from_sarif_uri,
 )
 from project_code_intelligence.server import query_embedding
+from project_code_intelligence.storage import latest_snapshot_info
 
 
 class ActiveTestProfile:
@@ -2224,6 +2226,94 @@ class SarifTests(unittest.TestCase):
             self.assertEqual(resolution.source_path, "../build/generated.c")
             self.assertEqual(resolution.repo, "sample-repo")
             self.assertEqual(resolution.path_mapping, "unresolved_relative")
+
+
+class _FakeCursor:
+    def __init__(self, row: object | None) -> None:
+        self._row = row
+
+    def fetchone(self) -> object | None:
+        return self._row
+
+
+class _FakeSnapshotConnection:
+    """Answers latest_snapshot_info's two possible queries by whether they filter on branch."""
+
+    def __init__(self, *, same_branch_row: object | None, any_branch_row: object | None) -> None:
+        self.same_branch_row = same_branch_row
+        self.any_branch_row = any_branch_row
+        self.queries: list[str] = []
+
+    def execute(self, query: object, params: object | None = None) -> _FakeCursor:
+        del params
+        sql = str(query)
+        self.queries.append(sql)
+        if "AND branch = %s" in sql:
+            return _FakeCursor(self.same_branch_row)
+        return _FakeCursor(self.any_branch_row)
+
+
+class LatestSnapshotInfoBranchTests(unittest.TestCase):
+    """issue #6: snapshot lookup keys on (collection, repo, branch), not just (collection, repo)."""
+
+    def test_branch_given_and_found_skips_the_fallback_query(self) -> None:
+        conn = _FakeSnapshotConnection(same_branch_row={"id": 2}, any_branch_row={"id": 1})
+        result = latest_snapshot_info(cast("db.DbConnection", conn), "c", "r", branch="feature")
+        self.assertEqual(result, {"id": 2})
+        self.assertEqual(len(conn.queries), 1)
+
+    def test_branch_given_but_missing_falls_back_to_newest_any_branch(self) -> None:
+        conn = _FakeSnapshotConnection(same_branch_row=None, any_branch_row={"id": 1})
+        result = latest_snapshot_info(cast("db.DbConnection", conn), "c", "r", branch="new-branch")
+        self.assertEqual(result, {"id": 1})
+        self.assertEqual(len(conn.queries), 2)
+
+    def test_branch_omitted_uses_newest_any_branch_directly(self) -> None:
+        conn = _FakeSnapshotConnection(same_branch_row={"id": 2}, any_branch_row={"id": 1})
+        result = latest_snapshot_info(cast("db.DbConnection", conn), "c", "r")
+        self.assertEqual(result, {"id": 1})
+        self.assertEqual(len(conn.queries), 1)
+
+
+class _FakePruneConnection:
+    def __enter__(self) -> _FakePruneConnection:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+class MainPruneDeadBranchGuardTests(unittest.TestCase):
+    """issue: for-each-ref returning None (no refs) must skip prune_dead_branch_snapshots,
+    not be treated as "every branch is dead"."""
+
+    def _run_main_with_refs(self, refs: str | None) -> tuple[MagicMock, MagicMock]:
+        args = cli_args(prune_snapshots=True, prune_keep=5, collection="ws", repos="repo-a", root=Path.cwd() / "root")
+        with (
+            patch("project_code_intelligence.ingest_code_intel.parse_cli_args", return_value=args),
+            patch("project_code_intelligence.ingest_code_intel.build_ingest_plan"),
+            patch("project_code_intelligence.ingest_code_intel.run_ingest_plan", return_value=0),
+            patch("project_code_intelligence.ingest_code_intel.db.connect", return_value=_FakePruneConnection()),
+            patch("project_code_intelligence.ingest_code_intel.run_git", return_value=refs),
+            patch("project_code_intelligence.ingest_code_intel.prune_old_snapshots", return_value=0) as prune_old,
+            patch(
+                "project_code_intelligence.ingest_code_intel.prune_dead_branch_snapshots", return_value=0
+            ) as prune_dead,
+        ):
+            result = main([])
+        self.assertEqual(result, 0)
+        return prune_old, prune_dead
+
+    def test_none_refs_skips_dead_branch_prune(self) -> None:
+        _prune_old, prune_dead = self._run_main_with_refs(None)
+        prune_dead.assert_not_called()
+
+    def test_nonempty_refs_runs_dead_branch_prune(self) -> None:
+        prune_old, prune_dead = self._run_main_with_refs("main\nfeature")
+        self.assertEqual(prune_old.call_count, 1)
+        prune_dead.assert_called_once()
+        call_args = cast("tuple[object, ...]", prune_dead.call_args[0])
+        self.assertEqual(call_args[3], {"main", "feature"})
 
 
 if __name__ == "__main__":

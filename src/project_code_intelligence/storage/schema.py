@@ -50,7 +50,29 @@ def snapshot_versions_compatible(metadata: JsonObject | None) -> bool:
     )
 
 
-def latest_snapshot_info(conn: db.DbConnection, collection: str, repo: str) -> JsonObject | None:
+def latest_snapshot_info(
+    conn: db.DbConnection, collection: str, repo: str, *, branch: str | None = None
+) -> JsonObject | None:
+    """Most recent snapshot row for a repo, preferring the given branch.
+
+    When ``branch`` is given, a same-branch snapshot is tried first, so
+    incremental reindex reuses the same-branch baseline. If none exists (a
+    legacy snapshot with a null branch, or the first index of a new branch),
+    fall back to the newest snapshot regardless of branch.
+    """
+    if branch is not None:
+        row = conn.execute(
+            """
+            SELECT id, collection, repo, commit_sha, tree_sha, metadata
+            FROM project_code_intel_snapshots
+            WHERE collection = %s AND repo = %s AND branch = %s
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            [collection, repo, branch],
+        ).fetchone()
+        if row:
+            return cast("JsonObject", dict(row))
     row = conn.execute(
         """
         SELECT id, collection, repo, commit_sha, tree_sha, metadata

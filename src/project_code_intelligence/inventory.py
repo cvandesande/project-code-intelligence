@@ -548,8 +548,16 @@ def classification_bool(classified: JsonObject, key: str) -> bool:
     return value
 
 
-def make_snapshot(root: Path, repo: str, collection: str) -> Snapshot:
-    repo_root = root / repo
+def make_snapshot(root: Path, repo: str, collection: str, *, scan_root: Path | None = None) -> Snapshot:
+    """Snapshot for ``repo``, scanned at ``scan_root`` if given, else ``root / repo``.
+
+    ``scan_root`` lets a caller stamp identity ``repo`` (name/collection) while actually
+    reading git state from a different checkout -- the linked-worktree reindex case, where
+    the worktree's content and branch must be scanned but the snapshot's repo identity has
+    to stay the MAIN repo's, so it lands as a new branch under the same repo/collection
+    rather than a repo named after the worktree directory.
+    """
+    repo_root = scan_root or root / repo
     commit = run_git_required(repo_root, ["rev-parse", "HEAD"])
     base_tree_sha = run_git_required(repo_root, ["rev-parse", f"{commit}^{{tree}}"])
     commit_time = run_git_required(repo_root, ["log", "-1", "--format=%cI", commit])
@@ -576,6 +584,8 @@ def make_snapshot(root: Path, repo: str, collection: str) -> Snapshot:
             "commit_time": commit_time,
             "dirty_fingerprint": dirty_fingerprint,
             "dirty_paths": sorted(dirty_paths),
+            "repo_path": str(repo_root),
+            **({"worktree_of": str(root / repo)} if scan_root is not None else {}),
         },
     )
 
@@ -586,8 +596,9 @@ def discover_files(
     max_file_bytes: int,
     *,
     reuse: DiscoveryReuse | None = None,
+    scan_root: Path | None = None,
 ) -> list[IntelFile]:
-    repo_root = root / snapshot.repo
+    repo_root = scan_root or root / snapshot.repo
     files: list[IntelFile] = []
     reuse_context = reuse or DiscoveryReuse(previous_files={})
     dirty_paths = git_dirty_paths(repo_root)

@@ -197,6 +197,14 @@ def _upstream_lag(snapshot: Json) -> int | None:
     return None
 
 
+def _snapshot_head_branch(snapshot: Json) -> str | None:
+    for candidate in _snapshot_repo_root_candidates(snapshot):
+        branch = git_utils.run_git(candidate, ["branch", "--show-current"])
+        if branch:
+            return branch
+    return None
+
+
 def _annotate_snapshot_head_status(snapshot: Json, head_commit: str | None) -> None:
     snapshot["head_commit"] = head_commit
     if head_commit is None:
@@ -206,7 +214,20 @@ def _annotate_snapshot_head_status(snapshot: Json, head_commit: str | None) -> N
         return
     matches = snapshot.get("commit_sha") == head_commit
     snapshot["head_matches_snapshot"] = matches
-    snapshot["head_status"] = "current" if matches else "stale"
+    # A commit match still lies if the local checkout has since switched branch: the
+    # snapshot's evidence was gathered on a different branch, even at the same commit.
+    # Only worth the extra git call when there is a stamped branch and the commit
+    # otherwise looks current -- a commit mismatch is already reported stale.
+    snapshot_branch = snapshot.get("branch")
+    branch_mismatch = False
+    if matches and isinstance(snapshot_branch, str) and snapshot_branch:
+        live_branch = _snapshot_head_branch(snapshot)
+        branch_mismatch = live_branch is not None and snapshot_branch != live_branch
+    if branch_mismatch:
+        snapshot["head_status"] = "stale"
+        snapshot["head_status_reason"] = "branch_mismatch"
+    else:
+        snapshot["head_status"] = "current" if matches else "stale"
     lag = _upstream_lag(snapshot)
     if lag is not None:
         snapshot["upstream_commits_behind"] = lag

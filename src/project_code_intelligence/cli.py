@@ -108,6 +108,14 @@ def index_parser() -> argparse.ArgumentParser:
         ),
     )
     _ = parser.add_argument(
+        "--worktree",
+        metavar="MAIN=WORKTREE",
+        help=(
+            "Index a linked git worktree's checkout under its MAIN repo's identity/collection "
+            "instead of the worktree's own path. Mutually exclusive with repo_paths."
+        ),
+    )
+    _ = parser.add_argument(
         "repo_paths",
         nargs="*",
         help=(
@@ -132,6 +140,7 @@ class IndexNamespace(argparse.Namespace):
     prune_keep: int
     show_parser_failures: bool
     repo_paths: list[str]
+    worktree: str | None
 
 
 def normalized_passthrough(values: list[str]) -> list[str]:
@@ -158,6 +167,25 @@ def repo_paths_to_ingest_args(repo_paths: list[str]) -> list[str]:
         root, workspace_repos = multi_repo_workspace_and_repos(repo_paths)
         repos = ",".join(workspace_repos)
     return ["--root", str(root), "--repos", repos]
+
+
+def parse_worktree_spec(spec: str) -> tuple[Path, Path]:
+    """Split a ``MAIN=WORKTREE`` spec into its (main, worktree) absolute paths."""
+    main_str, _, worktree_str = spec.partition("=")
+    return (
+        Path(main_str).expanduser().resolve(strict=False),
+        Path(worktree_str).expanduser().resolve(strict=False),
+    )
+
+
+def worktree_ingest_args(spec: str) -> list[str]:
+    """--root/--repos/--repo-scan-root for a worktree ingest: identity/root come from the
+    MAIN path (same single-repo naming as repo_paths_to_ingest_args), but the actual scan
+    happens against the WORKTREE path via --repo-scan-root."""
+    main_path, worktree_path = parse_worktree_spec(spec)
+    root = main_path.parent
+    repo = main_path.name or "."
+    return ["--root", str(root), "--repos", repo, "--repo-scan-root", f"{repo}={worktree_path}"]
 
 
 def inferred_collection_for_repo_paths(repo_paths: list[str]) -> str:
@@ -199,7 +227,9 @@ def parse_index_args(argv: list[str] | None = None) -> tuple[IndexNamespace, lis
     public_argv, passthrough = split_index_argv(argv)
     parser = index_parser()
     parsed = parser.parse_args(public_argv, namespace=IndexNamespace())
-    if not parsed.repo_paths:
+    if parsed.worktree and parsed.repo_paths:
+        parser.error("--worktree cannot be combined with repo_paths")
+    if not parsed.worktree and not parsed.repo_paths:
         parser.error("one or more repository paths are required; use . for the current directory")
     if len(parsed.repo_paths) > 1:
         try:
@@ -229,7 +259,10 @@ def set_index_environment_defaults() -> None:
 
 
 def set_index_database_scope_default(parsed: IndexNamespace) -> None:
-    if parsed.repo_paths:
+    if parsed.worktree:
+        main_path, _ = parse_worktree_spec(parsed.worktree)
+        scope_path = main_path
+    elif parsed.repo_paths:
         scope_path = inferred_database_scope_path_for_repo_paths(parsed.repo_paths)
     else:
         scope_path = database_scope_path_for_root_repos(Path.cwd(), parse_repos("."))
@@ -252,14 +285,28 @@ def forwarded_mcp_config_args(parsed: IndexNamespace) -> list[str]:
     return forwarded
 
 
+def _identity_forwarded_args(parsed: IndexNamespace) -> list[str]:
+    """--root/--repos(/--repo-scan-root) and, unless overridden, --collection for
+    whichever of --worktree or repo_paths was given (parse_index_args already
+    enforces they are mutually exclusive)."""
+    if parsed.worktree:
+        identity_args = worktree_ingest_args(parsed.worktree)
+        main_path, _ = parse_worktree_spec(parsed.worktree)
+        inferred_collection = default_collection(main_path)
+    elif parsed.repo_paths:
+        identity_args = repo_paths_to_ingest_args(parsed.repo_paths)
+        inferred_collection = inferred_collection_for_repo_paths(parsed.repo_paths)
+    else:
+        return []
+    if parsed.collection:
+        return ["--collection", parsed.collection, *identity_args]
+    if not config.collection_override_allowed():
+        return ["--collection", inferred_collection, *identity_args]
+    return identity_args
+
+
 def forwarded_index_args(parsed: IndexNamespace, passthrough: list[str]) -> list[str]:
-    forwarded = passthrough
-    if parsed.repo_paths:
-        forwarded = [*repo_paths_to_ingest_args(parsed.repo_paths), *forwarded]
-        if parsed.collection:
-            forwarded = ["--collection", parsed.collection, *forwarded]
-        elif not config.collection_override_allowed():
-            forwarded = ["--collection", inferred_collection_for_repo_paths(parsed.repo_paths), *forwarded]
+    forwarded = [*_identity_forwarded_args(parsed), *passthrough]
     if parsed.reset_code_intel:
         forwarded = ["--reset-code-intel", "--reset-only", *forwarded]
     if parsed.init_db:

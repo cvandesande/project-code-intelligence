@@ -257,6 +257,30 @@ class SimilarTests(unittest.TestCase):
             finally:
                 os.chdir(cwd)
 
+    def test_snapshot_selection_resolves_a_worktree_file_to_the_main_repo(self) -> None:
+        """A file edited inside a linked worktree must match the MAIN repo's snapshot
+        (never a new repo keyed on the worktree's own directory name), while still
+        preferring the snapshot on the worktree's OWN checkout branch."""
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "ws"
+            (workspace / ".git").mkdir(parents=True)
+            worktree = Path(tmp) / "wt"
+            worktree.mkdir()
+            _ = (worktree / ".git").write_text(f"gitdir: {workspace}/.git/worktrees/wt\n", encoding="utf-8")
+            snapshots = [
+                analyze.SnapshotRef(snapshot_id=1, collection="c", repo="ws", branch="main"),
+                analyze.SnapshotRef(snapshot_id=2, collection="c", repo="ws", branch="feature"),
+            ]
+            cwd = Path.cwd()
+            os.chdir(workspace)
+            try:
+                with mock.patch.object(similar.analyze, "resolve_repo_branch", return_value="feature") as branch_mock:
+                    selected = similar.snapshot_for(snapshots, str(worktree / "src" / "b.py"))
+                branch_mock.assert_called_once_with(worktree.resolve())
+                self.assertEqual(selected.snapshot_id, 2)
+            finally:
+                os.chdir(cwd)
+
     def test_render_strips_the_repo_prefix(self) -> None:
         hit = similar.Hit(added_name="new", symbol="old", source_path="repo/src/a.py", line_start=7, distance=0.123)
         self.assertEqual(hit.render("repo"), "  0.12  old  src/a.py:7  (vs your new)")
@@ -863,6 +887,50 @@ class ReindexMarkerTests(unittest.TestCase):
             worktree = Path(tmp).resolve() / "feature-wt"
             worktree.mkdir()
             _ = (worktree / ".git").write_text("gitdir: /elsewhere/.git/worktrees/feature-wt\n", encoding="utf-8")
+            self.assertIsNone(runtime.reindex_target(worktree))
+
+    def test_worktree_replays_under_main_repos_marker(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp).resolve()
+            main_repo = self._repo(workspace, "main-repo")
+            with mock.patch.object(Path, "cwd", return_value=workspace):
+                runtime.write_reindex_markers([main_repo], "my-workspace")
+            worktree = workspace / "feature-wt"
+            worktree.mkdir()
+            _ = (worktree / ".git").write_text(f"gitdir: {main_repo}/.git/worktrees/feature-wt\n", encoding="utf-8")
+            target = runtime.reindex_target(worktree)
+            if target is None:
+                self.fail("expected a worktree reindex target")
+            self.assertEqual(target[0], workspace)
+            self.assertEqual(
+                target[1],
+                ["--collection", "my-workspace", "--worktree", f"{main_repo}={worktree.resolve()}"],
+            )
+
+    def test_worktree_with_malformed_gitdir_pointer_skips(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp).resolve()
+            worktree = workspace / "feature-wt"
+            worktree.mkdir()
+            # Doesn't end in /worktrees/<name> -- unparseable, must fall through to None.
+            _ = (worktree / ".git").write_text("gitdir: /elsewhere/.git\n", encoding="utf-8")
+            self.assertIsNone(runtime.reindex_target(worktree))
+
+    def test_worktree_whose_main_repo_missing_from_marker_skips(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp).resolve()
+            main_repo = self._repo(workspace, "main-repo")
+            other_repo = self._repo(workspace, "other-repo")
+            with mock.patch.object(Path, "cwd", return_value=workspace):
+                # Both get a marker (so main_repo's own marker read succeeds), but neither
+                # marker's repo_paths lists main_repo -- it was never indexed on purpose,
+                # so the worktree reindex must not replay against it.
+                runtime.write_reindex_markers([main_repo, other_repo], "my-workspace")
+            payload = json.dumps({"cwd": str(workspace), "repo_paths": [str(other_repo)], "collection": "my-workspace"})
+            _ = (main_repo / ".git" / "pci-reindex.json").write_text(payload, encoding="utf-8")
+            worktree = workspace / "feature-wt"
+            worktree.mkdir()
+            _ = (worktree / ".git").write_text(f"gitdir: {main_repo}/.git/worktrees/feature-wt\n", encoding="utf-8")
             self.assertIsNone(runtime.reindex_target(worktree))
 
     def test_run_reindex_without_marker_spawns_nothing(self) -> None:

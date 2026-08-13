@@ -272,6 +272,30 @@ class InventoryContractTests(unittest.TestCase):
         self.assertEqual(by_path["README.md"].content_class, "doc")
         self.assertEqual(by_path["image.png"].skipped_reason, "binary_suffix")
 
+    def test_discover_files_scan_root_overrides_repo_root_but_keeps_identity(self) -> None:
+        # Worktree reindex case: content is scanned at ``scan_root`` (the worktree
+        # checkout), while source paths stay relative to the stamped repo identity.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            other_root = root / "elsewhere"
+            _ = other_root.mkdir()
+            _ = (other_root / "main.py").write_text("def main():\n    return 0\n", encoding="utf-8")
+            previous_profile = profile_context.active_profile
+            try:
+                profile_context.set_active_profile(GenericProfile())
+                with patch(
+                    "project_code_intelligence.inventory.git_ls_files",
+                    return_value=[("a" * 40, "main.py")],
+                ) as ls_files_mock:
+                    files = discover_files(
+                        root, snapshot_for("worktree-repo"), max_file_bytes=1024, scan_root=other_root
+                    )
+            finally:
+                profile_context.set_active_profile(previous_profile)
+
+        ls_files_mock.assert_called_once_with(other_root)
+        self.assertEqual([item.source_path for item in files], ["worktree-repo/main.py"])
+
     def test_discover_files_reuses_previous_clean_blob_without_reading(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

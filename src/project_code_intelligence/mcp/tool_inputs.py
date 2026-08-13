@@ -163,6 +163,7 @@ class FindRedundancyArgs(StrictArgs):
     limit: int | None = Field(default=None, ge=1, le=50)
     collection: str | None = None
     repo: str | None = None
+    branch: str | None = None
     verbose: bool | None = None
 
 

@@ -462,6 +462,30 @@ class CliWrapperTests(unittest.TestCase):
         self.assertIn("code intelligence schema is not initialized", str(content[0]["text"]))
 
 
+class WorktreeIngestArgsTests(unittest.TestCase):
+    def test_worktree_spec_maps_to_main_repo_identity_and_scan_override(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            main_repo = root / "main-repo"
+            main_repo.mkdir()
+            worktree = root / "worktrees" / "feature-wt"
+            worktree.mkdir(parents=True)
+
+            args = cli.worktree_ingest_args(f"{main_repo}={worktree}")
+
+        self.assertEqual(
+            args,
+            [
+                "--root",
+                str(root.resolve()),
+                "--repos",
+                "main-repo",
+                "--repo-scan-root",
+                f"main-repo={worktree.resolve()}",
+            ],
+        )
+
+
 class PciIndexShowParserFailuresFlagTests(unittest.TestCase):
     """Forwarding contract for `pci-index --show-parser-failures`."""
 
