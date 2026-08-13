@@ -612,6 +612,7 @@ class IngestSettings:
     preembed: bool = True
     preembedding_ahead_batches: int = 16
     runtime_heartbeat_seconds: int = 300
+    run_ledger_seconds: int = 15
 
     @classmethod
     def from_env(cls, env: Env | None = None) -> IngestSettings:
@@ -645,6 +646,12 @@ class IngestSettings:
             runtime_heartbeat_seconds=env_int(
                 "PCI_RUNTIME_HEARTBEAT_SECONDS",
                 300,
+                env=env,
+                minimum=0,
+            ),
+            run_ledger_seconds=env_int(
+                "PCI_RUN_LEDGER_SECONDS",
+                15,
                 env=env,
                 minimum=0,
             ),

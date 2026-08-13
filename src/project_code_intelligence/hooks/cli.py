@@ -99,6 +99,32 @@ def prompt_claude_scope() -> bool:
     return reply not in {"p", "project"}
 
 
+def prompt_nested_repos(nested: list[Path], root: Path, *, uninstall: bool) -> bool:
+    """Ask whether to apply the git hook change to nested repos. Default: yes."""
+    verb = "Also remove the reindex hook from" if uninstall else "Also install the reindex hook in"
+    listing = "".join(f"  {p.relative_to(root)}\n" for p in nested)
+    _ = sys.stderr.write(f"{verb} {len(nested)} nested git repo(s)?\n{listing}Choice [Y/n]: ")
+    return sys.stdin.readline().strip().lower() not in {"n", "no"}
+
+
+def _install_git_with_nested(parsed: HookNamespace) -> list[install_mod.InstallOutcome]:
+    repo = Path(parsed.project or ".").resolve()
+    outcomes = [install_mod.install_git(repo, uninstall=parsed.uninstall, dry_run=parsed.dry_run)]
+    nested = install_mod.find_nested_repos(repo)
+    if parsed.uninstall:
+        nested = [p for p in nested if install_mod.has_git_hook(p)]
+    if not nested:
+        return outcomes
+    if not (sys.stdin.isatty() and sys.stderr.isatty()):
+        # Non-interactive: never change repos the caller did not name; point at them instead.
+        outcomes[0].rows.extend(("nested repo", str(p)) for p in nested)
+        outcomes[0].rows.append(("hint", "run with --project <nested repo> to wire these too"))
+        return outcomes
+    if prompt_nested_repos(nested, repo, uninstall=parsed.uninstall):
+        outcomes.extend(install_mod.install_git(p, uninstall=parsed.uninstall, dry_run=parsed.dry_run) for p in nested)
+    return outcomes
+
+
 def _run_install(parsed: HookNamespace) -> int:
     if parsed.user and parsed.agent != "claude":
         _ = sys.stderr.write("pci-hook: --user applies to Claude only\n")
@@ -112,15 +138,15 @@ def _run_install(parsed: HookNamespace) -> int:
             settings = Path.home() / ".claude" / "settings.json"
         else:
             settings = Path(parsed.project or ".").resolve() / ".claude" / "settings.json"
-        outcome = install_mod.install_claude(settings, uninstall=parsed.uninstall, dry_run=parsed.dry_run)
+        outcomes = [install_mod.install_claude(settings, uninstall=parsed.uninstall, dry_run=parsed.dry_run)]
     elif parsed.agent == "git":
-        repo = Path(parsed.project or ".").resolve()
-        outcome = install_mod.install_git(repo, uninstall=parsed.uninstall, dry_run=parsed.dry_run)
+        outcomes = _install_git_with_nested(parsed)
     else:
         project = Path(parsed.project or ".").resolve()
-        outcome = install_mod.install_opencode(project, uninstall=parsed.uninstall, dry_run=parsed.dry_run)
+        outcomes = [install_mod.install_opencode(project, uninstall=parsed.uninstall, dry_run=parsed.dry_run)]
     color = console_ui.should_emit_pretty(sys.stdout, force=_COLOR_FORCE[parsed.color])
-    _render_outcome(outcome, dry_run=parsed.dry_run, color=color)
+    for outcome in outcomes:
+        _render_outcome(outcome, dry_run=parsed.dry_run, color=color)
     return 0
 
 

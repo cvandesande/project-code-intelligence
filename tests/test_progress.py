@@ -252,6 +252,22 @@ class JsonEventLoggingTests(unittest.TestCase):
         self.assertIn("duration", values)
         self.assertIn("metrics", values)
 
+    def test_run_ledger_heartbeat_hands_phase_and_snapshot_to_the_writer(self) -> None:
+        # Stop after the first wait so the loop calls the writer exactly once.
+        stop_event = threading.Event()
+        captured: list[tuple[str | None, JsonObject]] = []
+        metrics = RuntimeMetrics()
+        metrics.begin_phase("embedding")
+
+        with patch.object(stop_event, "wait", side_effect=[False, True]):
+            progress.run_ledger_heartbeat(stop_event, 15, metrics, lambda phase, snap: captured.append((phase, snap)))
+
+        self.assertEqual(len(captured), 1)
+        phase, snapshot = captured[0]
+        self.assertEqual(phase, "embedding")
+        self.assertIn("counts", snapshot)
+        self.assertIn("progress", snapshot)
+
 
 class SummaryPanelTests(unittest.TestCase):
     """End-to-end coverage of the final-summary panel through emit_summary."""

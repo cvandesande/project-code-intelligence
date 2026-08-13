@@ -34,6 +34,12 @@ class PciDispatchTests(unittest.TestCase):
         self.assertEqual(pci.resolve("services", []), (("project_code_intelligence.doctor", "main", []), []))
         self.assertIsNone(pci.resolve("services", ["reboot"]))
 
+    def test_status_resolves_to_the_status_cli(self) -> None:
+        self.assertEqual(
+            pci.resolve("status", ["--json"]),
+            (("project_code_intelligence.status_cli", "main", []), ["--json"]),
+        )
+
     def test_legacy_agent_spelling_still_accepted(self) -> None:
         with TemporaryDirectory() as tmp:
             code = pci.main(["hook", "install", "--agent", "claude", "--project", tmp, "--dry-run", "--color", "never"])

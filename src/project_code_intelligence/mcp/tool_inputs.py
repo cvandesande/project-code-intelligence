@@ -79,6 +79,7 @@ class CodeIntelStatusArgs(StrictArgs):
     include_breakdowns: bool | None = None
     include_static_summary: bool | None = None
     include_runtime: bool | None = None
+    include_active_runs: bool | None = None
 
 
 class _SearchFilterArgs(StrictArgs):

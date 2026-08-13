@@ -29,7 +29,7 @@ from project_code_intelligence.mcp.protocol import (
     scoped_collection,
 )
 from project_code_intelligence.mcp.scope import empty_repo_scope_warning, empty_snapshot_scope_warning, make_warning
-from project_code_intelligence.storage import schema_migration_versions
+from project_code_intelligence.storage import load_index_runs, schema_migration_versions
 
 if TYPE_CHECKING:
     from project_code_intelligence.mcp.protocol import Json
@@ -116,6 +116,41 @@ def static_status_rows(conn: db.DbConnection, filters: StatusFilters) -> tuple[l
     return static_runs, static_findings
 
 
+def active_index_run_rows(conn: db.DbConnection, collection: str | None) -> list[Json]:
+    """Index-run ledger rows for the status response; [] when the table is absent
+    (databases created before the ledger existed)."""
+    if not mcp_db.table_regclass_exists(conn, "project_code_intel_index_runs"):
+        return []
+    now = datetime.datetime.now(datetime.timezone.utc)
+    rows: list[Json] = []
+    for raw in load_index_runs(conn, collection=collection):
+        run: Json = cast("Json", dict(raw))
+        heartbeat: object = run.get("heartbeat_at")
+        if isinstance(heartbeat, datetime.datetime) and heartbeat.tzinfo is not None:
+            run["heartbeat_age_seconds"] = int((now - heartbeat).total_seconds())
+        for key in ("started_at", "heartbeat_at", "finished_at"):
+            value: object = run.get(key)
+            if isinstance(value, datetime.datetime):
+                run[key] = value.isoformat()
+        rows.append(run)
+    return rows
+
+
+def index_run_warnings(active_runs: list[Json] | None) -> list[Json]:
+    if not active_runs:
+        return []
+    running = [run for run in active_runs if run.get("running")]
+    if not running:
+        return []
+    return [
+        make_warning(
+            "index_run_active",
+            detail="an index run is in flight; counts and snapshots may change",
+            collections=sorted({str(run.get("collection")) for run in running}),
+        )
+    ]
+
+
 def _path_has_repo_suffix(path: Path, repo: str) -> bool:
     repo_parts = tuple(part for part in Path(repo).parts if part not in {"", "."})
     return bool(repo_parts) and tuple(path.parts[-len(repo_parts) :]) == repo_parts
@@ -146,6 +181,22 @@ def _snapshot_head_commit(snapshot: Json) -> str | None:
     return None
 
 
+def _upstream_lag(snapshot: Json) -> int | None:
+    """Commits the indexed checkout's HEAD is behind its already-known upstream ref.
+
+    Reads only refs git already has (no ``fetch``, no network call): a checkout that
+    matches its own indexed commit can still be an ancestor of a long-abandoned branch,
+    which is exactly what a same-repo comparison to HEAD can't catch (see the 2026-08-13
+    nginx-rust incident: index and local HEAD agreed while local HEAD sat 134 commits
+    behind origin/main -- "current" was true and still misleading).
+    """
+    for candidate in _snapshot_repo_root_candidates(snapshot):
+        lag = git_utils.run_git(candidate, ["rev-list", "--count", "HEAD..@{upstream}"])
+        if lag is not None and lag.strip().isdigit():
+            return int(lag.strip())
+    return None
+
+
 def _annotate_snapshot_head_status(snapshot: Json, head_commit: str | None) -> None:
     snapshot["head_commit"] = head_commit
     if head_commit is None:
@@ -156,6 +207,9 @@ def _annotate_snapshot_head_status(snapshot: Json, head_commit: str | None) -> N
     matches = snapshot.get("commit_sha") == head_commit
     snapshot["head_matches_snapshot"] = matches
     snapshot["head_status"] = "current" if matches else "stale"
+    lag = _upstream_lag(snapshot)
+    if lag is not None:
+        snapshot["upstream_commits_behind"] = lag
 
 
 def annotate_status_snapshots(snapshot_rows: list[db.DbRow]) -> list[Json]:
@@ -477,6 +531,9 @@ class StatusIncludeFlags:
     breakdowns: bool
     static_summary: bool
     runtime: bool
+    # Deliberately not implied by verbose: live-run rows are volatile and the
+    # extra queries would shift every verbose response (and its tests).
+    active_runs: bool
 
 
 @dataclass(frozen=True)
@@ -503,6 +560,7 @@ def status_include_flags(args: Json) -> StatusIncludeFlags:
         breakdowns=verbose or (optional_bool(args, "include_breakdowns") or False),
         static_summary=verbose or (optional_bool(args, "include_static_summary") or False),
         runtime=verbose or (optional_bool(args, "include_runtime") or False),
+        active_runs=optional_bool(args, "include_active_runs") or False,
     )
 
 

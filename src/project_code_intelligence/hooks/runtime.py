@@ -323,22 +323,27 @@ def write_reindex_markers(repo_paths: list[Path], collection: str | None) -> Non
                 _ = (git_dir / _MARKER_NAME).write_text(payload, encoding="utf-8")
 
 
-def reindex_target(repo: Path) -> tuple[Path, list[str]]:
-    """Resolve (cwd, index args) for a reindex: the workspace invocation recorded
-    at index time, or the repo alone when no valid marker exists."""
+def reindex_target(repo: Path) -> tuple[Path, list[str]] | None:
+    """Resolve (cwd, index args) for a reindex from the workspace invocation
+    recorded at index time, or None when no valid marker exists.
+
+    A marker-less repo was never indexed deliberately from that path (every
+    `pci index` run writes one), so a reindex there would full-index into a
+    fresh collection. Git worktrees hit this: they inherit the parent repo's
+    post-commit hook, but `.git` is a file, so no marker is ever present."""
     try:
         data = cast("object", json.loads((repo / ".git" / _MARKER_NAME).read_text(encoding="utf-8")))
     except (OSError, ValueError):
-        return repo, [str(repo)]
+        return None
     marker = _as_object(data)
     cwd = marker.get("cwd")
     raw = marker.get("repo_paths")
     if not (isinstance(cwd, str) and Path(cwd).is_dir() and isinstance(raw, list)):
-        return repo, [str(repo)]
+        return None
     raw_paths = cast("list[object]", raw)
     paths = [p for p in raw_paths if isinstance(p, str) and Path(p).is_dir()]
     if not paths or len(paths) != len(raw_paths):
-        return repo, [str(repo)]
+        return None
     collection = marker.get("collection")
     args = ["--collection", collection, *paths] if isinstance(collection, str) else paths
     return Path(cwd), args
@@ -349,8 +354,12 @@ def run_reindex(repo: Path) -> int:
 
     Blocking by design: callers run this in the background (an async agent hook
     or a debounced detached spawn), and the lock coalesces overlapping calls.
+    Skips silently when no valid reindex marker exists (see reindex_target).
     """
-    workspace, index_args = reindex_target(repo)
+    target = reindex_target(repo)
+    if target is None:
+        return 0
+    workspace, index_args = target
     lock_path = _lock_path(workspace)
     try:
         lock_file = lock_path.open("w")

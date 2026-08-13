@@ -67,6 +67,10 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                     "type": "boolean",
                     "description": "Server executable/module path and redacted DB identity.",
                 },
+                "include_active_runs": {
+                    "type": "boolean",
+                    "description": "In-flight and recent index runs (phase, progress, per-repo mode).",
+                },
             },
             "additionalProperties": False,
         },

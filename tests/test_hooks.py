@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import sys
 import unittest
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -693,17 +694,21 @@ def _post_commit_path(repo: Path) -> Path:
     return repo / ".git" / "hooks" / "post-commit"
 
 
+def _post_merge_path(repo: Path) -> Path:
+    return repo / ".git" / "hooks" / "post-merge"
+
+
 class InstallGitTests(unittest.TestCase):
     def test_install_writes_executable_managed_block(self) -> None:
         with TemporaryDirectory() as tmp:
             repo = Path(tmp)
             outcome = install.install_git(repo, uninstall=False, dry_run=False)
             self.assertEqual(outcome.action, "installed")
-            hook = _post_commit_path(repo)
-            text = hook.read_text(encoding="utf-8")
-            self.assertIn("pci-hook reindex (managed)", text)
-            self.assertIn("--behavior reindex", text)
-            self.assertTrue(os.access(hook, os.X_OK))
+            for hook in (_post_commit_path(repo), _post_merge_path(repo)):
+                text = hook.read_text(encoding="utf-8")
+                self.assertIn("pci-hook reindex (managed)", text)
+                self.assertIn("--behavior reindex", text)
+                self.assertTrue(os.access(hook, os.X_OK))
 
     def test_install_is_idempotent(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -711,8 +716,9 @@ class InstallGitTests(unittest.TestCase):
             _ = install.install_git(repo, uninstall=False, dry_run=False)
             again = install.install_git(repo, uninstall=False, dry_run=False)
             self.assertEqual(again.action, "updated")
-            text = _post_commit_path(repo).read_text(encoding="utf-8")
-            self.assertEqual(text.count(">>> pci-hook reindex (managed) >>>"), 1)
+            for hook in (_post_commit_path(repo), _post_merge_path(repo)):
+                text = hook.read_text(encoding="utf-8")
+                self.assertEqual(text.count(">>> pci-hook reindex (managed) >>>"), 1)
 
     def test_uninstall_keeps_user_script(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -727,14 +733,86 @@ class InstallGitTests(unittest.TestCase):
             surviving = hook.read_text(encoding="utf-8")
             self.assertIn("echo mine", surviving)
             self.assertNotIn("managed", surviving)
+            # post-merge had no pre-existing user script, so it should be gone entirely.
+            self.assertFalse(_post_merge_path(repo).exists())
 
     def test_uninstall_deletes_when_only_ours(self) -> None:
         with TemporaryDirectory() as tmp:
             repo = Path(tmp)
             _ = install.install_git(repo, uninstall=False, dry_run=False)
             self.assertTrue(_post_commit_path(repo).exists())
+            self.assertTrue(_post_merge_path(repo).exists())
             _ = install.install_git(repo, uninstall=True, dry_run=False)
             self.assertFalse(_post_commit_path(repo).exists())
+            self.assertFalse(_post_merge_path(repo).exists())
+
+    def test_find_nested_repos_skips_root_gitfiles_and_hidden_dirs(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / ".git").mkdir()
+            nested = root / "vendor" / "nested"
+            (nested / ".git").mkdir(parents=True)
+            deeper = nested / "deeper"
+            (deeper / ".git").mkdir(parents=True)
+            submodule = root / "submodule"
+            submodule.mkdir()
+            _ = (submodule / ".git").write_text("gitdir: ../.git/modules/submodule\n", encoding="utf-8")
+            hidden = root / ".cache" / "repo"
+            (hidden / ".git").mkdir(parents=True)
+            self.assertEqual(install.find_nested_repos(root), [nested, deeper])
+
+    def test_has_git_hook_sees_only_our_managed_block(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.assertFalse(install.has_git_hook(repo))
+            hook = _post_commit_path(repo)
+            hook.parent.mkdir(parents=True)
+            _ = hook.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+            self.assertFalse(install.has_git_hook(repo))
+            _ = install.install_git(repo, uninstall=False, dry_run=False)
+            self.assertTrue(install.has_git_hook(repo))
+
+
+class InstallGitNestedTests(unittest.TestCase):
+    @staticmethod
+    def _workspace(root: Path) -> Path:
+        (root / ".git").mkdir()
+        (root / "nested" / ".git").mkdir(parents=True)
+        return root / "nested"
+
+    def test_non_interactive_lists_nested_repos_without_touching_them(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            nested = self._workspace(root)
+            parsed = hooks_cli.HookNamespace(project=str(root))
+            outcomes = hooks_cli._install_git_with_nested(parsed)  # pyright: ignore[reportPrivateUsage]
+            self.assertEqual(len(outcomes), 1)
+            self.assertFalse(_post_commit_path(nested).exists())
+            self.assertIn(("nested repo", str(nested)), outcomes[0].rows)
+
+    def test_interactive_yes_installs_into_nested_repos(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            nested = self._workspace(root)
+            parsed = hooks_cli.HookNamespace(project=str(root))
+            with (
+                mock.patch.object(sys.stdin, "isatty", return_value=True),
+                mock.patch.object(sys.stderr, "isatty", return_value=True),
+                mock.patch.object(hooks_cli, "prompt_nested_repos", return_value=True),
+            ):
+                outcomes = hooks_cli._install_git_with_nested(parsed)  # pyright: ignore[reportPrivateUsage]
+            self.assertEqual([o.action for o in outcomes], ["installed", "installed"])
+            self.assertTrue(_post_commit_path(nested).exists())
+
+    def test_uninstall_only_offers_nested_repos_with_our_hook(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            nested = self._workspace(root)
+            _ = install.install_git(root, uninstall=False, dry_run=False)
+            parsed = hooks_cli.HookNamespace(project=str(root), uninstall=True)
+            outcomes = hooks_cli._install_git_with_nested(parsed)  # pyright: ignore[reportPrivateUsage]
+            self.assertEqual(len(outcomes), 1)
+            self.assertNotIn(("nested repo", str(nested)), outcomes[0].rows)
 
 
 class ReindexMarkerTests(unittest.TestCase):
@@ -751,9 +829,11 @@ class ReindexMarkerTests(unittest.TestCase):
             repo_b = self._repo(workspace, "repo-b")
             with mock.patch.object(Path, "cwd", return_value=workspace):
                 runtime.write_reindex_markers([repo_a, repo_b], "my-workspace")
-            cwd, args = runtime.reindex_target(repo_b)
-            self.assertEqual(cwd, workspace)
-            self.assertEqual(args, ["--collection", "my-workspace", str(repo_a), str(repo_b)])
+            target = runtime.reindex_target(repo_b)
+            if target is None:
+                self.fail("expected a reindex target from a valid marker")
+            self.assertEqual(target[0], workspace)
+            self.assertEqual(target[1], ["--collection", "my-workspace", str(repo_a), str(repo_b)])
 
     def test_marker_without_collection_omits_flag(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -761,22 +841,36 @@ class ReindexMarkerTests(unittest.TestCase):
             repo = self._repo(workspace, "repo")
             with mock.patch.object(Path, "cwd", return_value=workspace):
                 runtime.write_reindex_markers([repo], None)
-            cwd, args = runtime.reindex_target(repo)
-            self.assertEqual((cwd, args), (workspace, [str(repo)]))
+            self.assertEqual(runtime.reindex_target(repo), (workspace, [str(repo)]))
 
-    def test_missing_or_invalid_marker_falls_back_to_repo(self) -> None:
+    def test_missing_or_invalid_marker_skips(self) -> None:
         with TemporaryDirectory() as tmp:
             repo = self._repo(Path(tmp).resolve(), "repo")
-            self.assertEqual(runtime.reindex_target(repo), (repo, [str(repo)]))
+            self.assertIsNone(runtime.reindex_target(repo))
             _ = (repo / ".git" / "pci-reindex.json").write_text("not json", encoding="utf-8")
-            self.assertEqual(runtime.reindex_target(repo), (repo, [str(repo)]))
+            self.assertIsNone(runtime.reindex_target(repo))
 
-    def test_marker_with_vanished_workspace_falls_back(self) -> None:
+    def test_marker_with_vanished_workspace_skips(self) -> None:
         with TemporaryDirectory() as tmp:
             repo = self._repo(Path(tmp).resolve(), "repo")
             payload = json.dumps({"cwd": str(Path(tmp) / "gone"), "repo_paths": [str(repo)], "collection": None})
             _ = (repo / ".git" / "pci-reindex.json").write_text(payload, encoding="utf-8")
-            self.assertEqual(runtime.reindex_target(repo), (repo, [str(repo)]))
+            self.assertIsNone(runtime.reindex_target(repo))
+
+    def test_git_worktree_has_no_marker_and_skips(self) -> None:
+        # A worktree's .git is a file, so the marker read fails and no reindex runs.
+        with TemporaryDirectory() as tmp:
+            worktree = Path(tmp).resolve() / "feature-wt"
+            worktree.mkdir()
+            _ = (worktree / ".git").write_text("gitdir: /elsewhere/.git/worktrees/feature-wt\n", encoding="utf-8")
+            self.assertIsNone(runtime.reindex_target(worktree))
+
+    def test_run_reindex_without_marker_spawns_nothing(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = self._repo(Path(tmp).resolve(), "repo")
+            with mock.patch.object(runtime.process, "run") as run_mock:
+                self.assertEqual(runtime.run_reindex(repo), 0)
+            run_mock.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -975,6 +975,7 @@ class CodeIntelParserTests(unittest.TestCase):
             "PCI_MODE": "full",
             "PCI_PREEMBED": "0",
             "PCI_RUNTIME_HEARTBEAT_SECONDS": "60",
+            "PCI_RUN_LEDGER_SECONDS": "0",
         })
 
         self.assertEqual(settings.collection, "nightly")
@@ -982,6 +983,7 @@ class CodeIntelParserTests(unittest.TestCase):
         self.assertEqual(settings.mode, "full")
         self.assertFalse(settings.preembed)
         self.assertEqual(settings.runtime_heartbeat_seconds, 60)
+        self.assertEqual(settings.run_ledger_seconds, 0)
 
 
 class TypescriptParserRegressionTests(unittest.TestCase):

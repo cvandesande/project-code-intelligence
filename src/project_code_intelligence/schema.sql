@@ -245,6 +245,23 @@ CREATE TABLE IF NOT EXISTS project_code_intel_static_code_flows (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS project_code_intel_index_runs (
+    id bigserial PRIMARY KEY,
+    collection text NOT NULL DEFAULT 'default',
+    repos jsonb NOT NULL DEFAULT '[]'::jsonb,
+    repo_modes jsonb NOT NULL DEFAULT '{}'::jsonb,
+    pid integer,
+    host text,
+    phase text,
+    progress jsonb NOT NULL DEFAULT '{}'::jsonb,
+    started_at timestamptz NOT NULL DEFAULT now(),
+    heartbeat_at timestamptz NOT NULL DEFAULT now(),
+    finished_at timestamptz,
+    exit_code integer,
+    interrupted boolean NOT NULL DEFAULT false,
+    error text
+);
+
 ALTER TABLE project_code_intel_snapshots
     ADD COLUMN IF NOT EXISTS collection text NOT NULL DEFAULT 'default';
 
@@ -349,6 +366,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS project_code_intel_edges_collection_unique_idx
         coalesce(source_path, ''),
         coalesce(target_path, '')
     );
+
+CREATE INDEX IF NOT EXISTS project_code_intel_index_runs_collection_idx
+    ON project_code_intel_index_runs (collection, started_at DESC);
 
 -- Speeds up resolve_edge_targets: lookup symbol_definition records by (snapshot_id, symbol).
 CREATE INDEX IF NOT EXISTS project_code_intel_records_snapshot_symbol_def_idx

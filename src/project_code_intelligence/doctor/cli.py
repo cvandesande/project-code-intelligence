@@ -54,6 +54,7 @@ from project_code_intelligence.doctor.types import (
     EmbeddingMode,
     GpuInfo,
 )
+from project_code_intelligence.embedding import apple_embed_server
 from project_code_intelligence.embedding.apple_embed_server import APPLE_EMBED_SERVER_PID_FILE
 from project_code_intelligence.exceptions import ConfigError
 
@@ -227,7 +228,7 @@ _DOCKER_PROFILES = (
     "--profile",
     "nvidia",
 )
-_DOCKER_SERVICES = ("fastembed", "lemonade-npu", "llama-rocm", "llama-cuda")
+DOCKER_EMBEDDING_SERVICES = ("fastembed", "lemonade-npu", "llama-rocm", "llama-cuda")
 _HOST_PROCESSES = (
     "pci-embedding-server",
     "project_code_intelligence.embedding.apple_embed_server",
@@ -264,7 +265,7 @@ def stop_embedding_services() -> int:
     # Stop Docker Compose embedding services (ignore errors if not running).
     try:
         _ = process.run_docker(
-            ["compose", *process.compose_file_args(), *_DOCKER_PROFILES, "stop", *_DOCKER_SERVICES],
+            ["compose", *process.compose_file_args(), *_DOCKER_PROFILES, "stop", *DOCKER_EMBEDDING_SERVICES],
             process.RunOptions(capture_output=True),
         )
         write_stdout("Stopped Docker Compose embedding services.")
@@ -457,11 +458,9 @@ def start_embedding_services() -> int:
     profile, display_command = commands[-1]
     write_stdout(f"Starting {profile} embedding: {display_command}")
     if profile == "apple":
-        try:
-            _ = process.run(["pci-apple-embed-server"], process.RunOptions())
-        except FileNotFoundError:
-            write_stdout("pci-apple-embed-server not found on PATH.")
-            return 1
+        # In-process call: the launcher daemonizes itself with sys.executable,
+        # so no separate executable needs to be on PATH.
+        apple_embed_server.main()
         return 0
     start_args = _EMBEDDING_START_ARGS.get(profile)
     if start_args is None:
