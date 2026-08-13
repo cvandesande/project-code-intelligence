@@ -793,13 +793,13 @@ def stamp_embed_types(conn: db.DbConnection, snapshot_ids: list[int], embed_type
     )
 
 
-def prune_old_snapshots(conn: db.DbConnection, collection: str, repo: str, keep: int = 5) -> int:
-    """Delete old snapshots for (collection, repo), keeping the newest ``keep``.
+def prune_old_snapshots(conn: db.DbConnection, collection: str, repo: str, keep: int = 0) -> int:
+    """Delete old snapshots for (collection, repo), keeping each branch's newest.
 
-    Branch-aware: the newest snapshot of each distinct branch is never deleted
-    (null branch counts as one shared group), even if that pushes the total
-    kept above ``keep``. The keep-N cut applies only to the remainder -- the
-    rows that are not each branch's newest.
+    The newest snapshot of each distinct branch is never deleted (null branch
+    counts as one shared group). ``keep`` retains that many extra rows from
+    the remainder beyond the per-branch newest; the default 0 keeps only the
+    per-branch newest.
     """
     rows = conn.execute(
         """

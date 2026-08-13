@@ -70,7 +70,7 @@ class PackageDataTests(unittest.TestCase):
         self.assertEqual(context_metadata["requires-python"], project_metadata["requires-python"])
         self.assertEqual(context_metadata["dependencies"], [])
         # The host package installs the single `pci` executable; the container keeps its own
-        # pci-fastembed-server entry point, targeting the same module as `pci fastembed-server`.
+        # pci-fastembed-server entry point, targeting the same module as `pci embed fastembed`.
         self.assertEqual(project_scripts, {"pci": "project_code_intelligence.pci:main"})
         self.assertEqual(
             context_metadata["scripts"],

@@ -9,19 +9,18 @@ implementation detail unless it is listed here.
 
 ## Command-Line Interface
 
-Installed console scripts are public:
+A single console script, `pci`, is installed. Its subcommands are public:
 
 | Command | Purpose |
 | --- | --- |
-| `pci-index` | Main indexing command. Requires one or more repository paths, such as `pci-index .`. Can emit MCP client snippets and required environment exports with `--mcp-config {env,codex,claude,opencode,vscode,copilot,cline,zed}`. |
-| `pci-ingest-code` | Lower-level ingest command used by `pci-index`; useful for advanced scripting. |
-| `pci-doctor` | Detects database, embedding endpoint, CPU, GPU, and NPU readiness. Also starts/stops bundled local services with `--start`, `--start-db`, `--start-embedding`, `--stop`, and `--clean`. |
-| `pci-mcp` | stdio MCP server entry point. |
-| `pci-mcp-smoke` | Basic MCP status and tool smoke check. Requires one or more repo paths, such as `pci-mcp-smoke .`. |
-| `pci-fastembed-server` | Small OpenAI-compatible FastEmbed server for local CPU embeddings. |
-| `pci apple-embed-server` | OpenAI-compatible embedding server backed by Apple MLX (Apple Silicon only). Writes a PID file so `pci doctor --stop` can terminate it. |
-| `pci-llama-embed` | llama.cpp embedding CLI helper. |
-| `pci-embedding-bench` | Embedding endpoint benchmark helper. |
+| `pci index` | Main indexing command. Requires one or more repository paths, such as `pci index .`. Can emit MCP client snippets and required environment exports with `--mcp-config {env,codex,claude,opencode,vscode,copilot,cline,zed}`. Low-level ingest flags are reachable via `pci index ... -- <flags>`. |
+| `pci doctor` | Detects database, embedding endpoint, CPU, GPU, and NPU readiness. Also starts/stops bundled local services with `--start`, `--start-db`, `--start-embedding`, `--stop`, and `--clean`. |
+| `pci mcp` | stdio MCP server entry point. |
+| `pci smoke` | Basic MCP status and tool smoke check. Requires one or more repo paths, such as `pci smoke .`. |
+| `pci embed fastembed` | Small OpenAI-compatible FastEmbed server for local CPU embeddings. |
+| `pci embed apple` | OpenAI-compatible embedding server backed by Apple MLX (Apple Silicon only). Writes a PID file so `pci doctor --stop` can terminate it. |
+| `pci embed llama` | llama.cpp embedding CLI helper. |
+| `pci embed bench` | Embedding endpoint benchmark helper. |
 
 The repository checkout also contains `pci-embedding-server`, a shell helper for
 starting a local `llama-server`. It is useful for local experiments, but it is
@@ -54,20 +53,20 @@ path, that database is used exactly. If the URL omits the database path, the
 connection endpoint and credentials come from the URL while the database name is
 inferred from the repository or workspace path. The split `PCI_PG_*`
 variables remain supported for Docker Compose and compatibility; set
-`PCI_PG_DB` only when a fixed database should override inference. `pci-index`
-owns inferred project database initialization: `pci-index .` initializes before
-indexing, and `pci-index --init-db .` initializes the database/schema and exits.
-`pci-doctor --init-postgres` stays out of project database creation; it only
+`PCI_PG_DB` only when a fixed database should override inference. `pci index`
+owns inferred project database initialization: `pci index .` initializes before
+indexing, and `pci index --init-db .` initializes the database/schema and exits.
+`pci doctor --init-postgres` stays out of project database creation; it only
 uses `PCI_POSTGRES_ADMIN_USER` and
 `PCI_POSTGRES_ADMIN_PASSWORD` to create/update the
-cluster-level Postgres role that `pci-index` can use through the database admin
+cluster-level Postgres role that `pci index` can use through the database admin
 variables below, and prepares `template1` with pgvector. When an inferred
-database is missing, `pci-index` may use
+database is missing, `pci index` may use
 `PCI_DATABASE_ADMIN_USER` and
 `PCI_DATABASE_ADMIN_PASSWORD` to create the inferred
 database and project-scoped RW/RO roles, then uses the scoped RW role for
-schema and ingest work. When `pci-index` can derive the scoped RO password, it
-prints an `Export for pci-mcp (RO)` block after `pci-index --init-db` and
+schema and ingest work. When `pci index` can derive the scoped RO password, it
+prints an `Export for pci mcp (RO)` block after `pci index --init-db` and
 ordinary index runs; `--mcp-config codex`, `--mcp-config claude`,
 `--mcp-config opencode`, and `--mcp-config vscode`/`copilot` print
 credential-free project config snippets followed by the read-only environment
@@ -75,7 +74,7 @@ values those snippets need. `--mcp-config zed` prints a project-scoped
 `.zed/settings.json` snippet with read-only database values embedded, because
 Zed does not document environment-variable interpolation for MCP `env` values.
 `--mcp-config cline` prints a user-scoped GUI snippet with read-only database
-values embedded, matching Cline's local MCP settings shape. `pci-mcp` prefers
+values embedded, matching Cline's local MCP settings shape. `pci mcp` prefers
 `PCI_MCP_DATABASE_URL`,
 `PCI_MCP_DATABASE_USER`, and
 `PCI_MCP_DATABASE_PASSWORD` when set, and otherwise falls
@@ -91,45 +90,45 @@ inferred database, generated scoped roles override URL-embedded credentials;
 set separate runtime user/password variables only when explicit credentials
 should win. The pci-index admin role must be able to create databases, create
 roles, and use pgvector inherited from `template1`. The one-time
-`pci-doctor --init-postgres` bootstrap usually needs Postgres admin credentials
+`pci doctor --init-postgres` bootstrap usually needs Postgres admin credentials
 such as a local `postgres` superuser because pgvector is not trusted. By
-default, `pci-doctor --init-postgres` writes only the generated non-superuser
-`pci_index_admin` connection values for `pci-index` to
+default, `pci doctor --init-postgres` writes only the generated non-superuser
+`pci_index_admin` connection values for `pci index` to
 `${XDG_CONFIG_HOME:-~/.config}/project-code-intelligence/pci-index.env` with
-`0600` permissions; `pci-index` loads that file when the corresponding
+`0600` permissions; `pci index` loads that file when the corresponding
 environment variables are unset and reports the loaded path in normal text
 mode. Use `--no-write-config` to skip the file write. When database admin
-variables are unset, `pci-index` promotes the configured writer credentials to
+variables are unset, `pci index` promotes the configured writer credentials to
 the effective admin and still creates per-project RW/RO roles (with
 deterministic HMAC-derived passwords keyed on the writer password). The
 bundled local pgvector container ships with a writer that has CREATEROLE, so
 this works out of the box; for a remote Postgres whose writer lacks CREATEROLE
-the role-creation SQL fails with guidance to run `pci-doctor --init-postgres`.
+the role-creation SQL fails with guidance to run `pci doctor --init-postgres`.
 
-For the bundled local database, `pci-doctor --start-db` starts only the
-pgvector container. `pci-doctor --start` starts the database plus the best local
+For the bundled local database, `pci doctor --start-db` starts only the
+pgvector container. `pci doctor --start` starts the database plus the best local
 embedding service it can run on the host. Use `--start-db` when embeddings are
 remote or intentionally skipped.
 
 Installed packages materialize bundled Compose assets into the user cache. Set
 `PCI_COMPOSE_FILE` to use a customized Compose file without editing the
-installed package or Nix store path. `pci-doctor --clean` removes generated
+installed package or Nix store path. `pci doctor --clean` removes generated
 Compose cache files in addition to stopping local services and removing the
 bundled database volume.
 
 `PCI_COLLECTION` remains a supported override, but normal
-CLI/MCP use should not need it. Prefer `pci-index --collection NAME` for index
-runs; an inherited collection environment variable is ignored by `pci-index`
+CLI/MCP use should not need it. Prefer `pci index --collection NAME` for index
+runs; an inherited collection environment variable is ignored by `pci index`
 unless `PCI_ALLOW_COLLECTION_OVERRIDE=1` is also set.
-`pci-index` infers the collection from the repo path or workspace path, and
-`pci-mcp` infers it from the process working directory when the variable is
-unset. In the same default path, `pci-index` and `pci-mcp` infer a project
+`pci index` infers the collection from the repo path or workspace path, and
+`pci mcp` infers it from the process working directory when the variable is
+unset. In the same default path, `pci index` and `pci mcp` infer a project
 database name from that repository or workspace scope.
 
 ## MCP Tools
 
 The MCP protocol surface is public. The server runs over stdio through
-`pci-mcp`.
+`pci mcp`.
 
 Public tool names:
 
@@ -207,11 +206,11 @@ Python API.
 Public expectations:
 
 - Tables are namespaced as `project_code_intel_*`.
-- `pci-index --reset <repo>` drops the inferred PCI-managed database for that
+- `pci index --reset <repo>` drops the inferred PCI-managed database for that
   repository/workspace scope. Explicit database URLs are not dropped.
 - When no database name is configured, host tools infer a PostgreSQL database
-  name from the repository or workspace path. `pci-index` may create or reset
-  that inferred database; `pci-mcp` only connects to it read-only.
+  name from the repository or workspace path. `pci index` may create or reset
+  that inferred database; `pci mcp` only connects to it read-only.
 - Existing embeddings are checked for model and dimension compatibility before
   resume.
 - Collections are an application-level scope used by CLI and MCP behavior; they

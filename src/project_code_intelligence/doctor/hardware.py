@@ -262,7 +262,7 @@ def npu_device_info(path: Path) -> tuple[str, str | None]:
 
 
 def _check_darwin_npu() -> list[CheckResult]:
-    return [result("npu", "skip", "Apple Neural Engine is not used; embeddings run via pci apple-embed-server (MPS).")]
+    return [result("npu", "skip", "Apple Neural Engine is not used; embeddings run via pci embed apple (MPS).")]
 
 
 def check_npu_support(env: config.Env) -> list[CheckResult]:
@@ -560,7 +560,7 @@ def _check_apple_metal(env: config.Env) -> list[CheckResult]:
             result(
                 "apple-metal-model",
                 "ok",
-                f"Apple embed server is running via pci apple-embed-server (model: {apple_embed_model_name()}).",
+                f"Apple embed server is running via pci embed apple (model: {apple_embed_model_name()}).",
             )
         ]
     return [
@@ -568,6 +568,6 @@ def _check_apple_metal(env: config.Env) -> list[CheckResult]:
             "apple-metal-model",
             "warn",
             "No local embedding model is configured.",
-            "Run pci apple-embed-server to start a local model, or set PCI_EMBEDDING_ENDPOINT for a remote provider.",
+            "Run pci embed apple to start a local model, or set PCI_EMBEDDING_ENDPOINT for a remote provider.",
         )
     ]

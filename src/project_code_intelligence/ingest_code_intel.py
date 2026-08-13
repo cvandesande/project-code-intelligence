@@ -213,6 +213,7 @@ class IngestPlan:
 class McpConfigContext:
     server_name: str
     command: str
+    args: tuple[str, ...]
     cwd: str
     database_url: str
     database_user: str
@@ -695,22 +696,25 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "After a successful ingest, delete old snapshots per repo, keeping only the N most recent "
-            "(see --prune-keep). Enabled by default; pass --no-prune-snapshots to keep every snapshot."
+            "After a successful ingest, delete old snapshots per repo, keeping each branch's newest "
+            "plus N extra (see --prune-keep). Enabled by default; pass --no-prune-snapshots to keep every snapshot."
         ),
     )
     _ = parser.add_argument(
         "--prune-keep",
         type=int,
-        default=5,
+        default=0,
         metavar="N",
-        help="Number of recent snapshots to keep per repo when pruning (default: 5).",
+        help=(
+            "Extra old snapshots to keep per repo beyond each branch's newest "
+            "(default: 0 — keep only the newest snapshot of each branch)."
+        ),
     )
     _ = parser.add_argument(
         "--mcp-config",
         choices=MCP_CONFIG_FORMATS,
         help=(
-            "Emit project-scoped read-only pci-mcp configuration and required environment exports "
+            "Emit project-scoped read-only pci mcp configuration and required environment exports "
             "after a successful run. "
             "Use --init-db-only with this option to initialize the DB and print config without indexing."
         ),
@@ -978,7 +982,7 @@ def default_mcp_server_name(_collection: str) -> str:
 
 
 def mcp_command_path() -> str:
-    return shutil.which("pci-mcp") or "pci-mcp"
+    return shutil.which("pci") or "pci"
 
 
 def mcp_config_env(context: McpConfigContext) -> dict[str, str]:
@@ -992,7 +996,11 @@ def mcp_config_env(context: McpConfigContext) -> dict[str, str]:
 
 
 def mcp_config_context(
-    plan: IngestPlan, bootstrap: db.DatabaseBootstrapResult | None, *, command: str | None = None
+    plan: IngestPlan,
+    bootstrap: db.DatabaseBootstrapResult | None,
+    *,
+    command: str | None = None,
+    args: tuple[str, ...] = ("mcp",),
 ) -> McpConfigContext | None:
     if bootstrap is None or bootstrap.ro_role is None:
         return None
@@ -1005,6 +1013,7 @@ def mcp_config_context(
     return McpConfigContext(
         server_name=plan.args.mcp_server_name or default_mcp_server_name(plan.collection),
         command=command or mcp_command_path(),
+        args=args,
         cwd=scope_path,
         database_url=database_url,
         database_user=ro_role.name,
@@ -1027,7 +1036,7 @@ def mcp_ro_export_block(context: McpConfigContext | None) -> str | None:
         return None
     return "\n" + _mcp_env_export_block(
         context,
-        title="Export for pci-mcp (RO)",
+        title="Export for pci mcp (RO)",
         env_names=MCP_STANDALONE_ENV_NAMES,
     )
 
@@ -1042,11 +1051,16 @@ def _toml_key(value: str) -> str:
     return json.dumps(value)
 
 
+def _toml_string_array(values: tuple[str, ...]) -> str:
+    return "[" + ", ".join(_toml_string(value) for value in values) + "]"
+
+
 def codex_mcp_config_block(context: McpConfigContext) -> str:
     key = _toml_key(context.server_name)
     lines = [
         f"[mcp_servers.{key}]",
         f"command = {_toml_string(context.command)}",
+        f"args = {_toml_string_array(context.args)}",
         f"cwd = {_toml_string(context.cwd)}",
         "startup_timeout_sec = 20",
         "tool_timeout_sec = 120",
@@ -1067,7 +1081,7 @@ def claude_mcp_config_block(context: McpConfigContext) -> str:
             context.server_name: {
                 "type": "stdio",
                 "command": context.command,
-                "args": list[str](),
+                "args": list(context.args),
                 "cwd": context.cwd,
                 "env": _claude_env_references(),
             }
@@ -1090,7 +1104,7 @@ def vscode_mcp_config_block(context: McpConfigContext) -> str:
             context.server_name: {
                 "type": "stdio",
                 "command": context.command,
-                "args": list[str](),
+                "args": list(context.args),
                 "env": _vscode_env_references(),
             }
         }
@@ -1101,7 +1115,7 @@ def vscode_mcp_config_block(context: McpConfigContext) -> str:
 def zed_mcp_server_config(context: McpConfigContext) -> JsonObject:
     return {
         "command": context.command,
-        "args": list[str](),
+        "args": list(context.args),
         "env": mcp_config_env(context),
     }
 
@@ -1121,7 +1135,7 @@ def opencode_mcp_config_block(context: McpConfigContext) -> str:
         "mcp": {
             context.server_name: {
                 "type": "local",
-                "command": [context.command],
+                "command": [context.command, *context.args],
                 "enabled": True,
                 "cwd": context.cwd,
                 "environment": _opencode_env_references(),
@@ -1136,7 +1150,7 @@ def cline_mcp_config_block(context: McpConfigContext) -> str:
         "mcpServers": {
             context.server_name: {
                 "command": context.command,
-                "args": list[str](),
+                "args": list(context.args),
                 "env": mcp_config_env(context),
                 "autoApprove": list[str](),
                 "disabled": False,
@@ -1218,7 +1232,7 @@ def mcp_project_config_guidance(
         "",
         _mcp_env_export_block(
             context,
-            title="Required environment variables for pci-mcp (RO)",
+            title="Required environment variables for pci mcp (RO)",
             env_names=env_names,
         ),
     ))

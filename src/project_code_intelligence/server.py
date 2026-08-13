@@ -30,18 +30,18 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 _DESCRIPTION = (
-    "pci-mcp is a stdio JSON-RPC MCP server. It is launched by an MCP client "
+    "pci mcp is a stdio JSON-RPC MCP server. It is launched by an MCP client "
     "(VS Code, Claude Code, Codex, Cline, Zed, etc.); when you run it in a terminal it will "
     "block waiting for JSON-RPC requests on stdin. Configure it through environment variables "
     "(PCI_MCP_DATABASE_URL/USER/PASSWORD, "
     "PCI_COLLECTION, PCI_DATABASE_SCOPE_PATH). "
-    "Run `pci-index --mcp-config <client>` to generate a ready-to-paste client config."
+    "Run `pci index --mcp-config <client>` to generate a ready-to-paste client config."
 )
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="pci-mcp", description=_DESCRIPTION)
-    _ = parser.add_argument("--version", action="version", version=f"pci-mcp {server_version()}")
+    parser = argparse.ArgumentParser(prog="pci mcp", description=_DESCRIPTION)
+    _ = parser.add_argument("--version", action="version", version=f"pci mcp {server_version()}")
     return parser
 
 

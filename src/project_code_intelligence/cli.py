@@ -55,7 +55,7 @@ def index_parser() -> argparse.ArgumentParser:
         "--mcp-config",
         choices=ingest_code_intel.MCP_CONFIG_FORMATS,
         help=(
-            "Emit project-scoped read-only pci-mcp configuration and required environment exports "
+            "Emit project-scoped read-only pci mcp configuration and required environment exports "
             "after a successful run. "
             "Use with --init-db to initialize the DB and print config without indexing."
         ),
@@ -88,16 +88,19 @@ def index_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "After a successful index, delete old snapshots per repo, keeping only the N most recent "
-            "(see --prune-keep). Enabled by default; pass --no-prune-snapshots to keep every snapshot."
+            "After a successful index, delete old snapshots per repo, keeping each branch's newest "
+            "plus N extra (see --prune-keep). Enabled by default; pass --no-prune-snapshots to keep every snapshot."
         ),
     )
     _ = parser.add_argument(
         "--prune-keep",
         type=int,
-        default=5,
+        default=0,
         metavar="N",
-        help="Number of recent snapshots to keep per repo when pruning (default: 5).",
+        help=(
+            "Extra old snapshots to keep per repo beyond each branch's newest "
+            "(default: 0 — keep only the newest snapshot of each branch)."
+        ),
     )
     _ = parser.add_argument(
         "--show-parser-failures",

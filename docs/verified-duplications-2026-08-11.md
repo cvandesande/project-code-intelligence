@@ -19,7 +19,7 @@ number that decides whether a check stays shipped.
 The standing regression command is
 `python3 ~/pci-measurement-harness/seed_regression.py`, run from the repo
 root. It checks that every active (unstruck) seed still surfaces in
-`pci-analyze audit --json --limit 999` and that struck seeds are gone.
+`pci audit --json --limit 999` and that struck seeds are gone.
 Run it after any `analyze.py`/`find_redundancy` change and after each fix
 batch. Exit 1 = regression.
 

@@ -749,7 +749,7 @@ class DoctorAppleTests(unittest.TestCase):
             [
                 CheckResult("platform", "ok", "Python 3.13 on Darwin 25.4.0 (arm64)"),
                 CheckResult(
-                    "npu", "skip", "Apple Neural Engine is not used; embeddings run via pci apple-embed-server (MPS)."
+                    "npu", "skip", "Apple Neural Engine is not used; embeddings run via pci embed apple (MPS)."
                 ),
                 CheckResult("database", "ok", "connected to codeintel as codeintel"),
                 CheckResult("embedding-endpoint", "warn", "no endpoint configured"),
@@ -763,7 +763,7 @@ class DoctorAppleTests(unittest.TestCase):
         )
 
         self.assertIn("Start Apple native embeddings", output)
-        self.assertIn("pci apple-embed-server", output)
+        self.assertIn("pci embed apple", output)
 
 
 if __name__ == "__main__":

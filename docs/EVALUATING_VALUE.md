@@ -31,7 +31,7 @@ guesses. Discount them.
 
 **Server-side data is best of all.** If you can see *how many MCP calls
 the server actually handled* in a session — independent of any agent's
-self-report — that breaks the bias loop entirely. The current `pci-mcp`
+self-report — that breaks the bias loop entirely. The current `pci mcp`
 server doesn't expose that yet; see "Cross-session evidence" below.
 
 ## Asking for a session retrospective
@@ -79,14 +79,14 @@ Lightweight options:
   signal from "I rarely reached for any MCP tool."
 - **Compare with-MCP and without-MCP sessions on the same task.** Run
   a comparable task twice: once with the MCP server running, once with
-  it stopped (`pci-doctor --stop`). Compare the agent's path through
+  it stopped (`pci doctor --stop`). Compare the agent's path through
   the task and the final answer's quality. This is the cleanest test
   because the comparison is direct, but it costs running the task
   twice.
 
 Heavier options (not yet built):
 
-- **Server-side query log.** The `pci-mcp` server could maintain a
+- **Server-side query log.** The `pci mcp` server could maintain a
   rolling log of recent tool calls with timing and response sizes that
   you can `cat` independently of any agent. That breaks self-report
   bias entirely. Not currently exposed; would need a server change.
@@ -102,11 +102,11 @@ The install isn't paying off if, over a few non-trivial sessions:
 - The cost of keeping the embedding service warm exceeds whatever
   discovery savings you observe.
 
-In those cases, `make tool-uninstall` runs `pci-doctor --clean` first, then
-removes the installed `pci-*` binaries. Use `pci-doctor --clean` directly when
+In those cases, `make tool-uninstall` runs `pci doctor --clean` first, then
+removes the installed `pci` binary. Use `pci doctor --clean` directly when
 you only want to stop local services and remove generated runtime state while
 keeping the CLI installed. Re-installing later is `make tool-install` plus, for
-non-bundled Postgres, `pci-doctor --init-postgres`.
+non-bundled Postgres, `pci doctor --init-postgres`.
 
 The honest framing: this tool earns its keep on large, unfamiliar, or
 code-graph-heavy work. On a small, well-known repo, the answer might

@@ -3584,7 +3584,7 @@ class McpServerEntryPointTests(unittest.TestCase):
 
         # argparse exits 0 for --help / --version
         self.assertEqual(raised.exception.code, 0)
-        self.assertIn("pci-mcp", captured.getvalue())
+        self.assertIn("pci mcp", captured.getvalue())
 
     def test_pci_mcp_version_flag_exits_cleanly(self) -> None:
         captured = io.StringIO()

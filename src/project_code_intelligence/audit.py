@@ -1,4 +1,4 @@
-"""Whole-tree cleanup audit (`pci-analyze audit`).
+"""Whole-tree cleanup audit (`pci audit`).
 
 One user-invoked sweep over the latest indexed snapshot(s), reporting only
 checks with a measured precision number (see HANDOFF/git history for the
@@ -411,7 +411,7 @@ def _group_to_compact(group: MotifGroup, repo: str) -> dict[str, object]:
     Everything else group_to_json carries (coherence, evidence, recommendation,
     averages, record ids) measured as non-separating for this decision, so the
     machine output omits it; the full record stays available via the
-    find_redundancy MCP tool and ``pci-analyze compression``.
+    find_redundancy MCP tool.
     """
     return {
         "max_text": group.max_text,
@@ -467,7 +467,7 @@ class AuditNamespace(argparse.Namespace):
 
 def _audit_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="pci-analyze audit",
+        prog="pci audit",
         description="Whole-tree cleanup audit: staleness, duplicate names, redundancy candidates, static findings.",
     )
     _ = parser.add_argument("--collection", help="Restrict to one collection/workspace.")
@@ -488,7 +488,7 @@ def audit_main(argv: list[str] | None = None) -> int:
     try:
         with mcp_db.connect() as conn:
             if not mcp_db.code_intel_tables_exist(conn):
-                _ = sys.stderr.write("pci-analyze: no code-intelligence tables; run pci-index first\n")
+                _ = sys.stderr.write("pci audit: no code-intelligence tables; run pci-index first\n")
                 return 1
             all_snapshots = latest_snapshots(conn)
             branch = resolve_repo_branch(Path.cwd())
@@ -496,13 +496,13 @@ def audit_main(argv: list[str] | None = None) -> int:
                 all_snapshots, collection=parsed.collection, repo=parsed.repo, branch=branch
             )
             if branch_miss:
-                _ = sys.stderr.write(f"pci-analyze: no snapshot on branch {branch!r}; using newest per repo\n")
+                _ = sys.stderr.write(f"pci audit: no snapshot on branch {branch!r}; using newest per repo\n")
             if not snapshots:
-                _ = sys.stderr.write("pci-analyze: no matching snapshots found\n")
+                _ = sys.stderr.write("pci audit: no matching snapshots found\n")
                 return 1
             results = [audit_snapshot(conn, snapshot, options) for snapshot in snapshots]
     except DatabaseConnectionError as exc:
-        _ = sys.stderr.write(f"pci-analyze: {exc}\n")
+        _ = sys.stderr.write(f"pci audit: {exc}\n")
         return 1
     if parsed.json:
         _ = sys.stdout.write(render_json(results))
