@@ -1,10 +1,10 @@
 # MCP Setup
 
-`project-code-intelligence` exposes a stdio MCP server through `pci-mcp`.
+`project-code-intelligence` exposes a stdio MCP server through `pci mcp`.
 The server reads from Postgres/pgvector and does not need to run in Docker.
 
 Use Docker Compose for local dependencies such as Postgres and optional
-embedding servers. Point your MCP client at the installed `pci-mcp` command.
+embedding servers. Point your MCP client at the installed `pci` command with the `mcp` argument.
 
 ## Recommended Scope
 
@@ -15,7 +15,7 @@ Use one local database per indexed repository or workspace. Use:
 - MCP tool `repo` filters for individual repositories inside that collection.
 
 For normal use, you do not need to set a collection environment variable.
-`pci-index` infers the database and collection from the paths you pass:
+`pci index` infers the database and collection from the paths you pass:
 
 - one repo path: database scope and collection use the repo directory
 - multiple repo paths: database scope and collection use the current working
@@ -25,7 +25,7 @@ For a workspace with related repositories:
 
 ```sh
 cd /path/to/workspace
-pci-index repo-a repo-b repo-c
+pci index repo-a repo-b repo-c
 ```
 
 The MCP server also infers its collection from its configured working directory
@@ -39,7 +39,7 @@ Use explicit collection configuration only when you want a collection name
 different from the inferred directory name:
 
 ```sh
-pci-index --collection workspace-name repo-a repo-b repo-c
+pci index --collection workspace-name repo-a repo-b repo-c
 ```
 
 ## Security Model
@@ -90,40 +90,40 @@ PCI_DATABASE_URL=postgresql://user:password@host:5432?sslmode=prefer
 ```
 
 For first-use bootstrap, use PostgreSQL admin credentials once with
-`pci-doctor --init-postgres`. Doctor creates/updates the cluster-level
+`pci doctor --init-postgres`. Doctor creates/updates the cluster-level
 `pci_index_admin` role, installs pgvector into `template1`, writes the
-non-superuser `pci-index` credentials to
+non-superuser `pci index` credentials to
 `${XDG_CONFIG_HOME:-~/.config}/project-code-intelligence/pci-index.env` with
 `0600` permissions, and prints the same
 `PCI_DATABASE_ADMIN_*` exports for copy/paste or secret
-manager use. It does not create a project database. Then `pci-index` loads the
+manager use. It does not create a project database. Then `pci index` loads the
 user config when those variables are unset and creates the inferred project
-database and schema before indexing. Use `pci-index --init-db` when you want to
+database and schema before indexing. Use `pci index --init-db` when you want to
 initialize the database/schema and exit without scanning:
 
 ```sh
 PCI_DATABASE_URL=postgresql://host:5432?sslmode=prefer
 PCI_POSTGRES_ADMIN_USER=postgres
 PCI_POSTGRES_ADMIN_PASSWORD=admin-password
-pci-doctor --init-postgres
+pci doctor --init-postgres
 
-pci-index --init-db .
-pci-index .
+pci index --init-db .
+pci index .
 ```
 
 For the bundled local database, no Postgres admin bootstrap is needed:
 
 ```sh
-pci-doctor --start-db
-pci-doctor
+pci doctor --start-db
+pci doctor
 ```
 
-When `pci-doctor` cannot reach a database, fix the database first by setting
-`PCI_DATABASE_URL`, running `pci-doctor --start-db`, or running
-`pci-doctor --init-postgres` for a non-bundled Postgres cluster. Indexing only
+When `pci doctor` cannot reach a database, fix the database first by setting
+`PCI_DATABASE_URL`, running `pci doctor --start-db`, or running
+`pci doctor --init-postgres` for a non-bundled Postgres cluster. Indexing only
 makes sense after the database is reachable.
 
-Use `pci-doctor --init-postgres --no-write-config` when you want only printed
+Use `pci doctor --init-postgres --no-write-config` when you want only printed
 exports and no user config file.
 
 When admin variables are set for an inferred database, generated scoped roles
@@ -133,8 +133,8 @@ Set `PCI_DATABASE_USER` and
 to force explicit runtime credentials.
 
 For generic MCP clients or custom launchers that cannot set the server working
-directory, set the same base URL and scope path so `pci-mcp` infers the same
-project database as `pci-index`:
+directory, set the same base URL and scope path so `pci mcp` infers the same
+project database as `pci index`:
 
 ```sh
 PCI_MCP_DATABASE_URL=postgresql://host:5432?sslmode=prefer
@@ -144,19 +144,19 @@ PCI_MCP_DATABASE_PASSWORD=password
 ```
 
 When `PCI_DATABASE_ADMIN_USER` and
-`PCI_DATABASE_ADMIN_PASSWORD` are available, `pci-index`
-prints the project-specific `Export for pci-mcp (RO)` block after
-`pci-index --init-db` and ordinary index runs.
+`PCI_DATABASE_ADMIN_PASSWORD` are available, `pci index`
+prints the project-specific `Export for pci mcp (RO)` block after
+`pci index --init-db` and ordinary index runs.
 
 To print copy/paste-ready MCP client configuration, use `--mcp-config`:
 
 ```sh
-pci-index --init-db --mcp-config codex .
-pci-index --init-db --mcp-config claude .
-pci-index --init-db --mcp-config opencode .
-pci-index --init-db --mcp-config vscode .
-pci-index --init-db --mcp-config cline .
-pci-index --init-db --mcp-config zed .
+pci index --init-db --mcp-config codex .
+pci index --init-db --mcp-config claude .
+pci index --init-db --mcp-config opencode .
+pci index --init-db --mcp-config vscode .
+pci index --init-db --mcp-config cline .
+pci index --init-db --mcp-config zed .
 ```
 
 Generated client config uses the generic server key
@@ -178,28 +178,28 @@ clients that support it; VS Code Copilot, Cline, and Zed pass the collection
 explicitly because their documented config shapes do not include a server
 working directory. Use `PCI_COLLECTION` only as an
 explicit MCP runtime scope. For index runs, prefer
-`pci-index --collection NAME`; an inherited collection environment variable is
+`pci index --collection NAME`; an inherited collection environment variable is
 ignored unless
 `PCI_ALLOW_COLLECTION_OVERRIDE=1` is also set. Use
 `--mcp-server-name NAME` only when you are deliberately creating a
 non-project-scoped setup.
 
-If those MCP-specific variables are unset, `pci-mcp` falls back to the generic
+If those MCP-specific variables are unset, `pci mcp` falls back to the generic
 database variables.
 
 The one-time bootstrap user usually needs local Postgres superuser privileges
-because pgvector is not trusted. `pci-doctor --init-postgres` creates a
+because pgvector is not trusted. `pci doctor --init-postgres` creates a
 non-superuser `pci_index_admin` role with `CREATEDB` and `CREATEROLE`; new
 project databases inherit pgvector from `template1`. If a project database was
 created before `template1` had pgvector, reset that inferred database and index
 again.
 
-If admin variables are not set, `pci-index` promotes the writer credentials to
+If admin variables are not set, `pci index` promotes the writer credentials to
 the effective admin and still creates per-project RW/RO roles using
 deterministic HMAC-derived passwords. The bundled local pgvector container
 ships with a writer that has `CREATEROLE`, so this works without setup; for a
 remote Postgres whose writer lacks `CREATEROLE` the role-creation SQL fails
-with guidance to run `pci-doctor --init-postgres`.
+with guidance to run `pci doctor --init-postgres`.
 
 If your MCP client or secret manager separates credentials, leave them out of
 the URL and pass them separately:
@@ -213,16 +213,16 @@ PCI_DATABASE_PASSWORD=password
 Set `PCI_PG_DB` only when you want to disable database-name inference and use
 a fixed database name.
 
-`pci-index --reset .` drops only the inferred PCI-managed database for that
-repo/workspace scope. Use `pci-doctor --clean` for broad local runtime cleanup
+`pci index --reset .` drops only the inferred PCI-managed database for that
+repo/workspace scope. Use `pci doctor --clean` for broad local runtime cleanup
 while keeping the CLI installed. Use `make tool-uninstall` to run that cleanup
-and then remove the installed `pci-*` binaries.
+and then remove the installed `pci` binary.
 
 Installed packages use bundled Compose assets. If you need to customize the
 Compose file, copy `docker-compose.yml` and point PCI at that copy:
 
 ```sh
-PCI_COMPOSE_FILE=/path/to/docker-compose.yml pci-doctor --start-db
+PCI_COMPOSE_FILE=/path/to/docker-compose.yml pci doctor --start-db
 ```
 
 Do not edit files inside a Nix store path or an installed wheel. Re-running
@@ -237,18 +237,18 @@ and server command are also acceptable to share. Zed project settings embed
 read-only database credentials and must stay local. The MCP export block
 contains read-only database credentials; load those values from your shell,
 direnv, a private env file, or a system secret manager. The
-`pci-doctor --init-postgres` user config contains non-superuser credentials for
-`pci-index`; keep it private and at `0600`.
+`pci doctor --init-postgres` user config contains non-superuser credentials for
+`pci index`; keep it private and at `0600`.
 
 ## Codex
 
-`pci-index --mcp-config codex` emits config for the indexed repo's
+`pci index --mcp-config codex` emits config for the indexed repo's
 `.codex/config.toml`.
 
 Generate the snippet from the indexed repo/workspace:
 
 ```sh
-pci-index --init-db --mcp-config codex .
+pci index --init-db --mcp-config codex .
 ```
 
 The command prints the project target path before the TOML:
@@ -263,7 +263,8 @@ Do not paste this into a global MCP config; the server key is intentionally reus
 
 ```toml
 [mcp_servers.project-code-intelligence]
-command = "/home/you/.local/bin/pci-mcp"
+command = "/home/you/.local/bin/pci"
+args = ["mcp"]
 cwd = "/home/you/src/project-code-intelligence"
 startup_timeout_sec = 20
 tool_timeout_sec = 120
@@ -281,18 +282,18 @@ export PCI_MCP_DATABASE_PASSWORD=password
 ```
 
 For a single-repo local setup using the Compose database, you can omit the
-`env_vars` list and export block if the MCP client launches `pci-mcp` from the
+`env_vars` list and export block if the MCP client launches `pci mcp` from the
 repo root and the default local database credentials are acceptable.
 
 ## Claude Code
 
-`pci-index --mcp-config claude` emits config for the indexed repo's
+`pci index --mcp-config claude` emits config for the indexed repo's
 project-scoped `.mcp.json`.
 
 Generate the snippet from the indexed repo/workspace:
 
 ```sh
-pci-index --init-db --mcp-config claude .
+pci index --init-db --mcp-config claude .
 ```
 
 Claude Code treats `.mcp.json` as project scoped and prompts before using it in
@@ -305,8 +306,8 @@ your secret manager.
   "mcpServers": {
     "project-code-intelligence": {
       "type": "stdio",
-      "command": "/home/you/.local/bin/pci-mcp",
-      "args": [],
+      "command": "/home/you/.local/bin/pci",
+      "args": ["mcp"],
       "cwd": "/home/you/src/project-code-intelligence",
       "env": {
         "PCI_MCP_DATABASE_URL": "${PCI_MCP_DATABASE_URL}",
@@ -322,7 +323,7 @@ Use the export block printed after the JSON before launching Claude Code.
 
 ## OpenCode
 
-`pci-index --mcp-config opencode` emits config for the indexed repo's
+`pci index --mcp-config opencode` emits config for the indexed repo's
 `opencode.json`. OpenCode config is JSON or JSONC and defines MCP servers under
 `mcp`.
 
@@ -337,7 +338,7 @@ cp opencode.example.json opencode.json
 Or generate the snippet from any indexed repo/workspace:
 
 ```sh
-pci-index --init-db --mcp-config opencode .
+pci index --init-db --mcp-config opencode .
 ```
 
 The generated `opencode.json` uses OpenCode's `{env:VAR}` substitution, so
@@ -349,7 +350,7 @@ credentials stay in the accompanying export block or your secret manager.
   "mcp": {
     "project-code-intelligence": {
       "type": "local",
-      "command": ["/home/you/.local/bin/pci-mcp"],
+      "command": ["/home/you/.local/bin/pci", "mcp"],
       "enabled": true,
       "cwd": "/home/you/src/project-code-intelligence",
       "environment": {
@@ -366,13 +367,13 @@ Use the export block printed after the JSON before launching OpenCode.
 
 ## VS Code Copilot
 
-`pci-index --mcp-config vscode` emits config for the indexed repo's
+`pci index --mcp-config vscode` emits config for the indexed repo's
 `.vscode/mcp.json`. `--mcp-config copilot` is an alias for the same output.
 
 Generate the snippet from the indexed repo/workspace:
 
 ```sh
-pci-index --init-db --mcp-config vscode .
+pci index --init-db --mcp-config vscode .
 ```
 
 VS Code stores MCP servers under top-level `servers` in `.vscode/mcp.json`.
@@ -384,8 +385,8 @@ stay in the accompanying export block or your secret manager.
   "servers": {
     "project-code-intelligence": {
       "type": "stdio",
-      "command": "/home/you/.local/bin/pci-mcp",
-      "args": [],
+      "command": "/home/you/.local/bin/pci",
+      "args": ["mcp"],
       "env": {
         "PCI_MCP_DATABASE_URL": "${env:PCI_MCP_DATABASE_URL}",
         "PCI_MCP_DATABASE_USER": "${env:PCI_MCP_DATABASE_USER}",
@@ -404,13 +405,13 @@ stdio MCP config does not define a server `cwd` field.
 
 ## Zed
 
-`pci-index --mcp-config zed` emits JSON for Zed project settings. Add or merge
+`pci index --mcp-config zed` emits JSON for Zed project settings. Add or merge
 the generated snippet into `.zed/settings.json` in the indexed repo/workspace.
 
 Generate the snippet from the indexed repo/workspace:
 
 ```sh
-pci-index --init-db --mcp-config zed .
+pci index --init-db --mcp-config zed .
 ```
 
 The generated Zed snippet contains the read-only database values directly
@@ -426,8 +427,8 @@ Write or merge this into `.zed/settings.json`:
 {
   "context_servers": {
     "project-code-intelligence": {
-      "command": "/home/you/.local/bin/pci-mcp",
-      "args": [],
+      "command": "/home/you/.local/bin/pci",
+      "args": ["mcp"],
       "env": {
         "PCI_MCP_DATABASE_URL": "postgresql://host:5432/project_db?sslmode=prefer",
         "PCI_MCP_DATABASE_USER": "project_ro",
@@ -442,7 +443,7 @@ Write or merge this into `.zed/settings.json`:
 
 ## Cline (VS Code)
 
-`pci-index --mcp-config cline` emits a JSON snippet for Cline's VS Code
+`pci index --mcp-config cline` emits a JSON snippet for Cline's VS Code
 extension MCP settings. Add or merge the generated entry under `mcpServers` in
 Cline's MCP settings JSON:
 
@@ -453,7 +454,7 @@ Cline's MCP settings JSON:
 Generate the snippet from the indexed repo/workspace:
 
 ```sh
-pci-index --init-db --mcp-config cline .
+pci index --init-db --mcp-config cline .
 ```
 
 Cline's VS Code MCP settings are user-scoped, not repository-scoped. The
@@ -467,8 +468,8 @@ projects.
 {
   "mcpServers": {
     "project-code-intelligence": {
-      "command": "/home/you/.local/bin/pci-mcp",
-      "args": [],
+      "command": "/home/you/.local/bin/pci",
+      "args": ["mcp"],
       "env": {
         "PCI_MCP_DATABASE_URL": "postgresql://host:5432/project_db?sslmode=prefer",
         "PCI_MCP_DATABASE_USER": "project_ro",
@@ -485,7 +486,7 @@ projects.
 
 ## Other MCP Clients
 
-`pci-index --mcp-config` intentionally emits project-scoped config only for
+`pci index --mcp-config` intentionally emits project-scoped config only for
 Codex, Claude Code, OpenCode, VS Code Copilot, and Zed, plus user-scoped Cline
 config for the VS Code extension. For other clients, use the `env` export block
 with that client's project/workspace configuration if it has one.

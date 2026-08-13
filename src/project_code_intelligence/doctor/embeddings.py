@@ -105,7 +105,7 @@ def check_embedding_options(
                 "option-gpu-apple",
                 "ok",
                 f"Apple GPU embeddings: native MLX default {config.DEFAULT_APPLE_EMBED_MODEL}.",
-                "Run pci apple-embed-server to start the native MLX embedding server. "
+                "Run pci embed apple to start the native MLX embedding server. "
                 "Override the model with PCI_APPLE_EMBED_MODEL.",
             )
         )

@@ -16,22 +16,18 @@ call-shape motifs are most interpretable inside one module tree.
 
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import re
-import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from difflib import SequenceMatcher
-from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from project_code_intelligence.exceptions import DatabaseConnectionError
 from project_code_intelligence.git_utils import run_git
-from project_code_intelligence.mcp import db as mcp_db
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from pathlib import Path
 
     from project_code_intelligence import db
     from project_code_intelligence.models import JsonObject
@@ -1039,60 +1035,7 @@ def render_text(results: Sequence[SnapshotResult]) -> str:
     return "\n".join(lines) + "\n"
 
 
-# --- CLI ------------------------------------------------------------------------
-
-
-@dataclass
-class AnalyzeNamespace(argparse.Namespace):
-    collection: str | None = None
-    repo: str | None = None
-    path_prefix: str | None = None
-    threshold: float = DEFAULT_THRESHOLD
-    min_roles: int = DEFAULT_MIN_ROLES
-    min_members: int = DEFAULT_MIN_MEMBERS
-    limit: int = DEFAULT_LIMIT
-    json: bool = False
-    extra: list[str] = field(default_factory=list)
-
-
-def _analyze_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="pci-analyze compression",
-        description="Find groups of functions with repeated call-shape motifs (advisory).",
-    )
-    _ = parser.add_argument("--collection", help="Restrict to one collection/workspace.")
-    _ = parser.add_argument("--repo", help="Restrict to one repo within the collection(s).")
-    _ = parser.add_argument(
-        "--path-prefix",
-        dest="path_prefix",
-        help="Only report groups with a member under this path prefix (repo-relative or repo-prefixed).",
-    )
-    _ = parser.add_argument(
-        "--threshold",
-        type=float,
-        default=DEFAULT_THRESHOLD,
-        help=f"Call-shape Jaccard similarity to cluster two functions (default {DEFAULT_THRESHOLD}).",
-    )
-    _ = parser.add_argument(
-        "--min-roles",
-        type=int,
-        default=DEFAULT_MIN_ROLES,
-        help=f"Minimum distinct call roles a function must have to be considered (default {DEFAULT_MIN_ROLES}).",
-    )
-    _ = parser.add_argument(
-        "--min-members",
-        type=int,
-        default=DEFAULT_MIN_MEMBERS,
-        help=f"Minimum functions in a reported motif group (default {DEFAULT_MIN_MEMBERS}).",
-    )
-    _ = parser.add_argument(
-        "--limit",
-        type=int,
-        default=DEFAULT_LIMIT,
-        help=f"Maximum motif groups to report per snapshot (default {DEFAULT_LIMIT}).",
-    )
-    _ = parser.add_argument("--json", action="store_true", help="Emit JSON instead of the text report.")
-    return parser
+# --- snapshot selection (used by the CLI and MCP callers) -----------------------
 
 
 def select_snapshots(
@@ -1148,57 +1091,3 @@ def resolve_and_select_snapshots(
         fallback = newest_per_repo(select_snapshots(all_snapshots, collection=collection, repo=repo))
         return fallback, True
     return snapshots, False
-
-
-def compression_main(argv: list[str] | None = None) -> int:
-    parser = _analyze_parser()
-    parsed = parser.parse_args(argv, namespace=AnalyzeNamespace())
-    options = AnalysisOptions(
-        threshold=parsed.threshold,
-        min_roles=parsed.min_roles,
-        min_members=parsed.min_members,
-        limit=parsed.limit,
-        path_prefix=parsed.path_prefix,
-    )
-    try:
-        with mcp_db.connect() as conn:
-            if not mcp_db.code_intel_tables_exist(conn):
-                _ = sys.stderr.write("pci-analyze: no code-intelligence tables; run pci-index first\n")
-                return 1
-            all_snapshots = latest_snapshots(conn)
-            branch = resolve_repo_branch(Path.cwd())
-            snapshots, branch_miss = resolve_and_select_snapshots(
-                all_snapshots, collection=parsed.collection, repo=parsed.repo, branch=branch
-            )
-            if branch_miss:
-                _ = sys.stderr.write(f"pci-analyze: no snapshot on branch {branch!r}; using newest per repo\n")
-            if not snapshots:
-                _ = sys.stderr.write("pci-analyze: no matching snapshots found\n")
-                return 1
-            results = [analyze_snapshot(conn, snapshot, options) for snapshot in snapshots]
-    except DatabaseConnectionError as exc:
-        _ = sys.stderr.write(f"pci-analyze: {exc}\n")
-        return 1
-    output = render_json(results) if parsed.json else render_text(results)
-    _ = sys.stdout.write(output)
-    return 0
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = sys.argv[1:] if argv is None else argv
-    if args and args[0] == "compression":
-        return compression_main(args[1:])
-    if args and args[0] == "audit":
-        # audit imports this module, so a top-level import would be a cycle.
-        from project_code_intelligence.audit import audit_main  # noqa: PLC0415
-
-        return audit_main(args[1:])
-    parser = argparse.ArgumentParser(prog="pci-analyze", description="Structural analysis passes over the index.")
-    _ = parser.add_argument("subcommand", choices=["compression", "audit"], help="Analysis pass to run.")
-    _ = parser.parse_args(args[:1])
-    # parse_args above exits on an invalid/missing subcommand; unreachable otherwise.
-    return compression_main(args[1:])
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

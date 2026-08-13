@@ -15,7 +15,7 @@ backstop, but pulling it up front is cheaper than undoing a bad removal.
 To find duplication in the code already indexed, `find_redundancy` reports
 groups of functions that repeat one call-shape, ranked by whether collapsing
 them is worth it. For a whole-tree sweep (staleness, duplicate
-names, redundancy candidates, static findings), run `pci-analyze audit` from
+names, redundancy candidates, static findings), run `pci audit` from
 the repo root; measured precisions are printed in the report, and
 `docs/verified-duplications-2026-08-11.md` carries the source-verified seed
 list.

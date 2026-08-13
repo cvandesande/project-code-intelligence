@@ -83,8 +83,8 @@ embedding service:
 
 ```sh
 uv tool install /path/to/project-code-intelligence
-pci-doctor --start
-pci-doctor
+pci doctor --start
+pci doctor
 ```
 
 On low-power machines, or when embeddings should run elsewhere, start only the
@@ -92,42 +92,42 @@ bundled database and point PCI at an OpenAI-compatible embedding endpoint:
 
 ```sh
 uv tool install /path/to/project-code-intelligence
-pci-doctor --start-db
+pci doctor --start-db
 export PCI_ALLOW_REMOTE_EMBEDDING=1
 export PCI_EMBEDDING_ENDPOINT=https://api.openai.com/v1/embeddings
 export PCI_EMBEDDING_ENDPOINT_MODEL=text-embedding-3-small
 export OPENAI_API_KEY=...
-pci-doctor
+pci doctor
 ```
 
-When `pci-doctor` reports the database and embedding endpoint are ready, index a
+When `pci doctor` reports the database and embedding endpoint are ready, index a
 repository:
 
 ```sh
 cd /path/to/repo
-pci-index .
+pci index .
 ```
 
 For lexical search only, skip embeddings explicitly:
 
 ```sh
-pci-index --no-embed .
+pci index --no-embed .
 ```
 
-Then point your MCP client at `pci-mcp`. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md)
+Then point your MCP client at `pci mcp`. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md)
 for client-specific configuration.
 
 ---
 
 ## Supported Hardware
 
-`pci-doctor` is the source of truth for the current machine. It detects usable
+`pci doctor` is the source of truth for the current machine. It detects usable
 local runtimes and prints the exact startup command for each available path.
 
 | Path | Runtime | Notes |
 | --- | --- | --- |
 | CPU | FastEmbed | Portable default for local testing and machines without accelerator support. |
-| Apple Silicon | MLX | Native MLX embedding server (`pci apple-embed-server`) using the GPU; Docker is still useful for Postgres. |
+| Apple Silicon | MLX | Native MLX embedding server (`pci embed apple`) using the GPU; Docker is still useful for Postgres. |
 | AMD Ryzen AI NPU | Lemonade FLM | Experimental; requires supported XDNA hardware, driver, and firmware. |
 | AMD GPU | llama.cpp ROCm | Uses the `amdgpu` Compose profile. |
 | NVIDIA GPU | llama.cpp CUDA | Requires the NVIDIA driver and NVIDIA Container Toolkit. |
@@ -161,7 +161,7 @@ core CLI package directly from a checkout:
 
 ```sh
 nix build
-nix run .#pci-doctor -- --skip-db --embedding skip
+nix run . -- doctor --skip-db --embedding skip
 nix develop
 ```
 
@@ -181,8 +181,8 @@ nix profile remove <index>
 The Nix package intentionally keeps the Nix closure focused on the
 CLI/MCP/indexing commands, Python runtime dependencies, and bundled Compose
 assets. Heavy embedding runtimes are not added as host-native Nix dependencies.
-Use `pci-doctor --start-db` for the bundled database, then either index
-text-only with `pci-index --no-embed .` or configure a trusted
+Use `pci doctor --start-db` for the bundled database, then either index
+text-only with `pci index --no-embed .` or configure a trusted
 OpenAI-compatible remote embedding endpoint explicitly:
 
 ```sh
@@ -199,11 +199,11 @@ editing installed package files:
 
 ```sh
 export PCI_COMPOSE_FILE=/path/to/docker-compose.yml
-pci-doctor --start-db
+pci doctor --start-db
 ```
 
-`pci-doctor --clean` stops local services, removes the bundled database volume,
-removes generated Compose cache files, and removes the generated `pci-index`
+`pci doctor --clean` stops local services, removes the bundled database volume,
+removes generated Compose cache files, and removes the generated `pci index`
 user config. `make tool-uninstall` runs that cleanup first, then uninstalls the
 `uv tool` command shims.
 
@@ -211,11 +211,11 @@ The full list of installed commands lives in [docs/PUBLIC_API.md](docs/PUBLIC_AP
 
 ## MCP Setup
 
-Point your MCP client at the installed `pci-mcp` command. To print
+Point your MCP client at the installed `pci` command with the `mcp` argument. To print
 project-scoped read-only config and required environment exports:
 
 ```sh
-pci-index --init-db --mcp-config codex .
+pci index --init-db --mcp-config codex .
 ```
 
 `--mcp-config` also supports `claude`, `opencode`, `vscode`, `copilot`, `cline`,
@@ -232,15 +232,15 @@ not just this one.
 
 ## Indexing
 
-`pci-index .` indexes the current Git repository. Pass multiple repo paths to
+`pci index .` indexes the current Git repository. Pass multiple repo paths to
 index a workspace:
 
 ```sh
 cd /path/to/workspace
-pci-index service-api web-ui shared-lib
+pci index service-api web-ui shared-lib
 ```
 
-`pci-index` infers a collection name from the paths. MCP tool filters then use
+`pci index` infers a collection name from the paths. MCP tool filters then use
 repo names like `service-api`, not absolute filesystem paths. See
 [docs/MCP_SETUP.md](docs/MCP_SETUP.md) for the collection model.
 
@@ -251,18 +251,18 @@ the indexed repo paths are picked up automatically.
 To reset one repo's indexed data and rebuild it:
 
 ```sh
-pci-index --reset .
+pci index --reset .
 ```
 
-For advanced flags, see `pci-index --help`.
+For advanced flags, see `pci index --help`.
 
 ## Embeddings And Privacy
 
 Embeddings power semantic search. Local CPU, NPU, and GPU embedding services all
 publish the same default endpoint at `http://127.0.0.1:18081/v1/embeddings`.
-Run only one local embedding service at a time. `pci-doctor --start` starts the
+Run only one local embedding service at a time. `pci doctor --start` starts the
 bundled database and picks the best available local embedding path.
-`pci-doctor --start-db` starts only the bundled pgvector database, which is the
+`pci doctor --start-db` starts only the bundled pgvector database, which is the
 better default when embeddings come from a remote provider or should be skipped.
 Default local models download on first run.
 

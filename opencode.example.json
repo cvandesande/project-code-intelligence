@@ -3,7 +3,7 @@
   "mcp": {
     "project-code-intelligence": {
       "type": "local",
-      "command": [".venv/bin/pci-mcp"],
+      "command": [".venv/bin/pci", "mcp"],
       "enabled": true
     }
   }

@@ -60,18 +60,9 @@
             description = "MCP server and ingestion toolkit for a Postgres/pgvector code-intelligence database.";
             homepage = "https://github.com/cvandesande/project-code-intelligence";
             license = lib.licenses.mit;
-            mainProgram = "pci-doctor";
+            mainProgram = "pci";
           };
         };
-      commandNames = [
-        "pci-context"
-        "pci-doctor"
-        "pci-embedding-bench"
-        "pci-index"
-        "pci-ingest-code"
-        "pci-mcp"
-        "pci-mcp-smoke"
-      ];
     in
     {
       packages = forAllSystems (system:
@@ -86,14 +77,15 @@
       apps = forAllSystems (system:
         let
           package = self.packages.${system}.default;
-          mkApp = name: {
+          pciApp = {
             type = "app";
-            program = "${package}/bin/${name}";
-            meta.description = "Run ${name}.";
+            program = "${package}/bin/pci";
+            meta.description = "Run pci (use subcommands: index, doctor, mcp, ...).";
           };
         in
-        (lib.genAttrs commandNames mkApp) // {
-          default = mkApp "pci-doctor";
+        {
+          pci = pciApp;
+          default = pciApp;
         });
 
       checks = forAllSystems (system:
@@ -110,7 +102,7 @@
             ''
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
-              pci-doctor --skip-db --embedding skip --json > "$out"
+              pci doctor --skip-db --embedding skip --json > "$out"
             '';
         });
 

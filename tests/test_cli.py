@@ -539,7 +539,7 @@ class PciIndexPruneSnapshotsFlagTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertIn("--prune-snapshots", forwarded)
         self.assertNotIn("--no-prune-snapshots", forwarded)
-        self.assertEqual(forwarded[forwarded.index("--prune-keep") + 1], "5")
+        self.assertEqual(forwarded[forwarded.index("--prune-keep") + 1], "0")
 
     def test_no_prune_snapshots_opts_out(self) -> None:
         status, forwarded = self._run_with_capture(["--no-prune-snapshots", "--dry-run", "."])

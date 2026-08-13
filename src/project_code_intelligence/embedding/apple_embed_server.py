@@ -75,7 +75,7 @@ def _is_running(pid: int) -> bool:
 
 
 def apple_embed_server_is_running() -> bool:
-    """Return True if a pci apple-embed-server daemon is currently running."""
+    """Return True if a pci embed apple daemon is currently running."""
     pid = _read_pid(APPLE_EMBED_SERVER_PID_FILE)
     return pid is not None and _is_running(pid)
 
@@ -281,7 +281,7 @@ def _serve() -> None:
     server = AppleEmbedHTTPServer(
         (host, port), AppleEmbedHandler, model=model, tokenizer=tokenizer, model_name=model_name
     )
-    _err(f"pci apple-embed-server ready on http://{host}:{port}")
+    _err(f"pci embed apple ready on http://{host}:{port}")
     _ = sys.stderr.flush()
     try:
         server.serve_forever()
@@ -303,7 +303,7 @@ def main() -> None:
 
     pid = _read_pid(APPLE_EMBED_SERVER_PID_FILE)
     if pid is not None and _is_running(pid):
-        _err(f"pci apple-embed-server already running (PID {pid}).")
+        _err(f"pci embed apple already running (PID {pid}).")
         return
 
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -318,7 +318,7 @@ def main() -> None:
             ),
         )
     _ = APPLE_EMBED_SERVER_PID_FILE.write_text(str(proc.pid) + "\n")
-    _err(f"pci apple-embed-server started (PID {proc.pid}). Log: {APPLE_EMBED_SERVER_LOG_FILE}")
+    _err(f"pci embed apple started (PID {proc.pid}). Log: {APPLE_EMBED_SERVER_LOG_FILE}")
 
 
 if __name__ == "__main__":

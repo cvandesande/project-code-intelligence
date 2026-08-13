@@ -20,25 +20,28 @@ if TYPE_CHECKING:
 # from paying for embedding-backend dependencies it never touches.
 _COMMANDS: dict[str, tuple[str, str, list[str]]] = {
     "index": ("project_code_intelligence.cli", "index_main", []),
-    "analyze": ("project_code_intelligence.analyze", "main", []),
-    "audit": ("project_code_intelligence.analyze", "main", ["audit"]),
+    "audit": ("project_code_intelligence.audit", "audit_main", []),
     "doctor": ("project_code_intelligence.doctor", "main", []),
     "hook": ("project_code_intelligence.hooks.cli", "main", []),
-    "serve": ("project_code_intelligence.server", "main", []),
+    "mcp": ("project_code_intelligence.server", "main", []),
     "evidence": ("project_code_intelligence.evidence", "main", []),
     "context": ("project_code_intelligence.context", "main", []),
-    "ingest": ("project_code_intelligence.ingest_code_intel", "cli_main", []),
-    "bench": ("project_code_intelligence.embedding.bench", "main", []),
     "smoke": ("project_code_intelligence.cli", "mcp_smoke_main", []),
     "status": ("project_code_intelligence.status_cli", "main", []),
-    "llama-embed": ("project_code_intelligence.embedding.llama", "main", []),
-    "apple-embed-server": ("project_code_intelligence.embedding.apple_embed_server", "main", []),
-    "fastembed-server": ("project_code_intelligence.embedding.fastembed_server", "main", []),
 }
 
 # `pci services <verb>` translates to the doctor flags that already start/stop
 # the local database and embedding backend.
 _SERVICES = {"start": ["--start"], "stop": ["--stop"], "status": []}
+
+# `pci embed <backend>` translates to the module/attribute that runs each
+# embedding daemon or helper.
+_EMBED: dict[str, tuple[str, str]] = {
+    "apple": ("project_code_intelligence.embedding.apple_embed_server", "main"),
+    "fastembed": ("project_code_intelligence.embedding.fastembed_server", "main"),
+    "llama": ("project_code_intelligence.embedding.llama", "main"),
+    "bench": ("project_code_intelligence.embedding.bench", "main"),
+}
 
 
 def resolve(command: str, rest: list[str]) -> tuple[tuple[str, str, list[str]], list[str]] | None:
@@ -48,12 +51,25 @@ def resolve(command: str, rest: list[str]) -> tuple[tuple[str, str, list[str]], 
         if flags is None:
             return None
         return ("project_code_intelligence.doctor", "main", flags), rest[1:]
+    if command == "embed":
+        backend = rest[0] if rest else ""
+        entry = _EMBED.get(backend)
+        if entry is None:
+            return None
+        module_name, attr = entry
+        return (module_name, attr, []), rest[1:]
     entry = _COMMANDS.get(command)
     return (entry, rest) if entry is not None else None
 
 
 def _usage(stream: IO[str]) -> None:
-    lines = "\n  ".join(sorted([*_COMMANDS, "services (start|stop|status)"]))
+    lines = "\n  ".join(
+        sorted([
+            *_COMMANDS,
+            "services (start|stop|status)",
+            "embed (apple|fastembed|llama|bench)",
+        ])
+    )
     _ = stream.write(f"usage: pci <command> [args...]\n\ncommands:\n  {lines}\n")
 
 

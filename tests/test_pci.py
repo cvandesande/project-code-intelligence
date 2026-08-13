@@ -44,3 +44,41 @@ class PciDispatchTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             code = pci.main(["hook", "install", "--agent", "claude", "--project", tmp, "--dry-run", "--color", "never"])
         self.assertEqual(code, 0)
+
+    def test_audit_resolves_to_audit_main_directly(self) -> None:
+        self.assertEqual(
+            pci.resolve("audit", ["--json"]),
+            (("project_code_intelligence.audit", "audit_main", []), ["--json"]),
+        )
+
+    def test_embed_backends_map_to_their_modules(self) -> None:
+        self.assertEqual(
+            pci.resolve("embed", ["apple"]),
+            (("project_code_intelligence.embedding.apple_embed_server", "main", []), []),
+        )
+        self.assertEqual(
+            pci.resolve("embed", ["fastembed"]),
+            (("project_code_intelligence.embedding.fastembed_server", "main", []), []),
+        )
+        self.assertEqual(
+            pci.resolve("embed", ["llama"]),
+            (("project_code_intelligence.embedding.llama", "main", []), []),
+        )
+        self.assertEqual(
+            pci.resolve("embed", ["bench", "--repeat", "3"]),
+            (("project_code_intelligence.embedding.bench", "main", []), ["--repeat", "3"]),
+        )
+
+    def test_embed_unknown_backend_fails(self) -> None:
+        self.assertIsNone(pci.resolve("embed", ["unknown"]))
+        self.assertIsNone(pci.resolve("embed", []))
+
+    def test_removed_commands_are_rejected(self) -> None:
+        for command in ("analyze", "llama-embed", "apple-embed-server", "fastembed-server", "bench", "ingest", "serve"):
+            self.assertIsNone(pci.resolve(command, []))
+
+    def test_mcp_resolves_to_the_server_entry_point(self) -> None:
+        self.assertEqual(
+            pci.resolve("mcp", []),
+            (("project_code_intelligence.server", "main", []), []),
+        )
