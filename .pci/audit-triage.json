@@ -1,0 +1,661 @@
+{
+  "candidates": {
+    "redundancy-03e48f791ef5": {
+      "members": [
+        "bounded_brace_body src/project_code_intelligence/parsers/core.py",
+        "bounded_brace_body_from_open src/project_code_intelligence/parsers/javascript.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-07a102dff865": {
+      "members": [
+        "_parser src/project_code_intelligence/rulepack_cli.py",
+        "parser src/project_code_intelligence/doctor/cli.py",
+        "parser src/project_code_intelligence/embedding/bench.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-0c40d05c0c95": {
+      "members": [
+        "normalize_github_repo src/project_code_intelligence/rocm_bundles.py",
+        "normalize_release_tag src/project_code_intelligence/rocm_bundles.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-0e461c8555ef": {
+      "members": [
+        "_strip_pci_groups src/project_code_intelligence/hooks/install.py",
+        "_strip_target_groups src/project_code_intelligence/hooks/install.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-17386acd5f98": {
+      "members": [
+        "_compact_edge src/project_code_intelligence/mcp/formatting.py",
+        "compact_file src/project_code_intelligence/mcp/formatting.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-22014d1cd8d7": {
+      "members": [
+        "rust_local_closure_binding_names src/project_code_intelligence/parsers/cfamily.py",
+        "rust_pattern_binding_names src/project_code_intelligence/parsers/cfamily.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-25324dcc5e6e": {
+      "members": [
+        "_snapshot_detail src/project_code_intelligence/status_cli.py",
+        "_snapshot_line src/project_code_intelligence/mcp_smoke_render.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-2bf163476303": {
+      "members": [
+        "inferred_collection_for_repo_paths src/project_code_intelligence/cli.py",
+        "inferred_database_scope_path_for_repo_paths src/project_code_intelligence/cli.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-30544690ca7b": {
+      "members": [
+        "source_path_prefix_pattern src/project_code_intelligence/mcp/filters.py",
+        "source_path_prefix_suffix_pattern src/project_code_intelligence/mcp/filters.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-30878e77706b": {
+      "members": [
+        "semantic_boost_terms src/project_code_intelligence/mcp/semantic.py",
+        "semantic_query_terms src/project_code_intelligence/mcp/semantic.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-30a57c1a376c": {
+      "members": [
+        "database_url_dbname src/project_code_intelligence/config.py",
+        "database_url_defines_database src/project_code_intelligence/config.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-32f1ab85d442": {
+      "members": [
+        "check_tables_exist src/project_code_intelligence/storage/check.py",
+        "code_intel_tables_exist src/project_code_intelligence/mcp/db.py",
+        "table_exists src/project_code_intelligence/doctor/common.py",
+        "table_regclass_exists src/project_code_intelligence/mcp/db.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-33a02d8c42fb": {
+      "members": [
+        "make_code_record src/project_code_intelligence/records.py",
+        "make_module_record src/project_code_intelligence/records.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-36665df4dd2c": {
+      "members": [
+        "_files_row_text src/project_code_intelligence/progress.py",
+        "_sarif_row_text src/project_code_intelligence/progress.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-36efe21a7ab0": {
+      "members": [
+        "_render_outcome src/project_code_intelligence/hooks/cli.py",
+        "render_pretty src/project_code_intelligence/status_cli.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-381e66aec577": {
+      "members": [
+        "_as_object src/project_code_intelligence/hooks/install.py",
+        "as_dict src/project_code_intelligence/console_ui.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-3cb99de55231": {
+      "members": [
+        "optional_bool src/project_code_intelligence/mcp/protocol.py",
+        "optional_int src/project_code_intelligence/mcp/protocol.py",
+        "optional_text src/project_code_intelligence/mcp/protocol.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-4068b862b88e": {
+      "members": [
+        "_sarif_warning_counts src/project_code_intelligence/progress.py",
+        "sarif_artifact_uri src/project_code_intelligence/sarif/parse.py",
+        "sarif_artifact_uri_base_id src/project_code_intelligence/sarif/parse.py",
+        "sarif_description_text src/project_code_intelligence/sarif/parse.py",
+        "sarif_message_text src/project_code_intelligence/sarif/parse.py",
+        "sarif_original_uri_base_ids src/project_code_intelligence/sarif/parse.py",
+        "sarif_path_mappings src/project_code_intelligence/sarif/render.py",
+        "sarif_primary_path_mapping src/project_code_intelligence/sarif/render.py",
+        "sarif_rule_id src/project_code_intelligence/sarif/parse.py",
+        "sarif_tool_metadata src/project_code_intelligence/sarif/parse.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-49eba77767de": {
+      "members": [
+        "endpoint_is_local src/project_code_intelligence/embedding/endpoint.py",
+        "endpoint_is_remote src/project_code_intelligence/doctor/embeddings.py",
+        "endpoint_is_remote src/project_code_intelligence/embedding/framework.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-4c5856821857": {
+      "members": [
+        "RuntimeMetrics.add_embedding_inputs src/project_code_intelligence/runtime.py",
+        "add_repo_ingest_metrics src/project_code_intelligence/ingest_code_intel.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-5161ba7990e2": {
+      "members": [
+        "format_edges src/project_code_intelligence/mcp/formatting.py",
+        "format_record_batch_response src/project_code_intelligence/mcp/records.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-5d00d962775b": {
+      "members": [
+        "_verbose_edge src/project_code_intelligence/mcp/formatting.py",
+        "verbose_file src/project_code_intelligence/mcp/formatting.py",
+        "verbose_record src/project_code_intelligence/mcp/formatting.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-67ccca4c263b": {
+      "members": [
+        "classification_bool src/project_code_intelligence/inventory.py",
+        "classification_text src/project_code_intelligence/inventory.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-69be10138547": {
+      "members": [
+        "coerce_int src/project_code_intelligence/analyze.py",
+        "coerce_str src/project_code_intelligence/analyze.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-70fb79021fa8": {
+      "members": [
+        "unique_limited src/project_code_intelligence/language_profiles/base.py",
+        "unique_sources src/project_code_intelligence/power.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-733191a80064": {
+      "members": [
+        "parse_sarif_code_flows src/project_code_intelligence/sarif/parse.py",
+        "parse_sarif_result src/project_code_intelligence/sarif/parse.py",
+        "sarif_rule_items src/project_code_intelligence/sarif/parse.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-74e58c6b7488": {
+      "members": [
+        "search_mode src/project_code_intelligence/mcp/search.py",
+        "search_query_mode src/project_code_intelligence/mcp/search.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-78d93855a704": {
+      "members": [
+        "database_url_with_credentials src/project_code_intelligence/config.py",
+        "database_url_with_dbname src/project_code_intelligence/config.py",
+        "database_url_without_credentials src/project_code_intelligence/config.py",
+        "database_url_without_credentials_or_dbname src/project_code_intelligence/config.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-8260f9873e48": {
+      "members": [
+        "print_embed_only_report src/project_code_intelligence/ingest_code_intel.py",
+        "print_init_db_report src/project_code_intelligence/ingest_code_intel.py",
+        "print_reset_only_report src/project_code_intelligence/ingest_code_intel.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-86f07052f2a4": {
+      "members": [
+        "_inject_edge_repo_paths src/project_code_intelligence/mcp/formatting.py",
+        "_inject_repo_path src/project_code_intelligence/mcp/formatting.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-8dfa15bb868e": {
+      "members": [
+        "_cache_root src/project_code_intelligence/process.py",
+        "quadlet_unit_dir src/project_code_intelligence/process.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-928b40146aec": {
+      "members": [
+        "scoped_collection_repo_clauses src/project_code_intelligence/mcp/filters.py",
+        "scoped_snapshot_table_collection_repo_clauses src/project_code_intelligence/mcp/filters.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-9a62df7f5414": {
+      "members": [
+        "_insert_static_code_flow_steps src/project_code_intelligence/storage/static.py",
+        "_insert_static_finding src/project_code_intelligence/storage/static.py",
+        "_insert_static_locations src/project_code_intelligence/storage/static.py",
+        "_insert_static_rule src/project_code_intelligence/storage/static.py",
+        "_insert_static_run src/project_code_intelligence/storage/static.py",
+        "insert_snapshot src/project_code_intelligence/storage/core.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-9a6a8265c658": {
+      "members": [
+        "js_symbol_records src/project_code_intelligence/parsers/javascript.py",
+        "make_symbol_chunk src/project_code_intelligence/parsers/core.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-9a9b078b035a": {
+      "members": [
+        "path_mapping_for_repo_path src/project_code_intelligence/sarif/paths.py",
+        "source_path_known_or_exists src/project_code_intelligence/sarif/paths.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-a09993e07eea": {
+      "members": [
+        "rust_doc_fence_boundary src/project_code_intelligence/parsers/cfamily.py",
+        "rust_test_attribute_before src/project_code_intelligence/parsers/cfamily.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-a32e2ed32ab5": {
+      "members": [
+        "_add_live_edges_row src/project_code_intelligence/progress.py",
+        "_add_live_files_row src/project_code_intelligence/progress.py",
+        "_add_live_records_row src/project_code_intelligence/progress.py",
+        "_add_live_workers_row src/project_code_intelligence/progress.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-a8caf6259bba": {
+      "members": [
+        "_postgres_admin_check_settings src/project_code_intelligence/doctor/database.py",
+        "postgres_admin_target_fallback_settings src/project_code_intelligence/ingest_code_intel.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-b42b71a8ad96": {
+      "members": [
+        "RuntimeMetrics.add_embedding_usage src/project_code_intelligence/runtime.py",
+        "_add_database_role_rows src/project_code_intelligence/progress.py",
+        "_add_live_write_op_row src/project_code_intelligence/progress.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-b56a6b7c7c46": {
+      "members": [
+        "parse_embedding_items src/project_code_intelligence/embedding/endpoint.py",
+        "parse_embedding_response src/project_code_intelligence/embedding/bench.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-b761c40b4880": {
+      "members": [
+        "create_database_sql src/project_code_intelligence/db.py",
+        "create_index_admin_role_sql src/project_code_intelligence/db.py",
+        "create_role_sql src/project_code_intelligence/db.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-b922594609c9": {
+      "members": [
+        "scoped_snapshot_clauses src/project_code_intelligence/mcp/filters.py",
+        "scoped_snapshot_table_clauses src/project_code_intelligence/mcp/filters.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-c001aabe3649": {
+      "members": [
+        "embedding_config_endpoint src/project_code_intelligence/doctor/output.py",
+        "embedding_response_model src/project_code_intelligence/doctor/output.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-c191caa8537f": {
+      "members": [
+        "postgres_bootstrap_role_password src/project_code_intelligence/db.py",
+        "project_database_role_password src/project_code_intelligence/db.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-c3bab80c4830": {
+      "members": [
+        "install_claude src/project_code_intelligence/hooks/install.py",
+        "install_codex src/project_code_intelligence/hooks/install.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-c5480c07342b": {
+      "members": [
+        "json_array src/project_code_intelligence/sarif/parse.py",
+        "json_object src/project_code_intelligence/sarif/parse.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-c54d15e9a63d": {
+      "members": [
+        "_row_str src/project_code_intelligence/mcp/formatting.py",
+        "_row_text src/project_code_intelligence/mcp/formatting.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-c6c652025c32": {
+      "members": [
+        "_check_apple_metal src/project_code_intelligence/doctor/hardware.py",
+        "_check_darwin_npu src/project_code_intelligence/doctor/hardware.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-ca731915c97b": {
+      "members": [
+        "semantic_generated_distance_penalty src/project_code_intelligence/mcp/semantic.py",
+        "semantic_non_source_distance_penalty src/project_code_intelligence/mcp/semantic.py",
+        "semantic_structural_symbol_distance_penalty src/project_code_intelligence/mcp/semantic.py",
+        "semantic_validation_distance_penalty src/project_code_intelligence/mcp/semantic.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-d57027078890": {
+      "members": [
+        "_read_pid src/project_code_intelligence/embedding/apple_embed_server.py",
+        "read_int src/project_code_intelligence/power.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-d5a0a12d1ac0": {
+      "members": [
+        "alter_index_admin_role_sql src/project_code_intelligence/db.py",
+        "alter_role_password_sql src/project_code_intelligence/db.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-dc3cbb8957c6": {
+      "members": [
+        "_section_table src/project_code_intelligence/doctor/output.py",
+        "section_grid src/project_code_intelligence/console_ui.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-dee06dfaef57": {
+      "members": [
+        "_add_edges_row src/project_code_intelligence/mcp_smoke_render.py",
+        "_add_files_row src/project_code_intelligence/mcp_smoke_render.py",
+        "_add_records_row src/project_code_intelligence/mcp_smoke_render.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-e1211e8b2ca8": {
+      "members": [
+        "_format_seconds src/project_code_intelligence/progress.py",
+        "format_duration src/project_code_intelligence/runtime.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-e205d6b2c3f7": {
+      "members": [
+        "resolve_absolute_sarif_source_path src/project_code_intelligence/sarif/paths.py",
+        "resolve_relative_sarif_source_path src/project_code_intelligence/sarif/paths.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-e46b71456494": {
+      "members": [
+        "local_endpoint_health_payload src/project_code_intelligence/embedding/endpoint.py",
+        "local_endpoint_listed_model src/project_code_intelligence/embedding/endpoint.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-e5a904ef3611": {
+      "members": [
+        "JsonEmitter.emit src/project_code_intelligence/progress.py",
+        "write_response src/project_code_intelligence/mcp/transport.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-e812d7c005fb": {
+      "members": [
+        "grant_project_database_access_privileges src/project_code_intelligence/db.py",
+        "grant_project_database_object_privileges src/project_code_intelligence/db.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-f3354fac2773": {
+      "members": [
+        "_ensure_index_admin_role src/project_code_intelligence/db.py",
+        "_ensure_login_role src/project_code_intelligence/db.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-f97b3cabbe4f": {
+      "members": [
+        "_string_list src/project_code_intelligence/progress.py",
+        "string_items src/project_code_intelligence/parsers/core.py",
+        "string_list src/project_code_intelligence/code_profiles/example.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-fccd23ea03f4": {
+      "members": [
+        "_path_is_current_directory src/project_code_intelligence/cli.py",
+        "_path_to_repo src/project_code_intelligence/cli.py",
+        "configured_database_scope_path src/project_code_intelligence/config.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    },
+    "redundancy-fe07f579f602": {
+      "members": [
+        "_as_list src/project_code_intelligence/hooks/install.py",
+        "as_list src/project_code_intelligence/console_ui.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-14T23:37:01+00:00"
+    }
+  },
+  "generator": {
+    "name": "pci audit",
+    "version": "0.1.0"
+  },
+  "updated_at": "2026-08-14T23:37:01+00:00",
+  "version": 2
+}
