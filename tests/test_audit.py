@@ -11,7 +11,7 @@ from unittest import mock
 
 from typing_extensions import override
 
-from project_code_intelligence import analyze, audit, db
+from project_code_intelligence import analyze, audit, audit_triage, db
 from project_code_intelligence.check_core import BaselineEntry
 
 if TYPE_CHECKING:
@@ -73,6 +73,7 @@ class SplitGroupsTests(unittest.TestCase):
 def _result() -> audit.AuditResult:
     return audit.AuditResult(
         label="c/r",
+        collection="c",
         repo="r",
         snapshot_id=1,
         staleness=None,
@@ -107,7 +108,14 @@ class RenderTests(unittest.TestCase):
         redundancy = cast("dict[str, object]", payload["redundancy"])
         group = cast("list[object]", redundancy["near_certain"])[0]
         # Members collapse to one string each; scores with no measured signal are omitted.
-        self.assertEqual(group, {"max_text": 1.0, "members": ["x x.py:1-5", "y y.py:1-5"]})
+        self.assertEqual(
+            group,
+            {
+                "id": audit_triage.candidate_id(_result().redundancy.groups[0], "c", "r"),
+                "max_text": 1.0,
+                "members": ["x x.py:1-5", "y y.py:1-5"],
+            },
+        )
         self.assertNotIn("evidence", rendered)
 
     def test_line_style_smoke(self) -> None:
@@ -115,6 +123,37 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(audit.line_style("commit abc -- current, indexed 0h01m ago"), "green")
         self.assertEqual(audit.line_style("commit abc -- stale"), "red")
         self.assertIsNone(audit.line_style("    x  x.py:1"))
+
+
+class ArgumentValidationTests(unittest.TestCase):
+    def test_invalid_triage_flags_fail_before_database_access(self) -> None:
+        with mock.patch.object(audit, "_load_audit_results") as load:
+            self.assertEqual(audit.audit_main(["--candidate", "redundancy-example"]), 2)
+        load.assert_not_called()
+
+    def test_init_requires_explicit_full_triage(self) -> None:
+        with mock.patch.object(audit, "_load_audit_results") as load:
+            self.assertEqual(audit.audit_main(["--init-triage"]), 2)
+        load.assert_not_called()
+
+    def test_full_triage_selects_exhaustive_limit(self) -> None:
+        def assert_limit(parsed: audit.AuditNamespace) -> int:
+            self.assertEqual(parsed.limit, audit_triage.FULL_TRIAGE_LIMIT)
+            return 1
+
+        with mock.patch.object(audit, "_load_audit_results", side_effect=assert_limit):
+            self.assertEqual(audit.audit_main(["--full-triage"]), 1)
+
+    def test_default_audit_does_not_create_triage_directory(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            with (
+                _chdir(root),
+                mock.patch.object(audit, "_load_audit_results", return_value=([_result()], [])),
+                mock.patch.object(audit, "_render_audit_output"),
+            ):
+                self.assertEqual(audit.audit_main([]), 0)
+            self.assertFalse((root / ".pci").exists())
 
 
 @contextmanager

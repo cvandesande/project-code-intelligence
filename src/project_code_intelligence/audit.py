@@ -23,11 +23,11 @@ import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from rich.text import Text
 
-from project_code_intelligence import console_ui
+from project_code_intelligence import audit_triage, console_ui
 from project_code_intelligence.analyze import (
     DEFAULT_LIMIT,
     AnalysisOptions,
@@ -96,6 +96,7 @@ class AuditResult:
     """Everything the audit found for one snapshot."""
 
     label: str
+    collection: str
     repo: str
     snapshot_id: int
     staleness: Json | None
@@ -339,6 +340,7 @@ def audit_snapshot(conn: db.DbConnection, snapshot: SnapshotRef, options: Analys
     static_commit, static_counts = static_finding_counts(conn, snapshot)
     return AuditResult(
         label=f"{snapshot.collection}/{snapshot.repo}",
+        collection=snapshot.collection,
         repo=snapshot.repo,
         snapshot_id=snapshot.snapshot_id,
         staleness=snapshot_staleness(conn, snapshot.snapshot_id),
@@ -387,18 +389,19 @@ def _staleness_lines(staleness: Json | None) -> list[str]:
     return out
 
 
-def _group_lines(group: MotifGroup, repo: str) -> list[str]:
+def _group_lines(group: MotifGroup, collection: str, repo: str) -> list[str]:
     max_text = "n/a" if group.max_text is None else f"{group.max_text:.2f}"
     return [
-        f"  {len(group.members)} members (max pairwise text {max_text}):",
+        f"  [{audit_triage.candidate_id(group, collection, repo)}] "
+        f"{len(group.members)} members (max pairwise text {max_text}):",
         *(f"    {m.symbol}  {_rel(m.source_path, repo)}:{m.line_start}" for m in group.members),
     ]
 
 
-def _group_section(groups: list[MotifGroup], repo: str) -> list[str]:
+def _group_section(groups: list[MotifGroup], collection: str, repo: str) -> list[str]:
     if not groups:
         return ["  none"]
-    return [line for group in groups for line in _group_lines(group, repo)]
+    return [line for group in groups for line in _group_lines(group, collection, repo)]
 
 
 def _static_lines(result: AuditResult) -> list[str]:
@@ -450,10 +453,10 @@ def render_result(result: AuditResult) -> list[str]:
         "The candidate list is UNRANKED -- order carries no confidence.",
         "",
         f"Near-certain (contains an exact-text pair, max pairwise text >= {NEAR_CERTAIN_TEXT}):",
-        *_group_section(near, result.repo),
+        *_group_section(near, result.collection, result.repo),
         "",
         "Candidates (unranked; verify in source):",
-        *_group_section(rest, result.repo),
+        *_group_section(rest, result.collection, result.repo),
         "",
         "### Static findings (SARIF passthrough)",
         *_static_lines(result),
@@ -516,7 +519,7 @@ def line_style(line: str) -> str | None:
 _STALENESS_KEYS = ("commit_sha", "head_status", "head_commit", "dirty", "index_age_seconds", "upstream_commits_behind")
 
 
-def _group_to_compact(group: MotifGroup, repo: str) -> dict[str, object]:
+def _group_to_compact(group: MotifGroup, collection: str, repo: str) -> dict[str, object]:
     """Token-minimal group: max pairwise text plus "symbol path:start-end" members.
 
     Everything else group_to_json carries (coherence, evidence, recommendation,
@@ -525,6 +528,7 @@ def _group_to_compact(group: MotifGroup, repo: str) -> dict[str, object]:
     find_redundancy MCP tool.
     """
     return {
+        "id": audit_triage.candidate_id(group, collection, repo),
         "max_text": group.max_text,
         "members": [f"{m.symbol} {_rel(m.source_path, repo)}:{m.line_start}-{m.line_end}" for m in group.members],
     }
@@ -549,8 +553,8 @@ def _result_to_json(result: AuditResult) -> dict[str, object]:
             "functions_analyzed": result.redundancy.functions_analyzed,
             "clones_folded": result.redundancy.clones_folded,
             "near_certain_text_threshold": NEAR_CERTAIN_TEXT,
-            "near_certain": [_group_to_compact(group, result.repo) for group in near],
-            "candidates_unranked": [_group_to_compact(group, result.repo) for group in rest],
+            "near_certain": [_group_to_compact(group, result.collection, result.repo) for group in near],
+            "candidates_unranked": [_group_to_compact(group, result.collection, result.repo) for group in rest],
         },
         "static_findings": {
             "commit_sha": result.static_commit,
@@ -578,6 +582,12 @@ class AuditNamespace(argparse.Namespace):
     limit: int = DEFAULT_LIMIT
     json: bool = False
     gate: bool = False
+    triage_file: Path = audit_triage.DEFAULT_TRIAGE_PATH
+    init_triage: bool = False
+    full_triage: bool = False
+    candidate: str | None = None
+    status: str | None = None
+    reason: str | None = None
     extra: list[str] = field(default_factory=list)
 
 
@@ -595,6 +605,25 @@ def _audit_parser() -> argparse.ArgumentParser:
         help=f"Maximum redundancy groups to report per snapshot (default {DEFAULT_LIMIT}).",
     )
     _ = parser.add_argument("--json", action="store_true", help="Emit JSON instead of the text report.")
+    _ = parser.add_argument(
+        "--triage-file",
+        type=Path,
+        default=audit_triage.DEFAULT_TRIAGE_PATH,
+        help=f"Repository-local triage state (default {audit_triage.DEFAULT_TRIAGE_PATH}).",
+    )
+    _ = parser.add_argument(
+        "--init-triage",
+        action="store_true",
+        help="Add every currently reported redundancy candidate to the triage file as open.",
+    )
+    _ = parser.add_argument(
+        "--full-triage",
+        action="store_true",
+        help="Run an effectively unbounded triage sweep; required to initialize state or infer fixed candidates.",
+    )
+    _ = parser.add_argument("--candidate", help="Stable candidate ID to update in the triage file.")
+    _ = parser.add_argument("--status", choices=("open", "dismissed"), help="Disposition for --candidate.")
+    _ = parser.add_argument("--reason", help="Short reason recorded with --candidate (required for dismissed).")
     _ = parser.add_argument(
         "--gate",
         action="store_true",
@@ -634,35 +663,130 @@ def _load_audit_results(
     return results, gate_results
 
 
-def _render_audit_output(parsed: AuditNamespace, results: list[AuditResult], gate_results: list[GateResult]) -> None:
+def _triage_payload(
+    results: Sequence[AuditResult], entries: dict[str, audit_triage.TriageEntry], *, infer_fixed: bool
+) -> dict[str, list[dict[str, object]]]:
+    current = {
+        candidate: members
+        for result in results
+        for candidate, members in audit_triage.current_candidates(
+            result.redundancy.groups, result.collection, result.repo
+        ).items()
+    }
+    return {
+        status: [
+            {"id": candidate, "reason": entry.reason, "members": list(entry.members)} for candidate, entry in items
+        ]
+        for status, items in audit_triage.summary(current, entries, infer_fixed=infer_fixed).items()
+    }
+
+
+def _triage_lines(payload: dict[str, list[dict[str, object]]]) -> list[str]:
+    lines = ["### Audit triage", ""]
+    for status in ("open", "dismissed", "fixed"):
+        items = payload[status]
+        lines.append(f"{status}: {len(items)}")
+        for item in items:
+            reason = f" -- {item['reason']}" if item["reason"] else ""
+            lines.append(f"  [{item['id']}]{reason}")
+    return lines
+
+
+def _render_audit_output(
+    parsed: AuditNamespace,
+    results: list[AuditResult],
+    gate_results: list[GateResult],
+    triage_entries: dict[str, audit_triage.TriageEntry],
+) -> None:
+    triage_payload = (
+        _triage_payload(results, triage_entries, infer_fixed=parsed.full_triage) if triage_entries else None
+    )
     if parsed.json:
         payload = _results_to_json_payload(results)
+        if triage_payload is not None:
+            payload["triage"] = triage_payload
         if parsed.gate:
             payload["gate"] = {
                 r.label: {"baseline_missing": r.baseline_missing, "regressions": list(r.regressions)}
                 for r in gate_results
             }
         _ = sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str) + "\n")
-    elif console_ui.should_emit_pretty(sys.stdout):
+        return
+    lines = render_lines(results)
+    if triage_payload is not None:
+        lines.extend(_triage_lines(triage_payload))
+    if parsed.gate:
+        lines.extend(render_gate_results(gate_results))
+    if console_ui.should_emit_pretty(sys.stdout):
         console = console_ui.build_console()
-        for line in render_lines(results):
+        for line in lines:
             console.print(Text(line, style=line_style(line) or ""))
-        if parsed.gate:
-            for line in render_gate_results(gate_results):
-                console.print(Text(line, style=line_style(line) or ""))
-    else:
-        _ = sys.stdout.write(render_text(results))
-        if parsed.gate:
-            _ = sys.stdout.write("\n".join(render_gate_results(gate_results)) + "\n")
+        return
+    _ = sys.stdout.write("\n".join(lines) + "\n")
+
+
+def _update_triage(parsed: AuditNamespace, results: Sequence[AuditResult]) -> dict[str, audit_triage.TriageEntry] | int:
+    if not parsed.triage_file.exists() and not parsed.init_triage and parsed.candidate is None:
+        return {}
+    try:
+        current = {
+            candidate: members
+            for result in results
+            for candidate, members in audit_triage.current_candidates(
+                result.redundancy.groups, result.collection, result.repo
+            ).items()
+        }
+        with audit_triage.triage_lock(parsed.triage_file):
+            loaded_entries = audit_triage.load_triage(parsed.triage_file)
+            entries = audit_triage.reconcile(current, loaded_entries)
+            if parsed.init_triage:
+                for candidate_id_value, candidate in current.items():
+                    if candidate_id_value not in entries:
+                        entries[candidate_id_value] = audit_triage.make_entry(candidate, "open", None)
+            if parsed.candidate is not None and parsed.status is not None:
+                candidate = current.get(parsed.candidate)
+                if candidate is None:
+                    _ = sys.stderr.write(f"pci audit: candidate {parsed.candidate!r} is not in the current audit\n")
+                    return 2
+                entries[parsed.candidate] = audit_triage.make_entry(
+                    candidate, cast("audit_triage.TriageStatus", parsed.status), parsed.reason
+                )
+            if entries != loaded_entries:
+                audit_triage.write_triage(parsed.triage_file, entries)
+    except (OSError, ValueError) as exc:
+        _ = sys.stderr.write(f"pci audit: {exc}\n")
+        return 1
+    return entries
+
+
+def _validate_audit_args(parsed: AuditNamespace) -> int | None:
+    if bool(parsed.candidate) != bool(parsed.status):
+        _ = sys.stderr.write("pci audit: --candidate and --status must be used together\n")
+        return 2
+    if parsed.status == "dismissed" and not parsed.reason:
+        _ = sys.stderr.write("pci audit: --reason is required when dismissing a candidate\n")
+        return 2
+    if parsed.init_triage and not parsed.full_triage:
+        _ = sys.stderr.write("pci audit: --init-triage requires --full-triage\n")
+        return 2
+    if parsed.full_triage:
+        parsed.limit = audit_triage.FULL_TRIAGE_LIMIT
+    return None
 
 
 def audit_main(argv: list[str] | None = None) -> int:
     parsed = _audit_parser().parse_args(argv, namespace=AuditNamespace())
+    validation_error = _validate_audit_args(parsed)
+    if validation_error is not None:
+        return validation_error
     loaded = _load_audit_results(parsed)
     if isinstance(loaded, int):
         return loaded
     results, gate_results = loaded
-    _render_audit_output(parsed, results, gate_results)
+    entries = _update_triage(parsed, results)
+    if isinstance(entries, int):
+        return entries
+    _render_audit_output(parsed, results, gate_results, entries)
     if parsed.gate and any(r.regressions for r in gate_results):
         return 1
     return 0
