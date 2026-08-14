@@ -126,12 +126,16 @@ local runtimes and prints the exact startup command for each available path.
 
 | Path | Runtime | Notes |
 | --- | --- | --- |
-| CPU | FastEmbed | Portable default for local testing and machines without accelerator support. |
-| Apple Silicon | MLX | Native MLX embedding server (`pci embed apple`) using the GPU; Docker is still useful for Postgres. |
-| AMD Ryzen AI NPU | Lemonade FLM | Experimental; requires supported XDNA hardware, driver, and firmware. |
-| AMD GPU | llama.cpp ROCm | Uses the `amdgpu` Compose profile. |
-| NVIDIA GPU | llama.cpp CUDA | Requires the NVIDIA driver and NVIDIA Container Toolkit. |
+| CPU | FastEmbed | Portable default for local testing and machines without accelerator support; runs as a Podman Quadlet unit. |
+| Apple Silicon | MLX | Native MLX embedding server (`pci embed apple`) using the GPU; no container involved. |
+| AMD Ryzen AI NPU | Lemonade FLM | Experimental; requires supported XDNA hardware, driver, and firmware; runs as a Podman Quadlet unit. |
+| AMD GPU | llama.cpp ROCm | Runs as a Podman Quadlet unit (`pci doctor --start-embedding`). |
+| NVIDIA GPU | llama.cpp CUDA | Requires the NVIDIA driver and NVIDIA Container Toolkit; runs as a Podman Quadlet unit. |
 | Remote provider | OpenAI-compatible embeddings endpoint | Useful when local embeddings are not desired; source-derived text leaves the machine. |
+
+The bundled Postgres/pgvector database still runs under Docker (or Podman)
+Compose. The local embedding backends above run as Podman Quadlet units,
+managed through `systemctl --user`, not Compose.
 
 ## Installation
 
@@ -203,24 +207,35 @@ pci doctor --start-db
 ```
 
 `pci doctor --clean` stops local services, removes the bundled database volume,
-removes generated Compose cache files, and removes the generated `pci index`
-user config. `make tool-uninstall` runs that cleanup first, then uninstalls the
-`uv tool` command shims.
+removes generated Compose cache files and Quadlet unit files, and removes the
+generated `pci index` user config. `make tool-uninstall` runs that cleanup
+first, then uninstalls the `uv tool` command shims.
 
 The full list of installed commands lives in [docs/PUBLIC_API.md](docs/PUBLIC_API.md).
 
 ## MCP Setup
 
-Point your MCP client at the installed `pci` command with the `mcp` argument. To print
-project-scoped read-only config and required environment exports:
+To create private project-scoped read-only credentials and print a
+credential-free client config:
 
 ```sh
 pci index --init-db --mcp-config codex .
 ```
 
 `--mcp-config` also supports `claude`, `opencode`, `vscode`, `copilot`, `cline`,
-and `zed`. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md) for setup examples,
-database configuration, and collection/repo filter guidance.
+and `zed`. The generated config launches `pci mcp --scope /path/to/project`;
+database credentials are stored under the user's PCI config directory with
+mode `0600`, never in the repository or harness config. Install or remove the
+printed configuration with:
+
+```sh
+pci mcp install --target codex
+pci mcp install --target codex --uninstall
+```
+
+The install command supports every target above. Cline additionally requires
+`--config-path` because its settings file is user-scoped. See
+[docs/MCP_SETUP.md](docs/MCP_SETUP.md) for database and scope guidance.
 
 A ready-to-paste system prompt for the connected agent lives at
 [docs/SYSTEM_PROMPT.md](docs/SYSTEM_PROMPT.md). The design
@@ -229,6 +244,27 @@ cover the prompt-engineering choices behind it (e.g., asking the agent for
 negative-only self-reports instead of token-savings estimates it can't compute
 honestly) — useful reading if you're tuning agent prompts for any MCP server,
 not just this one.
+
+To install PCI's edit evidence and session banner hooks for Codex in the
+current repository:
+
+```sh
+pci hook install --target codex
+```
+
+Codex requires reviewing newly installed command hooks with `/hooks` before
+they run. Add `--user` for `~/.codex/hooks.json`, or `--uninstall` to remove
+only PCI's handlers while preserving other hooks.
+
+Install MCP server configuration without reindexing (`--target` also supports
+`claude`, `opencode`, `vscode`, `copilot`, `cline`, and `zed`):
+
+```sh
+pci mcp install --target codex
+```
+
+The command preserves unrelated Codex TOML and can be reversed with
+`pci mcp install --target codex --uninstall`.
 
 ## Indexing
 

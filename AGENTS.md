@@ -104,9 +104,14 @@ docker compose up -d pgvector
 make integration-smoke
 ```
 
-For local services: `pci-doctor` reports hardware and what's running;
-`pci-doctor --start` brings up the DB and the best embedding backend for
-the host; `pci-doctor --stop` tears everything down.
+For local services: `pci doctor` reports hardware and what's running;
+`pci doctor --start` (or `pci services start`) brings up the DB and the
+best embedding backend for the host; `pci doctor --stop` (or
+`pci services stop`) tears everything down. The local Postgres/pgvector
+database still runs under Docker Compose (`docker-compose.yml`); the
+embedding backends (FastEmbed, Lemonade NPU, llama.cpp ROCm/CUDA) run as
+Podman Quadlet units (`quadlet/`) managed through `systemctl --user`, not
+Compose.
 
 ## Privacy And Publication
 

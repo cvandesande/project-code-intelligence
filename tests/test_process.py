@@ -28,14 +28,21 @@ import tomli
 
 from project_code_intelligence import process
 from project_code_intelligence.process import (
+    QUADLET_UNIT_FILES,
     PopenOptions,
     RunOptions,
     compose_file_args,
     container_engine_name,
     container_engine_path,
+    materialize_quadlet_units,
+    models_dir,
+    podman_path,
     popen,
+    quadlet_unit_dir,
     run,
     run_docker,
+    run_podman,
+    run_systemctl_user,
 )
 
 TomlTable = dict[str, object]
@@ -550,6 +557,157 @@ class ComposeFileArgsTests(unittest.TestCase):
                 result = compose_file_args()
         # Either the bundled file resolves, or the empty fallback is returned.
         self.assertIn(result[:1], ([], ["--project-directory"]))
+
+
+class RunPodmanTests(unittest.TestCase):
+    def test_run_podman_rejects_empty_args(self) -> None:
+        with self.assertRaises(ValueError):
+            _ = run_podman([])
+
+    def test_run_podman_raises_when_podman_is_absent(self) -> None:
+        with (
+            patch.object(process, "podman_path", return_value=None),
+            self.assertRaises(FileNotFoundError),
+        ):
+            _ = run_podman(["ps"])
+
+    def test_run_podman_invokes_run_with_resolved_podman_path(self) -> None:
+        with (
+            patch.object(process, "podman_path", return_value="/usr/bin/podman"),
+            patch.object(process, "run", return_value="completed") as run_mock,
+        ):
+            result = run_podman(["ps"])
+
+        self.assertEqual(result, "completed")
+        run_mock.assert_called_once_with(["/usr/bin/podman", "ps"], None)
+
+    def test_run_podman_refuses_privilege_escalation_flags(self) -> None:
+        with (
+            patch.object(process, "podman_path", return_value="/usr/bin/podman"),
+            patch.object(process, "run") as run_mock,
+            self.assertRaises(ValueError),
+        ):
+            _ = run_podman(["run", "--privileged", "ubuntu"])
+        run_mock.assert_not_called()
+
+    def test_podman_path_resolves_through_which(self) -> None:
+        with patch.object(process.shutil, "which", return_value="/opt/bin/podman") as which_mock:
+            self.assertEqual(podman_path(), "/opt/bin/podman")
+            which_mock.assert_called_once_with("podman")
+
+
+class RunSystemctlUserTests(unittest.TestCase):
+    def test_run_systemctl_user_rejects_empty_args(self) -> None:
+        with self.assertRaises(ValueError):
+            _ = run_systemctl_user([])
+
+    def test_run_systemctl_user_rejects_disallowed_subcommand(self) -> None:
+        with self.assertRaises(ValueError):
+            _ = run_systemctl_user(["enable", "--now", "pci-fastembed.service"])
+
+    def test_run_systemctl_user_raises_when_systemctl_is_absent(self) -> None:
+        with (
+            patch.object(process.shutil, "which", return_value=None),
+            self.assertRaises(FileNotFoundError),
+        ):
+            _ = run_systemctl_user(["start", "pci-fastembed.service"])
+
+    def test_run_systemctl_user_invokes_run_with_user_flag(self) -> None:
+        with (
+            patch.object(process.shutil, "which", return_value="/usr/bin/systemctl"),
+            patch.object(process, "run", return_value="completed") as run_mock,
+        ):
+            result = run_systemctl_user(["start", "pci-fastembed.service"])
+
+        self.assertEqual(result, "completed")
+        run_mock.assert_called_once_with(["/usr/bin/systemctl", "--user", "start", "pci-fastembed.service"], None)
+
+
+class QuadletUnitDirTests(unittest.TestCase):
+    def test_override_env_var_takes_precedence(self) -> None:
+        with patch.dict(os.environ, {"PCI_QUADLET_UNIT_DIR": "/custom/quadlet"}, clear=False):
+            self.assertEqual(quadlet_unit_dir(), Path("/custom/quadlet"))
+
+    def test_falls_back_to_xdg_config_home(self) -> None:
+        env = {"PCI_QUADLET_UNIT_DIR": "", "XDG_CONFIG_HOME": "/home/example/.config"}
+        with patch.dict(os.environ, env, clear=False):
+            self.assertEqual(quadlet_unit_dir(), Path("/home/example/.config/containers/systemd"))
+
+    def test_falls_back_to_home_when_no_xdg_config_home(self) -> None:
+        env = {"PCI_QUADLET_UNIT_DIR": "", "XDG_CONFIG_HOME": "", "HOME": "/home/example"}
+        with patch.dict(os.environ, env, clear=False):
+            self.assertEqual(quadlet_unit_dir(), Path("/home/example/.config/containers/systemd"))
+
+
+class ModelsDirTests(unittest.TestCase):
+    def test_models_dir_is_project_dir_slash_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"PCI_COMPOSE_PROJECT_DIR": tmp}
+            with patch.dict(os.environ, env, clear=False):
+                self.assertEqual(models_dir(), Path(tmp) / "models")
+
+    def test_models_dir_does_not_materialize_the_install_context_cache_dir(self) -> None:
+        """models_dir() must be read-only: no file I/O just from resolving a path,
+        since it's called from diagnostics (`pci doctor`) that run passively."""
+        with tempfile.TemporaryDirectory() as cache_dir:
+            env = {"PCI_COMPOSE_CACHE_DIR": cache_dir, "PCI_COMPOSE_PROJECT_DIR": ""}
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(process, "_source_checkout_root", return_value=None),
+            ):
+                resolved = models_dir()
+
+            self.assertEqual(resolved, Path(cache_dir) / "compose-context" / "models")
+            self.assertFalse((Path(cache_dir) / "compose-context").exists())
+
+    def test_models_dir_falls_back_to_relative_path_when_package_dir_is_unresolvable(self) -> None:
+        with patch.object(process, "_package_dir", return_value=None):
+            self.assertEqual(models_dir(), Path("models"))
+
+
+class QuadletMaterializationTests(unittest.TestCase):
+    def test_materialize_writes_every_unit_with_no_unresolved_placeholders(self) -> None:
+        with tempfile.TemporaryDirectory() as unit_dir:
+            env = {"PCI_QUADLET_UNIT_DIR": unit_dir}
+            with patch.dict(os.environ, env, clear=False):
+                changed = materialize_quadlet_units()
+
+            self.assertEqual(len(changed), len(QUADLET_UNIT_FILES))
+            for filename in QUADLET_UNIT_FILES:
+                content = (Path(unit_dir) / filename).read_text(encoding="utf-8")
+                self.assertNotIn("@", content, f"{filename} has an unresolved placeholder token")
+
+    def test_materialize_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as unit_dir:
+            env = {"PCI_QUADLET_UNIT_DIR": unit_dir}
+            with patch.dict(os.environ, env, clear=False):
+                first = materialize_quadlet_units()
+                second = materialize_quadlet_units()
+
+            self.assertEqual(len(first), len(QUADLET_UNIT_FILES))
+            self.assertEqual(second, [])
+
+    def test_publish_port_and_environment_honor_env_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as unit_dir:
+            env = {
+                "PCI_QUADLET_UNIT_DIR": unit_dir,
+                "PCI_BIND_HOST": "0.0.0.0",  # noqa: S104  # nosec B104
+                "PCI_EMBEDDING_PORT": "19000",
+                "PCI_FASTEMBED_MODEL": "example/custom-model",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                _ = materialize_quadlet_units()
+            content = (Path(unit_dir) / "pci-fastembed.container").read_text(encoding="utf-8")
+
+        self.assertIn("PublishPort=0.0.0.0:19000:18081", content)
+        self.assertIn("Environment=PCI_FASTEMBED_MODEL=example/custom-model", content)
+
+    def test_raises_when_bundled_quadlet_data_is_missing(self) -> None:
+        with (
+            patch.object(process, "_package_dir", return_value=None),
+            self.assertRaises(FileNotFoundError),
+        ):
+            _ = materialize_quadlet_units()
 
 
 if __name__ == "__main__":

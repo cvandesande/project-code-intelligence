@@ -16,7 +16,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from project_code_intelligence import config, console_ui, process
+from project_code_intelligence import config, console_ui
 from project_code_intelligence.embedding.framework import (
     active_embedding_profile as select_active_embedding_profile,
 )
@@ -170,16 +170,15 @@ def active_embedding_profile(by_name: Mapping[str, CheckResult]) -> tuple[str, s
 
 
 def local_embedding_startup_commands(by_name: Mapping[str, CheckResult]) -> list[tuple[str, str]]:
-    engine = process.container_engine_name()
     commands: list[tuple[str, str]] = []
     if ok_result(by_name, "option-cpu") and not ok_result(by_name, "option-gpu-apple"):
-        commands.append(("cpu", f"{engine} compose --profile cpu up -d --build fastembed"))
+        commands.append(("cpu", "systemctl --user start pci-fastembed.service"))
     if ok_result(by_name, "option-npu"):
-        commands.append(("npu", f"{engine} compose --profile npu up -d lemonade-npu"))
+        commands.append(("npu", "systemctl --user start pci-lemonade-npu.service"))
     if ok_result(by_name, "option-gpu-amd") and ok_result(by_name, "gpu-runtime-amd"):
-        commands.append(("amdgpu", f"{engine} compose --profile amdgpu up -d --build llama-rocm"))
+        commands.append(("amdgpu", "systemctl --user start pci-llama-rocm.service"))
     if ok_result(by_name, "option-gpu-nvidia") and ok_result(by_name, "gpu-runtime-nvidia"):
-        commands.append(("nvidia", f"{engine} compose --profile nvidia up -d --build llama-cuda"))
+        commands.append(("nvidia", "systemctl --user start pci-llama-cuda.service"))
     if ok_result(by_name, "option-gpu-apple"):
         commands.append(("apple", "pci embed apple"))
     return commands
@@ -447,15 +446,15 @@ def _next_steps(
         is_local = _target_is_local_postgres()
         if is_local is True:
             steps.extend((
-                ("Start the bundled local database", "pci-doctor --start-db"),
+                ("Start the bundled local database", "pci doctor --start-db"),
                 ("Use an existing Postgres instead", "set PCI_DATABASE_URL"),
             ))
         elif is_local is False:
-            steps.append(("Bootstrap a remote Postgres", "pci-doctor --init-postgres"))
+            steps.append(("Bootstrap a remote Postgres", "pci doctor --init-postgres"))
         else:
             steps.extend((
-                ("Start the bundled local database", "pci-doctor --start-db"),
-                ("Bootstrap a remote Postgres", "pci-doctor --init-postgres"),
+                ("Start the bundled local database", "pci doctor --start-db"),
+                ("Bootstrap a remote Postgres", "pci doctor --init-postgres"),
                 ("Use an existing Postgres instead", "set PCI_DATABASE_URL"),
             ))
     elif issue_names & project_db_names:

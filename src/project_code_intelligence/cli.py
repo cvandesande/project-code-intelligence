@@ -55,9 +55,9 @@ def index_parser() -> argparse.ArgumentParser:
         "--mcp-config",
         choices=ingest_code_intel.MCP_CONFIG_FORMATS,
         help=(
-            "Emit project-scoped read-only pci mcp configuration and required environment exports "
-            "after a successful run. "
-            "Use with --init-db to initialize the DB and print config without indexing."
+            "Store project-scoped read-only MCP credentials privately and emit credential-free client "
+            "configuration after a successful run. "
+            "Use with --init-db to initialize the DB without indexing."
         ),
     )
     _ = parser.add_argument(

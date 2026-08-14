@@ -2,6 +2,8 @@
 
 opencode: write the plugin + lib files under ``<project>/.opencode``.
 Claude Code: merge a ``PreToolUse`` evidence handler into ``settings.json``.
+Codex: merge ``PreToolUse`` evidence and ``SessionStart`` banner handlers into
+``.codex/hooks.json``.
 git: write a ``post-commit`` hook that reindexes the clean committed tree.
 
 Reindex is a git ``post-commit`` concern, not a per-edit one: indexing runs
@@ -30,6 +32,9 @@ _EVIDENCE_ARGS = ["run", "--target", "claude", "--behavior", "evidence"]
 # The banner announces the regime once per session; matcher mirrors session (re)starts.
 _CLAUDE_SESSION_MATCHER = "startup|resume|clear|compact"
 _BANNER_ARGS = ["run", "--target", "claude", "--behavior", "banner"]
+_CODEX_EDIT_MATCHER = "apply_patch"
+_CODEX_EVIDENCE_ARGS = ["run", "--target", "codex", "--behavior", "evidence"]
+_CODEX_BANNER_ARGS = ["run", "--target", "codex", "--behavior", "banner"]
 
 # Managed block markers so post-commit edits never clobber a user's own script.
 _POSTCOMMIT_BEGIN = "# >>> pci-hook reindex (managed) >>>"
@@ -117,6 +122,10 @@ def install_opencode(project: Path, *, uninstall: bool, dry_run: bool) -> Instal
 
 
 def _is_pci_handler(handler: object) -> bool:
+    return _is_pci_handler_for(handler, "claude")
+
+
+def _is_pci_handler_for(handler: object, target: str) -> bool:
     obj = _as_object(handler)
     if obj.get("type") != "command":
         return False
@@ -135,7 +144,7 @@ def _is_pci_handler(handler: object) -> bool:
     for flag in ("--target", "--agent"):  # --agent: configs from pre-consolidation installs
         if flag in args:
             index = args.index(flag)
-            return len(args) > index + 1 and args[index + 1] == "claude"
+            return len(args) > index + 1 and args[index + 1] == target
     return False
 
 
@@ -145,6 +154,17 @@ def _strip_pci_groups(groups: list[object]) -> list[object]:
     for group in groups:
         obj = _as_object(group)
         handlers = [h for h in _as_list(obj.get("hooks")) if not _is_pci_handler(h)]
+        if handlers:
+            obj["hooks"] = handlers
+            cleaned.append(obj)
+    return cleaned
+
+
+def _strip_target_groups(groups: list[object], target: str) -> list[object]:
+    cleaned: list[object] = []
+    for group in groups:
+        obj = _as_object(group)
+        handlers = [h for h in _as_list(obj.get("hooks")) if not _is_pci_handler_for(h, target)]
         if handlers:
             obj["hooks"] = handlers
             cleaned.append(obj)
@@ -234,6 +254,56 @@ def _assign_event(hooks: dict[str, object], event: str, groups: list[object]) ->
         hooks[event] = groups
     else:
         _ = hooks.pop(event, None)
+
+
+# --- Codex ----------------------------------------------------------------------
+
+
+def install_codex(hooks_path: Path, *, uninstall: bool, dry_run: bool) -> InstallOutcome:
+    data = _load_settings(hooks_path)
+    hooks = _as_object(data.get("hooks"))
+    existed = any(
+        _is_pci_handler_for(handler, "codex")
+        for event_groups in hooks.values()
+        for group in _as_list(event_groups)
+        for handler in _as_list(_as_object(group).get("hooks"))
+    )
+    pre = _strip_target_groups(_as_list(hooks.get("PreToolUse")), "codex")
+    session = _strip_target_groups(_as_list(hooks.get("SessionStart")), "codex")
+
+    if uninstall:
+        action = "removed" if existed else "unchanged"
+        rows = (
+            [("PreToolUse", "evidence"), ("SessionStart", "banner")] if existed else [("state", "no pci hooks present")]
+        )
+    else:
+        command = _hook_command()
+        pre.append({
+            "matcher": _CODEX_EDIT_MATCHER,
+            "hooks": [{"type": "command", "command": shlex.join([*command, *_CODEX_EVIDENCE_ARGS])}],
+        })
+        session.append({
+            "matcher": _CLAUDE_SESSION_MATCHER,
+            "hooks": [{"type": "command", "command": shlex.join([*command, *_CODEX_BANNER_ARGS])}],
+        })
+        action = "updated" if existed else "installed"
+        rows = [
+            ("PreToolUse", f"{_CODEX_EDIT_MATCHER} -> evidence"),
+            ("SessionStart", f"{_CLAUDE_SESSION_MATCHER} -> banner"),
+            ("command", " ".join(command)),
+            ("trust", "review the installed commands with /hooks in Codex"),
+        ]
+
+    _assign_event(hooks, "PreToolUse", pre)
+    _assign_event(hooks, "SessionStart", session)
+    if hooks:
+        data["hooks"] = hooks
+    else:
+        _ = data.pop("hooks", None)
+    if not dry_run:
+        hooks_path.parent.mkdir(parents=True, exist_ok=True)
+        _ = hooks_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return InstallOutcome("codex", action, str(hooks_path), rows)
 
 
 # --- git post-commit ------------------------------------------------------------

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import os
 import platform
 import re
 import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from project_code_intelligence import config, process
 from project_code_intelligence.doctor.common import (
@@ -424,44 +423,23 @@ def has_ready_npu(results: Sequence[CheckResult]) -> bool:
 
 def nvidia_container_toolkit_remediation(reason: str) -> str:
     return (
-        f"{reason} Install NVIDIA Container Toolkit, run "
-        "sudo nvidia-ctk runtime configure --runtime=docker, then restart Docker. "
-        f"Guide: {NVIDIA_CONTAINER_TOOLKIT_INSTALL_GUIDE}"
+        f"{reason} Install NVIDIA Container Toolkit, then run "
+        "sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml so Podman can pass the GPU "
+        f"through via CDI. Guide: {NVIDIA_CONTAINER_TOOLKIT_INSTALL_GUIDE}"
     )
 
 
-def docker_has_nvidia_runtime() -> tuple[bool, str | None]:
-    engine_path = process.container_engine_path()
-    if not engine_path:
-        return False, "No container engine (docker or podman) was found."
-    engine_label = process.container_engine_name().capitalize()
-    # podman wires NVIDIA via the Container Device Interface (CDI), not a
-    # docker-style named runtime. Skip the runtime probe and assume the host
-    # is configured correctly; users still see NVIDIA detection elsewhere.
-    if process.container_engine_name() == "podman":
-        return True, None
-    ready = False
-    detail: str | None = None
-    try:
-        proc = process.run(
-            [engine_path, "info", "--format", "{{json .Runtimes}}"],
-            process.RunOptions(capture_output=True, timeout=5, check=False),
-        )
-    except (OSError, process.SubprocessError) as exc:
-        return False, f"{engine_label} runtime check failed: {exc}"
-    if proc.returncode != 0:
-        output = (proc.stderr or proc.stdout).strip()
-        detail = f"{engine_label} runtime check failed: {output}" if output else f"{engine_label} runtime check failed."
-    else:
-        try:
-            runtimes = cast("object", json.loads(proc.stdout))
-        except json.JSONDecodeError:
-            ready = "nvidia" in proc.stdout
-        else:
-            ready = isinstance(runtimes, dict) and "nvidia" in runtimes
-        if not ready:
-            detail = f"{engine_label} did not report an nvidia runtime."
-    return ready, detail
+def podman_has_nvidia_cdi() -> tuple[bool, str | None]:
+    """Whether Podman -- the only engine the GPU embedding containers run under -- is present.
+
+    Podman wires NVIDIA through the Container Device Interface (CDI), not a
+    docker-style named runtime, so there is no runtime-probe equivalent to
+    run here; nvidia-smi/nvidia-ctk/device presence are checked separately
+    by the caller.
+    """
+    if process.podman_path() is None:
+        return False, "podman was not found."
+    return True, None
 
 
 def check_gpu_support(gpus: Sequence[GpuInfo]) -> list[CheckResult]:
@@ -494,7 +472,7 @@ def check_gpu_support(gpus: Sequence[GpuInfo]) -> list[CheckResult]:
                 else "AMD GPU detected, but ROCm container device access may be incomplete.",
                 None
                 if kfd_accessible and dri_accessible
-                else "Check /dev/kfd and /dev/dri permissions before using the amdgpu Compose profile.",
+                else "Check /dev/kfd and /dev/dri permissions before using the amdgpu embedding profile.",
             )
         )
 
@@ -502,21 +480,20 @@ def check_gpu_support(gpus: Sequence[GpuInfo]) -> list[CheckResult]:
         nvidia_smi = shutil.which("nvidia-smi")
         nvidia_ctk = shutil.which("nvidia-ctk")
         nvidia_device_present = Path("/dev/nvidiactl").exists() or any(Path("/dev").glob("nvidia[0-9]*"))
-        docker_runtime_ready, docker_runtime_detail = docker_has_nvidia_runtime()
-        nvidia_ready = bool(nvidia_smi and nvidia_device_present and nvidia_ctk and docker_runtime_ready)
-        engine_label = process.container_engine_name().capitalize()
+        podman_ready, podman_detail = podman_has_nvidia_cdi()
+        nvidia_ready = bool(nvidia_smi and nvidia_device_present and nvidia_ctk and podman_ready)
         if nvidia_ready:
-            message = f"NVIDIA driver, devices, and {engine_label} runtime are ready."
+            message = "NVIDIA driver, devices, and Podman CDI are ready."
             detail = None
         elif not (nvidia_smi and nvidia_device_present):
             message = "NVIDIA GPU detected, but nvidia-smi or /dev/nvidia* was not found."
-            detail = "Install the NVIDIA driver before using the nvidia Compose profile."
+            detail = "Install the NVIDIA driver before using the nvidia embedding profile."
         elif not nvidia_ctk:
             message = "NVIDIA GPU detected, but nvidia-ctk / NVIDIA Container Toolkit was not found."
-            detail = nvidia_container_toolkit_remediation(f"{engine_label} cannot pass NVIDIA GPUs to containers yet.")
+            detail = nvidia_container_toolkit_remediation("Podman cannot pass NVIDIA GPUs to containers yet.")
         else:
-            message = f"NVIDIA GPU detected, but {engine_label} is not configured with the NVIDIA runtime."
-            reason = f"{docker_runtime_detail} " if docker_runtime_detail else ""
+            message = "NVIDIA GPU detected, but Podman is not ready for NVIDIA CDI passthrough."
+            reason = f"{podman_detail} " if podman_detail else ""
             detail = nvidia_container_toolkit_remediation(reason)
         results.append(
             result(

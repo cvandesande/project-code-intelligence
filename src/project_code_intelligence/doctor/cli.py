@@ -112,11 +112,11 @@ def parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  PCI_DATABASE_URL='postgresql://codeintel:codeintel@127.0.0.1:5433/codeintel?sslmode=prefer' "
-            "pci-doctor\n"
+            "pci doctor\n"
             "  PCI_ALLOW_REMOTE_EMBEDDING=1 "
             "PCI_EMBEDDING_ENDPOINT='https://api.openai.com/v1/embeddings' "
-            "PCI_EMBEDDING_ENDPOINT_MODEL='text-embedding-3-small' pci-doctor\n"
-            "  pci-doctor --start-db\n"
+            "PCI_EMBEDDING_ENDPOINT_MODEL='text-embedding-3-small' pci doctor\n"
+            "  pci doctor --start-db\n"
         ),
     )
     _ = argument_parser.add_argument("--json", action="store_true", help="Print machine-readable JSON results.")
@@ -156,7 +156,7 @@ def parser() -> argparse.ArgumentParser:
         "--stop", action="store_true", help="Stop all local services (database and embedding)."
     )
     _ = argument_parser.add_argument(
-        "--stop-embedding", action="store_true", help="Stop local embedding services (Docker Compose and host-native)."
+        "--stop-embedding", action="store_true", help="Stop local embedding services (Quadlet and host-native)."
     )
     _ = argument_parser.add_argument(
         "--stop-database", action="store_true", help="Stop the local pgvector database container."
@@ -216,19 +216,21 @@ def check_results(args: DoctorArgs, env: config.Env | None = None) -> list[Check
     return results
 
 
-_DOCKER_PROFILES = (
-    "--profile",
-    "db",
-    "--profile",
-    "cpu",
-    "--profile",
-    "npu",
-    "--profile",
-    "amdgpu",
-    "--profile",
-    "nvidia",
+_COMPOSE_DB_PROFILE = ("--profile", "db")
+EMBEDDING_CONTAINER_NAMES = ("fastembed", "lemonade-npu", "llama-rocm", "llama-cuda")
+_EMBEDDING_SERVICE_UNITS: dict[str, str] = {
+    "cpu": "pci-fastembed.service",
+    "npu": "pci-lemonade-npu.service",
+    "amdgpu": "pci-llama-rocm.service",
+    "nvidia": "pci-llama-cuda.service",
+}
+EMBEDDING_VOLUME_NAMES = (
+    "pci-fastembed-models",
+    "pci-lemonade-huggingface",
+    "pci-lemonade-llama",
+    "pci-lemonade-cache",
+    "pci-llamacpp-rocm",
 )
-DOCKER_EMBEDDING_SERVICES = ("fastembed", "lemonade-npu", "llama-rocm", "llama-cuda")
 _HOST_PROCESSES = (
     "pci-embedding-server",
     "project_code_intelligence.embedding.apple_embed_server",
@@ -262,15 +264,13 @@ def _stop_pid_file_process() -> None:
 
 def stop_embedding_services() -> int:
     """Stop all local embedding services and return 0 on success."""
-    # Stop Docker Compose embedding services (ignore errors if not running).
+    # Stop Quadlet-managed embedding services (ignore errors if not running).
     try:
-        _ = process.run_docker(
-            ["compose", *process.compose_file_args(), *_DOCKER_PROFILES, "stop", *DOCKER_EMBEDDING_SERVICES],
-            process.RunOptions(capture_output=True),
-        )
-        write_stdout("Stopped Docker Compose embedding services.")
+        for unit in _EMBEDDING_SERVICE_UNITS.values():
+            _ = process.run_systemctl_user(["stop", unit], process.RunOptions(capture_output=True))
+        write_stdout("Stopped Quadlet embedding services.")
     except FileNotFoundError:
-        write_stdout("docker not found; skipping Docker Compose services.")
+        write_stdout("systemctl not found; skipping Quadlet embedding services.")
 
     _stop_pid_file_process()
 
@@ -289,7 +289,7 @@ def stop_database() -> int:
     """Stop the local pgvector database container and return 0 on success."""
     try:
         _ = process.run_docker(
-            ["compose", *process.compose_file_args(), *_DOCKER_PROFILES, "stop", "pgvector"],
+            ["compose", *process.compose_file_args(), *_COMPOSE_DB_PROFILE, "stop", "pgvector"],
             process.RunOptions(capture_output=True),
         )
         write_stdout("Stopped pgvector database container.")
@@ -340,17 +340,47 @@ def _database_summary() -> str | None:
         return None
 
 
+def _remove_quadlet_embedding_state(quadlet_dir: Path) -> None:
+    """Remove Quadlet-managed embedding volumes and generated unit files.
+
+    Containers are already gone by this point: Quadlet's generated units
+    remove their own container on `systemctl stop` (see stop_embedding_services).
+    """
+    try:
+        for volume in EMBEDDING_VOLUME_NAMES:
+            _ = process.run_podman(
+                ["volume", "rm", "-f", f"systemd-{volume}"],
+                process.RunOptions(capture_output=True),
+            )
+        write_stdout("Removed Quadlet embedding volumes.")
+    except FileNotFoundError:
+        write_stdout("podman not found; skipping Quadlet volume removal.")
+
+    removed_units = False
+    for filename in process.QUADLET_UNIT_FILES:
+        target = quadlet_dir / filename
+        if target.exists():
+            target.unlink()
+            removed_units = True
+    if removed_units:
+        write_stdout(f"Removed generated Quadlet unit files from {quadlet_dir}.")
+        with contextlib.suppress(FileNotFoundError):
+            _ = process.run_systemctl_user(["daemon-reload"])
+
+
 def clean_all() -> int:
     """Stop all services and remove containers, volumes, PID files, and generated caches after confirmation."""
     # Gather what will be affected.
     summary = _database_summary()
     compose_cache = process.compose_cache_dir()
+    quadlet_dir = process.quadlet_unit_dir()
     user_config = config.pci_index_user_config_path()
     lines = [
         "This will:",
-        "  - Stop all embedding services (Docker Compose and host-native)",
+        "  - Stop all embedding services (Quadlet and host-native)",
         "  - Stop and remove the pgvector database container and its volume",
         f"  - Remove generated Compose cache at {compose_cache}",
+        f"  - Remove generated Quadlet unit files from {quadlet_dir}",
     ]
     if user_config is not None:
         lines.append(f"  - Remove generated pci-index user config at {user_config}")
@@ -370,13 +400,14 @@ def clean_all() -> int:
             write_stdout("Aborted.")
             return 1
 
-    # 1. Stop embedding services.
+    # 1. Stop embedding services and remove their volumes and unit files.
     _ = stop_embedding_services()
+    _remove_quadlet_embedding_state(quadlet_dir)
 
     # 2. Stop and remove database container + volume.
     try:
         _ = process.run_docker(
-            ["compose", *process.compose_file_args(), *_DOCKER_PROFILES, "down", "-v", "--remove-orphans"],
+            ["compose", *process.compose_file_args(), *_COMPOSE_DB_PROFILE, "down", "-v", "--remove-orphans"],
             process.RunOptions(capture_output=True),
         )
         write_stdout("Removed Docker Compose containers and volumes.")
@@ -408,16 +439,6 @@ def _dispatch_stop(parsed: DoctorArgs) -> int | None:
     if parsed.stop_database:
         return stop_database()
     return None
-
-
-# Compose args for starting each embedding profile (inserted after "compose" and
-# compose_file_args() at the call site).
-_EMBEDDING_START_ARGS: dict[str, list[str]] = {
-    "cpu": ["--profile", "cpu", "up", "-d", "--build", "fastembed"],
-    "npu": ["--profile", "npu", "up", "-d", "lemonade-npu"],
-    "amdgpu": ["--profile", "amdgpu", "up", "-d", "--build", "llama-rocm"],
-    "nvidia": ["--profile", "nvidia", "up", "-d", "--build", "llama-cuda"],
-}
 
 
 def _detect_embedding_options() -> dict[str, CheckResult]:
@@ -462,17 +483,17 @@ def start_embedding_services() -> int:
         # so no separate executable needs to be on PATH.
         apple_embed_server.main()
         return 0
-    start_args = _EMBEDDING_START_ARGS.get(profile)
-    if start_args is None:
+    unit = _EMBEDDING_SERVICE_UNITS.get(profile)
+    if unit is None:
         write_stdout(f"Unknown embedding profile: {profile!r}")
         return 1
     try:
-        _ = process.run_docker(
-            ["compose", *process.compose_file_args(), *start_args],
-            process.RunOptions(),
-        )
+        changed = process.materialize_quadlet_units()
+        if changed:
+            _ = process.run_systemctl_user(["daemon-reload"])
+        _ = process.run_systemctl_user(["start", unit])
     except FileNotFoundError:
-        write_stdout("docker/podman not found; cannot start embedding container.")
+        write_stdout("podman/systemctl not found; cannot start embedding container.")
         return 1
     return 0
 

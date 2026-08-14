@@ -1,0 +1,19 @@
+[Unit]
+Description=project-code-intelligence FastEmbed CPU embedding server
+
+[Container]
+Image=pci-fastembed.build
+ContainerName=fastembed
+@FASTEMBED_ENVIRONMENT@
+PublishPort=@FASTEMBED_PUBLISH_PORT@
+Volume=pci-fastembed-models.volume:/models/fastembed
+HealthCmd=python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18081/healthz', timeout=2).read()"
+HealthInterval=10s
+HealthTimeout=5s
+HealthRetries=30
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target

@@ -87,7 +87,7 @@ _MAX_ADDED = 3
 _TEST_PATH = re.compile(r"(?:^|/)tests?/|(?:^|/)(?:test_[^/]*|[^/]*_test)\.[A-Za-z]+$")
 _TEST_NAME = re.compile(r"^(?:Test|test_)")
 
-Agent = str  # "opencode" | "claude"
+Agent = str  # "opencode" | "claude" | "codex"
 
 
 # --- input coercion -------------------------------------------------------------
@@ -148,6 +148,52 @@ def _edit_fields(agent: Agent, event: dict[str, object]) -> tuple[str, str, str]
         _as_str(event.get("oldString")),
         _as_str(event.get("newString")),
     )
+
+
+def _codex_edits(event: dict[str, object]) -> list[tuple[str, str, str]]:
+    """Extract per-file before/after fragments from a Codex apply_patch envelope."""
+    command = _as_str(_as_object(event.get("tool_input")).get("command"))
+    edits: list[tuple[str, str, str]] = []
+    path = ""
+    mode = ""
+    before: list[str] = []
+    after: list[str] = []
+
+    def finish() -> None:
+        nonlocal path, mode, before, after
+        if not path:
+            return
+        if mode == "delete":
+            edits.append((path, _disk_text(path), ""))
+        else:
+            edits.append((path, "\n".join(before), "\n".join(after)))
+        path, mode, before, after = "", "", [], []
+
+    markers = (
+        ("*** Update File: ", "update"),
+        ("*** Add File: ", "add"),
+        ("*** Delete File: ", "delete"),
+    )
+    for line in command.splitlines():
+        marker = next(((prefix, kind) for prefix, kind in markers if line.startswith(prefix)), None)
+        if marker is not None:
+            finish()
+            prefix, mode = marker
+            path = line.removeprefix(prefix).strip()
+        elif line.startswith("*** Move to: "):
+            path = line.removeprefix("*** Move to: ").strip()
+        elif path and mode != "delete" and line.startswith("+"):
+            after.append(line[1:])
+        elif path and mode == "update" and line.startswith("-"):
+            before.append(line[1:])
+    finish()
+    return edits
+
+
+def _event_edits(agent: Agent, event: dict[str, object]) -> list[tuple[str, str, str]]:
+    if agent == "codex":
+        return _codex_edits(event)
+    return [_edit_fields(agent, event)]
 
 
 # --- evidence block -------------------------------------------------------------
@@ -211,7 +257,7 @@ def _with_practice(block: str) -> str:
 
 
 def _emit_evidence(agent: Agent, block: str, out: IO[str], *, event_name: str) -> None:
-    if agent == "claude":
+    if agent in {"claude", "codex"}:
         # Echo the firing event (PreToolUse/PostToolUse) so hookSpecificOutput matches it.
         payload = {"hookSpecificOutput": {"hookEventName": event_name, "additionalContext": block}}
         _ = out.write(json.dumps(payload))
@@ -228,12 +274,17 @@ def run_evidence(agent: Agent, *, stdin: IO[str] | None = None, stdout: IO[str] 
     in_stream: IO[str] = stdin if stdin is not None else cast("IO[str]", sys.stdin)
     out_stream: IO[str] = stdout if stdout is not None else cast("IO[str]", sys.stdout)
     event = _read_json(in_stream)
-    file_path, old_string, new_string = _edit_fields(agent, event)
-    if not detect.is_source_path(file_path):
-        return 0
     event_name = _as_str(event.get("hook_event_name")) or "PreToolUse"
-    removed = detect.removed_definitions(old_string, new_string)
-    if not removed:
+    blocks: list[str] = []
+    for file_path, old_string, new_string in _event_edits(agent, event):
+        if not detect.is_source_path(file_path):
+            continue
+        removed = detect.removed_definitions(old_string, new_string)
+        if removed:
+            block = _build_block(removed, _MAX_SYMBOLS)
+            if block is not None:
+                blocks.append(block)
+            continue
         # Added names = the removal set with the two sides swapped. A rename shows up on
         # both sides; removal wins, since blast radius is evidence and this is only a nudge.
         added = (
@@ -246,12 +297,9 @@ def run_evidence(agent: Agent, *, stdin: IO[str] | None = None, stdout: IO[str] 
             overflow = f" (+{len(added) - _MAX_ADDED} more)" if len(added) > _MAX_ADDED else ""
             block = _add_side_block(file_path, new_string, added[:_MAX_ADDED], names + overflow)
             if block is not None:
-                _emit_evidence(agent, _with_practice(block), out_stream, event_name=event_name)
-        return 0
-    block = _build_block(removed, _MAX_SYMBOLS)
-    if block is None:
-        return 0
-    _emit_evidence(agent, block, out_stream, event_name=event_name)
+                blocks.append(_with_practice(block))
+    if blocks:
+        _emit_evidence(agent, "\n\n".join(blocks), out_stream, event_name=event_name)
     return 0
 
 
@@ -276,7 +324,7 @@ _BANNER = (
 
 def run_banner(agent: Agent, *, stdout: IO[str] | None = None) -> int:
     out: IO[str] = stdout if stdout is not None else cast("IO[str]", sys.stdout)
-    if agent == "claude":
+    if agent in {"claude", "codex"}:
         payload = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": _BANNER}}
         _ = out.write(json.dumps(payload))
         return 0

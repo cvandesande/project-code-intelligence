@@ -1,0 +1,22 @@
+[Unit]
+Description=project-code-intelligence llama.cpp CUDA embedding server
+
+[Container]
+Image=pci-llama-cuda.build
+ContainerName=llama-cuda
+@CUDA_ENVIRONMENT@
+PublishPort=@CUDA_PUBLISH_PORT@
+AddDevice=nvidia.com/gpu=all
+PodmanArgs=--ipc=host
+Volume=@PROJECT_DIR@/models:/models
+HealthCmd=curl -fsS http://127.0.0.1:18081/v1/models
+HealthInterval=10s
+HealthTimeout=5s
+HealthRetries=30
+HealthStartPeriod=10m
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target

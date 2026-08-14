@@ -1,0 +1,8 @@
+[Unit]
+Description=Build image for the project-code-intelligence llama.cpp CUDA embedding server
+
+[Build]
+File=docker/llamacpp-cuda/Dockerfile
+SetWorkingDirectory=@BUILD_CONTEXT_DIR@
+ImageTag=localhost/pci-llama-cuda:latest
+BuildArg=CUDA_BASE_IMAGE=@PCI_CUDA_BASE_IMAGE@

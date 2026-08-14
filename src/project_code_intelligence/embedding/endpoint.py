@@ -9,7 +9,7 @@ import urllib.error
 from typing import TYPE_CHECKING, cast
 from urllib.parse import urlsplit, urlunsplit
 
-from project_code_intelligence import config, db, http_client, process
+from project_code_intelligence import config, db, http_client
 from project_code_intelligence import runtime as runtime_state
 from project_code_intelligence.embedding.types import EmbeddingEndpointUnavailableError
 from project_code_intelligence.progress import progress_event
@@ -344,12 +344,12 @@ def embed_with_endpoint(endpoint: str, texts: list[str], model: str, *, track_me
 
 
 def embedding_endpoint_hint(endpoint: str, exc: BaseException) -> str:
-    engine = process.container_engine_name()
     return (
         f"Embedding endpoint is not reachable or is not serving embeddings: {endpoint}\n"
         "\n"
-        "For the portable local embedding demo, start FastEmbed from the project-code-intelligence checkout:\n"
-        f"  {engine} compose --profile cpu up -d --build fastembed\n"
+        "For the portable local embedding demo, start FastEmbed via pci doctor:\n"
+        "  pci doctor --start-embedding\n"
+        "  (or directly: systemctl --user start pci-fastembed.service)\n"
         "\n"
         "The FastEmbed service listens on:\n"
         "  http://127.0.0.1:18081/v1/embeddings\n"

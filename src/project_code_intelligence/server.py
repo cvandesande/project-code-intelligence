@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from project_code_intelligence import mcp_credentials, mcp_install
 from project_code_intelligence.mcp.db import code_intel_tables_exist, table_regclass_exists
 from project_code_intelligence.mcp.semantic import query_embedding, vector_literal_dimensions
 from project_code_intelligence.mcp.status import static_status_rows
@@ -39,18 +42,32 @@ _DESCRIPTION = (
 )
 
 
+@dataclass
+class McpNamespace(argparse.Namespace):
+    scope: str | None = None
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pci mcp", description=_DESCRIPTION)
     _ = parser.add_argument("--version", action="version", version=f"pci mcp {server_version()}")
+    _ = parser.add_argument("--scope", help="Load private read-only credentials for this project/workspace path.")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else list(argv)
+    if args and args[0] == "install":
+        return mcp_install.main(args[1:])
     if args:
         # argparse handles --help and --version itself (raising SystemExit) and rejects
         # unknown args. Only enter the stdio loop when nothing was supplied.
-        _ = _parser().parse_args(args)
+        parsed = _parser().parse_args(args, namespace=McpNamespace())
+        if parsed.scope:
+            try:
+                _ = mcp_credentials.load(Path(parsed.scope))
+            except (OSError, ValueError) as exc:
+                _ = sys.stderr.write(f"pci mcp: {exc}\n")
+                return 1
     return stdio_main()
 
 
