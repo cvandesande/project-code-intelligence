@@ -813,6 +813,8 @@ class InstallGitTests(unittest.TestCase):
                 text = hook.read_text(encoding="utf-8")
                 self.assertIn("pci-hook reindex (managed)", text)
                 self.assertIn("--behavior reindex", text)
+                self.assertIn("systemd-run --user --quiet --collect --property=Type=exec --", text)
+                self.assertNotIn(">/dev/null 2>&1 &\n", text)
                 self.assertTrue(os.access(hook, os.X_OK))
 
     def test_install_is_idempotent(self) -> None:
