@@ -16,8 +16,8 @@
       mkPackage = system:
         let
           pkgs = import nixpkgs { inherit system; };
-          python = pkgs.python313;
-          pythonPackages = pkgs.python313Packages;
+          python = pkgs.python314;
+          pythonPackages = pkgs.python314Packages;
         in
         pythonPackages.buildPythonApplication {
           pname = "project-code-intelligence";
@@ -109,7 +109,7 @@
       devShells = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
-          python = pkgs.python313.withPackages (ps: [
+          python = pkgs.python314.withPackages (ps: [
             ps.coverage
             ps.pip
             ps.psycopg
