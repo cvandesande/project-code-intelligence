@@ -1,8 +1,9 @@
+import io
 import json
 import os
 import unittest
 from collections.abc import Generator
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -192,6 +193,74 @@ class CheckMainEndToEndTests(unittest.TestCase):
         sarif_path = self.repo / "out.sarif"
         _write_sarif(sarif_path, rule_id="RULE1", level="warning", line=2)
         with _chdir(self.repo):
+            self.assertEqual(check.check_main(["out.sarif"]), 1)
+
+    def _write_rulepack(self, *, rule_id: str, tier: int, rationale: str) -> None:
+        pack_dir = self.repo / ".pci" / "rulepacks" / "a"
+        pack_dir.mkdir(parents=True)
+        _ = (pack_dir / "rulepack.json").write_text(
+            json.dumps({
+                "name": "sample",
+                "version": "1.0.0",
+                "rules": [
+                    {
+                        "id": rule_id,
+                        "tier": tier,
+                        "description": "desc",
+                        "rationale": rationale,
+                        "producer": {"kind": "ast_grep", "path": "grep.yml"},
+                    }
+                ],
+            }),
+            encoding="utf-8",
+        )
+        _ = (pack_dir / "grep.yml").write_text("id: x\n", encoding="utf-8")
+
+    def test_no_rulepacks_dir_output_is_byte_identical_to_rules_disabled(self) -> None:
+        """Regression guard: when `.pci/rulepacks/` does not exist at all, enrichment
+        must be a strict no-op -- output must match what plain (rule-less) rendering
+        produces, byte for byte."""
+        sarif_path = self.repo / "out.sarif"
+        _write_sarif(sarif_path, rule_id="RULE1", level="warning", line=2)
+        with _chdir(self.repo):
+            self.assertEqual(check.check_main(["--baseline", "out.sarif"]), 0)
+            _write_sarif(sarif_path, rule_id="RULE2", level="warning", line=1)
+            current, _failures = check.load_current_findings(
+                check.resolve_check_identity(Path.cwd(), collection=None, repo=None), [sarif_path]
+            )
+            regressions = check.diff_against_baseline(self._store["repo", "repo", "main"], current)
+            expected_body = check.render_regressions(regressions, None)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                exit_code = check.check_main(["out.sarif"])
+        self.assertEqual(exit_code, 1)
+        self.assertTrue(buf.getvalue().endswith(expected_body))
+        self.assertNotIn("tier", buf.getvalue())
+
+    def test_matching_rulepack_rule_id_annotates_output(self) -> None:
+        sarif_path = self.repo / "out.sarif"
+        _write_sarif(sarif_path, rule_id="RULE1", level="warning", line=2)
+        with _chdir(self.repo):
+            self.assertEqual(check.check_main(["--baseline", "out.sarif"]), 0)
+            _write_sarif(sarif_path, rule_id="RULE2", level="warning", line=1)
+            self._write_rulepack(rule_id="RULE2", tier=2, rationale="why-this-matters")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                exit_code = check.check_main(["out.sarif"])
+        self.assertEqual(exit_code, 1)
+        self.assertIn("[tier 2: why-this-matters]", buf.getvalue())
+
+    def test_exit_code_unaffected_by_rulepacks_presence(self) -> None:
+        sarif_path = self.repo / "out.sarif"
+        _write_sarif(sarif_path, rule_id="RULE1", level="warning", line=2)
+        with _chdir(self.repo):
+            self.assertEqual(check.check_main(["--baseline", "out.sarif"]), 0)
+            # Clean rerun: exit 0 whether or not a rulepack (matching or not) is present.
+            self.assertEqual(check.check_main(["out.sarif"]), 0)
+            self._write_rulepack(rule_id="RULE1", tier=1, rationale="r")
+            self.assertEqual(check.check_main(["out.sarif"]), 0)
+            # New finding: exit 1 whether or not a rulepack rule ID matches it.
+            _write_sarif(sarif_path, rule_id="RULE2", level="warning", line=1)
             self.assertEqual(check.check_main(["out.sarif"]), 1)
 
 

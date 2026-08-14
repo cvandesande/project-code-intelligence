@@ -57,6 +57,12 @@ class PciDispatchTests(unittest.TestCase):
             (("project_code_intelligence.check", "check_main", []), ["--baseline", "out.sarif"]),
         )
 
+    def test_rulepack_resolves_to_rulepack_main_directly(self) -> None:
+        self.assertEqual(
+            pci.resolve("rulepack", ["list"]),
+            (("project_code_intelligence.rulepack_cli", "rulepack_main", []), ["list"]),
+        )
+
     def test_embed_backends_map_to_their_modules(self) -> None:
         self.assertEqual(
             pci.resolve("embed", ["apple"]),

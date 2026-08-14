@@ -1,0 +1,14 @@
+# Example ast-grep rule for the "example" rulepack's E1 (bare except). PCI does
+# not run ast-grep itself; a CI step would invoke
+# `ast-grep scan --config .pci/rulepacks/example/ast-grep/bare-except.yml`
+# and emit SARIF for `pci check` to ingest.
+id: bare-except
+language: python
+rule:
+  pattern: |
+    try:
+      $$$BODY
+    except:
+      $$$HANDLER
+message: "Bare 'except:' clause -- catch a specific exception type (rule E1)."
+severity: warning
