@@ -22,6 +22,7 @@ _COMMANDS: dict[str, tuple[str, str, list[str]]] = {
     "index": ("project_code_intelligence.cli", "index_main", []),
     "audit": ("project_code_intelligence.audit", "audit_main", []),
     "check": ("project_code_intelligence.check", "check_main", []),
+    "rulepack": ("project_code_intelligence.rulepack_cli", "rulepack_main", []),
     "doctor": ("project_code_intelligence.doctor", "main", []),
     "hook": ("project_code_intelligence.hooks.cli", "main", []),
     "mcp": ("project_code_intelligence.server", "main", []),

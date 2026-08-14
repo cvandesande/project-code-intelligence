@@ -1,0 +1,27 @@
+{
+  "name": "example",
+  "version": "1.0.0",
+  "_comment": "Documentation of the rulepack format, not an enforced policy. One rule per tier: E1 (mechanical), F2 (metric-gateable), N1 (LLM-judge). Producer configs referenced here are for illustration only -- PCI never runs them; an external producer (ast-grep, a metrics tool) would be pointed at this file's paths in CI.",
+  "rules": [
+    {
+      "id": "E1",
+      "tier": 1,
+      "description": "Bare `except:` clauses are not allowed; catch a specific exception type.",
+      "rationale": "A bare except also swallows KeyboardInterrupt and SystemExit, and hides bugs that should surface as a stack trace.",
+      "producer": { "kind": "ast_grep", "path": "ast-grep/bare-except.yml" }
+    },
+    {
+      "id": "F2",
+      "tier": 2,
+      "description": "Function cognitive complexity must stay under the pack's threshold.",
+      "rationale": "High cognitive complexity is the strongest predictor of defect density in the studies behind the metric; the threshold keeps a function reviewable in one pass.",
+      "producer": { "kind": "metric", "tool": "bca", "threshold": 15 }
+    },
+    {
+      "id": "N1",
+      "tier": 3,
+      "description": "Names should describe what a value is or does, not how it is implemented.",
+      "rationale": "Mechanical checks can flag banned words, but judging whether a name is actually clear needs to read the surrounding code -- a judgment call, not a grep."
+    }
+  ]
+}

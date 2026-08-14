@@ -50,6 +50,7 @@ from project_code_intelligence.exceptions import DatabaseConnectionError
 from project_code_intelligence.mcp import db as mcp_db
 from project_code_intelligence.mcp.status import annotate_status_snapshots
 from project_code_intelligence.models import StaticFinding
+from project_code_intelligence.rulepacks import discover_rulepacks, rule_lookup
 from project_code_intelligence.sarif.fingerprint import finding_fingerprint
 from project_code_intelligence.sarif.parse import json_object
 from project_code_intelligence.storage.check import load_baseline
@@ -309,7 +310,10 @@ def gate_snapshot(conn: db.DbConnection, snapshot: SnapshotRef) -> GateResult:
         return GateResult(label=label, baseline_missing=True, regressions=())
     findings = static_findings_for_gate(conn, snapshot)
     regressions = diff_against_baseline(baseline, findings)
-    return GateResult(label=label, baseline_missing=False, regressions=tuple(regression_line(r) for r in regressions))
+    rules = rule_lookup(discover_rulepacks(_gate_repo_root(Path.cwd(), snapshot.repo)).packs)
+    return GateResult(
+        label=label, baseline_missing=False, regressions=tuple(regression_line(r, rules) for r in regressions)
+    )
 
 
 def render_gate_results(results: Sequence[GateResult]) -> list[str]:

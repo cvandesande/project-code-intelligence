@@ -14,7 +14,9 @@ from project_code_intelligence.common import sha256_text
 from project_code_intelligence.sarif.fingerprint import is_worsened
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
+
+    from project_code_intelligence.rulepacks import RulepackRuleInfo
 
 
 @dataclass(frozen=True)
@@ -91,16 +93,28 @@ def branch_label(branch: str | None) -> str:
     return branch or "(detached HEAD)"
 
 
-def regression_line(regression: Regression) -> str:
-    """One-line human-readable rendering of a regression, shared by `pci check` and `pci audit --gate`."""
+def regression_line(regression: Regression, rules: Mapping[str, RulepackRuleInfo] | None = None) -> str:
+    """One-line human-readable rendering of a regression, shared by `pci check` and `pci audit --gate`.
+
+    `rules` is an optional rule ID -> (tier, rationale) map, built from
+    loaded rulepacks (see `rulepacks.py`'s `rule_lookup` function); when the
+    finding's rule ID matches, the line is annotated with the rulepack's tier
+    and rationale. PCI does not require rulepacks to exist -- this is
+    enrichment only.
+    """
     finding = regression.finding
     location = finding.primary_source_path or "(no location)"
     if finding.line_start is not None:
         location = f"{location}:{finding.line_start}"
     level = finding.level or "none"
     if regression.status == "worsened":
-        return f"WORSENED  {finding.rule_id}  {level} (was {regression.baseline_level or 'none'})  {location}"
-    return f"NEW       {finding.rule_id}  {level}  {location}"
+        line = f"WORSENED  {finding.rule_id}  {level} (was {regression.baseline_level or 'none'})  {location}"
+    else:
+        line = f"NEW       {finding.rule_id}  {level}  {location}"
+    info = rules.get(finding.rule_id) if rules is not None else None
+    if info is not None:
+        line = f"{line}  [tier {info.tier}: {info.rationale}]"
+    return line
 
 
 def diff_against_baseline(baseline: Sequence[BaselineEntry], current: Sequence[CheckFinding]) -> list[Regression]:

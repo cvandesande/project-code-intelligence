@@ -27,6 +27,7 @@ from project_code_intelligence.check_core import (
 )
 from project_code_intelligence.common import default_collection
 from project_code_intelligence.exceptions import DatabaseConnectionError, SarifLoadError
+from project_code_intelligence.rulepacks import RulepackRuleInfo, discover_rulepacks, rule_lookup
 from project_code_intelligence.sarif.fingerprint import finding_fingerprint
 from project_code_intelligence.sarif.ingest import ingest_sarif
 from project_code_intelligence.sarif.types import SarifIngestContext
@@ -34,7 +35,7 @@ from project_code_intelligence.storage.check import freeze_baseline, load_baseli
 from project_code_intelligence.storage.schema import ensure_schema
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from project_code_intelligence.models import StaticFinding, StaticRun
 
@@ -99,8 +100,8 @@ def load_current_findings(identity: CheckIdentity, sarif_paths: list[Path]) -> t
     return disambiguate_occurrences(findings), list(ingested.failures)
 
 
-def render_regressions(regressions: Sequence[Regression]) -> str:
-    lines = [regression_line(r) for r in regressions]
+def render_regressions(regressions: Sequence[Regression], rules: Mapping[str, RulepackRuleInfo] | None = None) -> str:
+    lines = [regression_line(r, rules) for r in regressions]
     return "\n".join(lines) + "\n" if lines else ""
 
 
@@ -175,8 +176,9 @@ def check_main(argv: list[str] | None = None) -> int:
     if not regressions:
         _ = sys.stdout.write(f"pci check: {label}: no new or worsened findings ({len(current)} total)\n")
         return 0
+    rules = rule_lookup(discover_rulepacks(identity.root).packs)
     _ = sys.stdout.write(f"pci check: {label}: {len(regressions)} new/worsened finding(s)\n")
-    _ = sys.stdout.write(render_regressions(regressions))
+    _ = sys.stdout.write(render_regressions(regressions, rules))
     return 1
 
 

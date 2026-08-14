@@ -1,10 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
-from typing import cast
+from contextlib import contextmanager
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING, cast
+from unittest import mock
 
-from project_code_intelligence import analyze, audit
+from typing_extensions import override
+
+from project_code_intelligence import analyze, audit, db
+from project_code_intelligence.check_core import BaselineEntry
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 
 def _group(symbols: list[str], avg_text: float | None, max_text: float | None) -> analyze.MotifGroup:
@@ -104,6 +115,132 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(audit.line_style("commit abc -- current, indexed 0h01m ago"), "green")
         self.assertEqual(audit.line_style("commit abc -- stale"), "red")
         self.assertIsNone(audit.line_style("    x  x.py:1"))
+
+
+@contextmanager
+def _chdir(path: Path) -> Generator[None]:
+    """Basedpyright's configured `pythonVersion = "3.10"` predates `contextlib.chdir` (3.11)."""
+    previous = Path.cwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
+
+
+class _FakeCursor:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self._rows = rows
+
+    def fetchall(self) -> list[dict[str, object]]:
+        return self._rows
+
+
+class _FakeGateConnection:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self._rows = rows
+
+    def execute(self, _query: str, _params: list[object]) -> _FakeCursor:
+        return _FakeCursor(self._rows)
+
+
+def _finding_row(*, rule_id: str, level: str, line: int, source_path: str = "a.py") -> dict[str, object]:
+    return {
+        "tool_name": "demo-tool",
+        "rule_id": rule_id,
+        "level": level,
+        "message": "bad thing",
+        "primary_source_path": source_path,
+        "line_start": line,
+        "line_end": line,
+        "fingerprints": {},
+    }
+
+
+class GateSnapshotTests(unittest.TestCase):
+    """`gate_snapshot`'s exit-code-relevant fields (`regressions`) must not depend on
+    whether `.pci/rulepacks/` exists -- rulepack enrichment only annotates lines."""
+
+    @override
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.repo = Path(self._tmp.name) / "repo"
+        self.repo.mkdir()
+        _ = (self.repo / "a.py").write_text("x = 1\nbad_call()\ny = 2\n", encoding="utf-8")
+
+    @staticmethod
+    def _snapshot() -> analyze.SnapshotRef:
+        return analyze.SnapshotRef(snapshot_id=1, collection="c", repo=".", branch="main")
+
+    def _write_rulepack(self, *, rule_id: str, tier: int, rationale: str) -> None:
+        pack_dir = self.repo / ".pci" / "rulepacks" / "a"
+        pack_dir.mkdir(parents=True)
+        _ = (pack_dir / "rulepack.json").write_text(
+            json.dumps({
+                "name": "sample",
+                "version": "1.0.0",
+                "rules": [
+                    {
+                        "id": rule_id,
+                        "tier": tier,
+                        "description": "desc",
+                        "rationale": rationale,
+                        "producer": {"kind": "ast_grep", "path": "grep.yml"},
+                    }
+                ],
+            }),
+            encoding="utf-8",
+        )
+        _ = (pack_dir / "grep.yml").write_text("id: x\n", encoding="utf-8")
+
+    def test_no_rulepacks_dir_is_a_no_op_for_regression_lines(self) -> None:
+        baseline = [BaselineEntry(fingerprint="does-not-match", rule_id="RULE1", level="warning")]
+        rows = [_finding_row(rule_id="RULE1", level="warning", line=2)]
+        conn = _FakeGateConnection(rows)
+        with (
+            _chdir(self.repo),
+            mock.patch.object(audit, "load_baseline", return_value=baseline),
+        ):
+            result = audit.gate_snapshot(cast("db.DbConnection", conn), self._snapshot())
+        self.assertFalse(result.baseline_missing)
+        self.assertEqual(len(result.regressions), 1)
+        self.assertIn("NEW       RULE1", result.regressions[0])
+        self.assertNotIn("tier", result.regressions[0])
+
+    def test_matching_rulepack_rule_id_annotates_regression_line(self) -> None:
+        self._write_rulepack(rule_id="RULE1", tier=1, rationale="why-this-matters")
+        baseline = [BaselineEntry(fingerprint="does-not-match", rule_id="RULE1", level="warning")]
+        rows = [_finding_row(rule_id="RULE1", level="warning", line=2)]
+        conn = _FakeGateConnection(rows)
+        with (
+            _chdir(self.repo),
+            mock.patch.object(audit, "load_baseline", return_value=baseline),
+        ):
+            result = audit.gate_snapshot(cast("db.DbConnection", conn), self._snapshot())
+        self.assertEqual(len(result.regressions), 1)
+        self.assertIn("[tier 1: why-this-matters]", result.regressions[0])
+
+    def test_exit_relevant_regression_count_unaffected_by_rulepacks_presence(self) -> None:
+        """Exit codes derive from `bool(regressions)`; that must hold with or without a
+        rulepacks dir, and regardless of whether a rule ID in it matches a finding."""
+        baseline: list[BaselineEntry] = []
+        rows = [_finding_row(rule_id="RULE1", level="warning", line=2)]
+        conn = _FakeGateConnection(rows)
+        with (
+            _chdir(self.repo),
+            mock.patch.object(audit, "load_baseline", return_value=baseline),
+        ):
+            result_without = audit.gate_snapshot(cast("db.DbConnection", conn), self._snapshot())
+        self._write_rulepack(rule_id="RULE1", tier=1, rationale="r")
+        with (
+            _chdir(self.repo),
+            mock.patch.object(audit, "load_baseline", return_value=baseline),
+        ):
+            result_with = audit.gate_snapshot(cast("db.DbConnection", conn), self._snapshot())
+        self.assertEqual(len(result_without.regressions), len(result_with.regressions))
+        self.assertTrue(bool(result_without.regressions))
+        self.assertTrue(bool(result_with.regressions))
 
 
 if __name__ == "__main__":

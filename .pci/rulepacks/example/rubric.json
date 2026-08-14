@@ -1,0 +1,9 @@
+{
+  "_comment": "Tier-3 rubric for the 'example' rulepack. Phase 2 only defines this format; a future LLM-judge caller (Phase 4) reads it verbatim and must cite the rule ID in any finding it reports -- findings without a matching ID are out of scope for that judge.",
+  "rubric": [
+    {
+      "id": "N1",
+      "text": "Judge: does the name tell a reader what the value is or does, without needing to open the definition? Flag names that only encode type or position (`data2`, `tmp`, `x`), and names that describe an old role the code no longer plays. Do not flag short names in a narrow, obvious scope (e.g. `i` in a three-line loop) -- brevity there is not a naming defect."
+    }
+  ]
+}
