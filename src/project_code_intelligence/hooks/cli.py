@@ -2,6 +2,7 @@
 
     pci hook install --target opencode|claude|codex|git [--project DIR | --user]
     pci hook run     --target opencode|claude|codex|git --behavior evidence|reindex
+    pci hook status  [--project DIR]
 
 ``install`` renders a Rich summary panel in the shared pci style; ``run`` is
 machine-facing and writes only the agent's injection payload to stdout.
@@ -10,6 +11,7 @@ machine-facing and writes only the agent's injection payload to stdout.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +27,7 @@ if TYPE_CHECKING:
     from project_code_intelligence.console_ui import PillKind
 
 _AGENTS = ("opencode", "claude", "codex", "git")
-_BEHAVIORS = ("evidence", "reindex", "banner")
+_BEHAVIORS = ("evidence", "reindex", "reindex-submit", "banner")
 _COLOR_FORCE: dict[str, bool | None] = {"auto": None, "always": True, "never": False}
 
 
@@ -40,6 +42,7 @@ class HookNamespace(argparse.Namespace):
     uninstall: bool = False
     dry_run: bool = False
     color: str = "auto"
+    json_output: bool = False
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -60,6 +63,10 @@ def _parser() -> argparse.ArgumentParser:
     _ = run.add_argument("--target", "--agent", dest="agent", required=True, choices=_AGENTS)
     _ = run.add_argument("--behavior", required=True, choices=_BEHAVIORS)
     _ = run.add_argument("--repo", help="Repository root for reindex (default: current directory).")
+
+    status = sub.add_parser("status", help="Show Git reindex hook health and the last durable outcome.")
+    _ = status.add_argument("--project", help="Project directory (default: current directory).")
+    _ = status.add_argument("--json", action="store_true", dest="json_output")
     return parser
 
 
@@ -162,15 +169,31 @@ def _run_runtime(parsed: HookNamespace) -> int:
     agent = parsed.agent or "opencode"
     if parsed.behavior == "reindex":
         return runtime.run_reindex(Path(parsed.repo or ".").resolve())
+    if parsed.behavior == "reindex-submit":
+        return runtime.submit_reindex(Path(parsed.repo or ".").resolve())
     if parsed.behavior == "banner":
         return runtime.run_banner(agent)
     return runtime.run_evidence(agent)
+
+
+def _run_status(parsed: HookNamespace) -> int:
+    repo = Path(parsed.project or ".").resolve()
+    status = runtime.reindex_status(repo)
+    status["installed"] = install_mod.has_git_hook(repo)
+    if parsed.json_output:
+        _ = sys.stdout.write(json.dumps(status, sort_keys=True) + "\n")
+    else:
+        for key, value in status.items():
+            _ = sys.stdout.write(f"{key}: {value}\n")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parsed = _parser().parse_args(argv, namespace=HookNamespace())
     if parsed.command == "install":
         return _run_install(parsed)
+    if parsed.command == "status":
+        return _run_status(parsed)
     return _run_runtime(parsed)
 
 

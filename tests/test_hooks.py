@@ -813,7 +813,8 @@ class InstallGitTests(unittest.TestCase):
                 text = hook.read_text(encoding="utf-8")
                 self.assertIn("pci-hook reindex (managed)", text)
                 self.assertIn("--behavior reindex", text)
-                self.assertIn("systemd-run --user --quiet --collect --property=Type=exec --", text)
+                self.assertIn("--behavior reindex-submit", text)
+                self.assertNotIn("systemd-run", text)
                 self.assertNotIn(">/dev/null 2>&1 &\n", text)
                 self.assertTrue(os.access(hook, os.X_OK))
 
@@ -1022,6 +1023,76 @@ class ReindexMarkerTests(unittest.TestCase):
             with mock.patch.object(runtime.process, "run") as run_mock:
                 self.assertEqual(runtime.run_reindex(repo), 0)
             run_mock.assert_not_called()
+
+    def test_submit_reindex_records_named_systemd_unit(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = self._repo(Path(tmp).resolve(), "repo")
+            with (
+                mock.patch.object(runtime.git_utils, "run_git", return_value="abc123\n"),
+                mock.patch.object(runtime.shutil, "which", return_value="/usr/bin/systemd-run"),
+                mock.patch.object(runtime, "_runtime_command", return_value=["/usr/bin/pci", "hook", "run"]),
+                mock.patch.object(runtime.process, "run", return_value=runtime.process.CompletedProcess([], 0)) as run,
+            ):
+                self.assertEqual(runtime.submit_reindex(repo), 0)
+            command = cast("list[str]", run.call_args.args[0])
+            self.assertIn("--property=SyslogIdentifier=pci-reindex", command)
+            self.assertTrue(any(part.startswith("--unit=pci-reindex-") for part in command))
+            state = runtime.reindex_status(repo)
+            self.assertEqual(state["outcome"], "submitted")
+            self.assertEqual(state["requested_head"], "abc123")
+
+    def test_submit_reindex_falls_back_when_systemd_is_unavailable(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = self._repo(Path(tmp).resolve(), "repo")
+            with (
+                mock.patch.object(runtime.git_utils, "run_git", return_value="abc123\n"),
+                mock.patch.object(runtime.shutil, "which", return_value=None),
+                mock.patch.object(runtime, "run_reindex", return_value=0) as fallback,
+            ):
+                self.assertEqual(runtime.submit_reindex(repo), 0)
+            fallback.assert_called_once_with(repo)
+
+
+class HookStatusTests(unittest.TestCase):
+    def test_status_json_reports_install_marker_and_last_outcome(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            (repo / ".git").mkdir()
+            _ = install.install_git(repo, uninstall=False, dry_run=False)
+            _ = (repo / ".git" / "pci-reindex-state.json").write_text(
+                json.dumps({"outcome": "completed", "completed_head": "abc123"}), encoding="utf-8"
+            )
+            out = io.StringIO()
+            with (
+                mock.patch.object(sys, "stdout", out),
+                mock.patch.object(runtime, "reindex_target", return_value=(repo, [str(repo)])),
+                mock.patch.object(runtime.git_utils, "run_git", return_value="abc123\n"),
+            ):
+                code = hooks_cli.main(["status", "--project", str(repo), "--json"])
+            self.assertEqual(code, 0)
+            payload = cast("dict[str, object]", json.loads(out.getvalue()))
+            self.assertTrue(payload["installed"])
+            self.assertTrue(payload["marker_valid"])
+            self.assertEqual(payload["outcome"], "completed")
+
+
+class CodexHookEndToEndTests(unittest.TestCase):
+    def test_cli_routes_apply_patch_event_to_evidence_runtime(self) -> None:
+        event = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "apply_patch",
+            "tool_input": {"patch": "*** Begin Patch\n*** Delete File: a.py\n*** End Patch"},
+        }
+        with (
+            mock.patch.object(sys, "stdin", io.StringIO(json.dumps(event))),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+            mock.patch.object(runtime, "run_evidence", return_value=0) as evidence,
+        ):
+            self.assertEqual(
+                hooks_cli.main(["run", "--target", "codex", "--behavior", "evidence"]),
+                0,
+            )
+        evidence.assert_called_once_with("codex")
 
 
 if __name__ == "__main__":

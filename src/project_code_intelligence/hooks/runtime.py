@@ -19,11 +19,14 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
 import shutil
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -38,6 +41,7 @@ if TYPE_CHECKING:
 _MAX_SYMBOLS = 2
 _NEIGHBORS = 0
 _LOCK_NAME = "pci-reindex.lock"
+_STATE_NAME = "pci-reindex-state.json"
 
 # The add side runs a SEMANTIC query, not a call-shape one. Call-shape overlap was the
 # original attempt and was deleted in 052a303: it fired on 11-13% of real duplicates and no
@@ -356,6 +360,85 @@ def _lock_path(repo: Path) -> Path:
     return (git_dir if git_dir.is_dir() else repo) / _LOCK_NAME
 
 
+def _state_path(repo: Path) -> Path:
+    git_dir = repo / ".git"
+    return (git_dir if git_dir.is_dir() else repo) / _STATE_NAME
+
+
+def _read_reindex_state(repo: Path) -> dict[str, object]:
+    try:
+        value = cast("object", json.loads(_state_path(repo).read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return {}
+    return dict(cast("dict[str, object]", value)) if isinstance(value, dict) else {}
+
+
+def _write_reindex_state(repo: Path, **changes: object) -> dict[str, object]:
+    state = _read_reindex_state(repo)
+    state.update(changes)
+    state["updated_at"] = datetime.now(timezone.utc).isoformat()
+    path = _state_path(repo)
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        _ = temporary.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+        _ = temporary.replace(path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+    return state
+
+
+def reindex_status(repo: Path) -> dict[str, object]:
+    state = _read_reindex_state(repo)
+    state.update({
+        "repo": str(repo),
+        "marker_valid": reindex_target(repo) is not None,
+        "systemd_run": shutil.which("systemd-run"),
+        "head": (git_utils.run_git(repo, ["rev-parse", "HEAD"]) or "").strip() or None,
+    })
+    return state
+
+
+def _runtime_command() -> list[str]:
+    invoked = Path(sys.argv[0]).resolve(strict=False)
+    if invoked.name == "pci":
+        return [str(invoked), "hook", "run"]
+    if invoked.name.startswith("pci-hook"):
+        return [str(invoked), "run"]
+    return [sys.executable, "-m", "project_code_intelligence.hooks.cli", "run"]
+
+
+def submit_reindex(repo: Path) -> int:
+    head = (git_utils.run_git(repo, ["rev-parse", "HEAD"]) or "").strip() or None
+    unit = f"pci-reindex-{hashlib.sha256(str(repo).encode()).hexdigest()[:12]}-{os.getpid()}-{time.time_ns()}"
+    _ = _write_reindex_state(repo, outcome="submitting", requested_head=head, unit=unit, error=None)
+    systemd_run = shutil.which("systemd-run")
+    if systemd_run is not None:
+        worker = [*_runtime_command(), "--target", "git", "--behavior", "reindex", "--repo", str(repo)]
+        result = process.run(
+            [
+                systemd_run,
+                "--user",
+                "--quiet",
+                "--collect",
+                f"--unit={unit}",
+                "--property=Type=exec",
+                "--property=SyslogIdentifier=pci-reindex",
+                "--",
+                *worker,
+            ],
+            process.RunOptions(capture_output=True),
+        )
+        if result.returncode == 0:
+            _ = _write_reindex_state(repo, outcome="submitted", requested_head=head, unit=unit)
+            return 0
+        reason = result.stderr.strip() or f"systemd-run exited {result.returncode}"
+        _ = _write_reindex_state(repo, outcome="submission_failed", error=reason)
+    else:
+        _ = _write_reindex_state(repo, outcome="systemd_unavailable", error="systemd-run not found")
+    return run_reindex(repo)
+
+
 _MARKER_NAME = "pci-reindex.json"
 
 
@@ -438,34 +521,65 @@ def reindex_target(repo: Path) -> tuple[Path, list[str]] | None:
     return cwd, args
 
 
-def run_reindex(repo: Path) -> int:
-    """Run pci-index for ``repo`` unless another run holds the lock.
+def _run_locked_reindex(repo: Path, workspace: Path, index_args: list[str]) -> int:
+    state = _read_reindex_state(repo)
+    requested_head = state.get("requested_head")
+    if requested_head and state.get("completed_head") == requested_head:
+        _ = _write_reindex_state(repo, outcome="already_current", error=None)
+        return 0
+    _ = _write_reindex_state(repo, outcome="running", started_at=datetime.now(timezone.utc).isoformat(), error=None)
+    try:
+        result = process.run(
+            [*_index_command(repo), *index_args],
+            process.RunOptions(cwd=workspace, stdout=process.DEVNULL, stderr=process.DEVNULL),
+        )
+    except (process.SubprocessError, OSError) as exc:
+        _ = _write_reindex_state(
+            repo,
+            outcome="failed",
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            error=str(exc),
+        )
+        return 0
+    if result.returncode != 0:
+        _ = _write_reindex_state(
+            repo,
+            outcome="failed",
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            exit_code=result.returncode,
+            error=f"pci-index exited {result.returncode}",
+        )
+        return 0
+    completed_head = (git_utils.run_git(repo, ["rev-parse", "HEAD"]) or "").strip() or requested_head
+    _ = _write_reindex_state(
+        repo,
+        outcome="completed",
+        finished_at=datetime.now(timezone.utc).isoformat(),
+        completed_head=completed_head,
+        exit_code=0,
+        error=None,
+    )
+    return 0
 
-    Blocking by design: callers run this in the background (an async agent hook
-    or a debounced detached spawn), and the lock coalesces overlapping calls.
-    Skips silently when no valid reindex marker exists (see reindex_target).
-    """
+
+def run_reindex(repo: Path) -> int:
+    """Serialize reindex workers and record their outcome for ``pci hook status``."""
     target = reindex_target(repo)
     if target is None:
+        _ = _write_reindex_state(repo, outcome="skipped_no_marker", error="no valid reindex marker")
         return 0
     workspace, index_args = target
-    lock_path = _lock_path(workspace)
     try:
-        lock_file = lock_path.open("w")
-    except OSError:
+        lock_file = _lock_path(workspace).open("w")
+    except OSError as exc:
+        _ = _write_reindex_state(repo, outcome="lock_failed", error=str(exc))
         return 0
     try:
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return 0  # another reindex is in flight; it will pick up the latest state
-        try:
-            _ = process.run(
-                [*_index_command(repo), *index_args],
-                process.RunOptions(cwd=workspace, stdout=process.DEVNULL, stderr=process.DEVNULL),
-            )
-        except (process.SubprocessError, OSError):
-            return 0  # binary missing / not runnable -> stay silent, index just not refreshed
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        except OSError as exc:
+            _ = _write_reindex_state(repo, outcome="lock_failed", error=str(exc))
+            return 0
+        return _run_locked_reindex(repo, workspace, index_args)
     finally:
         lock_file.close()
-    return 0

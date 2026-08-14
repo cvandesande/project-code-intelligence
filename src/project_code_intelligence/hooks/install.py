@@ -392,18 +392,8 @@ def _install_one(hook_path: Path, *, block: str, uninstall: bool, dry_run: bool)
 def install_git(repo: Path, *, uninstall: bool, dry_run: bool) -> InstallOutcome:
     command = _hook_command()
     command_line = " ".join(command)
-    reindex = f'{command_line} run --target git --behavior reindex --repo "$(git rev-parse --show-toplevel)"'
-    # Let the user service manager own the asynchronous job so it survives an
-    # agent/sandbox command session.  The foreground fallback preserves support
-    # on hosts without a usable systemd user manager.
-    block = (
-        f"{_POSTCOMMIT_BEGIN}\n"
-        "if command -v systemd-run >/dev/null 2>&1; then\n"
-        f"    systemd-run --user --quiet --collect --property=Type=exec -- {reindex} >/dev/null 2>&1 && exit 0\n"
-        "fi\n"
-        f"{reindex} >/dev/null 2>&1\n"
-        f"{_POSTCOMMIT_END}\n"
-    )
+    reindex = f'{command_line} run --target git --behavior reindex-submit --repo "$(git rev-parse --show-toplevel)"'
+    block = f"{_POSTCOMMIT_BEGIN}\n{reindex} >/dev/null 2>&1\n{_POSTCOMMIT_END}\n"
 
     results = [
         (name, hook_path, *_install_one(hook_path, block=block, uninstall=uninstall, dry_run=dry_run))
