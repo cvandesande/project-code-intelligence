@@ -70,7 +70,7 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 },
                 "include_active_runs": {
                     "type": "boolean",
-                    "description": "In-flight and recent index runs (phase, progress, per-repo mode).",
+                    "description": "Currently running index runs (phase, progress, per-repo mode).",
                 },
             },
             "additionalProperties": False,

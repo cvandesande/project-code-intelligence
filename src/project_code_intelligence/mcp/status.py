@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import importlib.metadata
+import json
 import os
 import sys
 from collections.abc import Mapping
@@ -125,6 +126,8 @@ def active_index_run_rows(conn: db.DbConnection, collection: str | None) -> list
     rows: list[Json] = []
     for raw in load_index_runs(conn, collection=collection):
         run: Json = cast("Json", dict(raw))
+        if not run.get("running"):
+            continue
         heartbeat: object = run.get("heartbeat_at")
         if isinstance(heartbeat, datetime.datetime) and heartbeat.tzinfo is not None:
             run["heartbeat_age_seconds"] = int((now - heartbeat).total_seconds())
@@ -614,10 +617,21 @@ def source_git_root(module_path: Path) -> Path | None:
 
 def _source_git_commit(module_path: Path) -> str | None:
     git_root = source_git_root(module_path)
-    if git_root is None:
+    if git_root is not None:
+        commit = git_utils.run_git(git_root, ["rev-parse", "HEAD"])
+        if commit:
+            return commit.strip()
+    try:
+        direct_url = importlib.metadata.distribution(PACKAGE_NAME).read_text("direct_url.json")
+        payload = cast("object", json.loads(direct_url)) if direct_url else None
+    except (importlib.metadata.PackageNotFoundError, ValueError):
         return None
-    commit = git_utils.run_git(git_root, ["rev-parse", "HEAD"])
-    return commit.strip() if commit else None
+    if not isinstance(payload, dict):
+        return None
+    typed_payload = cast("dict[str, object]", payload)
+    vcs_info = typed_payload.get("vcs_info")
+    commit_id = cast("dict[str, object]", vcs_info).get("commit_id") if isinstance(vcs_info, dict) else None
+    return commit_id if isinstance(commit_id, str) and commit_id else None
 
 
 def _database_runtime_identity() -> Json:

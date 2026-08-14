@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib.metadata
 import io
 import json
 import os
@@ -10,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
+
+from typing_extensions import override
 
 from project_code_intelligence import analyze, config, git_utils
 from project_code_intelligence import db as pci_db
@@ -2284,6 +2287,13 @@ class McpStatusWarningTests(unittest.TestCase):
         warnings = cast("list[dict[str, object]]", payload.get("warnings", []))
         self.assertNotIn("index_run_active", [w["kind"] for w in warnings])
 
+    def test_status_active_runs_excludes_completed_history(self) -> None:
+        conn = QueuedConnection([
+            FakeCursor(many=[{"id": 7, "running": False, "finished_at": datetime.now(timezone.utc)}])
+        ])
+        with patch.object(mcp_db, "table_regclass_exists", return_value=True):
+            self.assertEqual(mcp_status.active_index_run_rows(cast("pci_db.DbConnection", conn), None), [])
+
     def test_status_unknown_repo_reports_found_false_warning(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[]) for _ in range(6)])
 
@@ -2450,6 +2460,23 @@ class McpListFilesRecordBackedTests(unittest.TestCase):
 
 
 class McpStatusRuntimeIdentityTests(unittest.TestCase):
+    def test_source_commit_falls_back_to_installed_direct_url_metadata(self) -> None:
+        class DirectUrlDistribution(importlib.metadata.Distribution):
+            @override
+            def read_text(self, filename: str) -> str | None:
+                if filename == "direct_url.json":
+                    return json.dumps({"vcs_info": {"commit_id": "installed123"}})
+                return None
+
+        distribution = DirectUrlDistribution()
+        with (
+            patch.object(mcp_status, "source_git_root", return_value=None),
+            patch.object(mcp_status.importlib.metadata, "distribution", return_value=distribution),
+        ):
+            identity = mcp_status.server_runtime_identity()
+        package = cast("dict[str, object]", identity["package"])
+        self.assertEqual(package["source_git_commit"], "installed123")
+
     def test_status_can_include_runtime_identity_without_secret_values(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[]) for _ in range(6)])
         credential_value = "".join(("super", "-", "secret"))
