@@ -39,9 +39,20 @@ from project_code_intelligence.analyze import (
     resolve_and_select_snapshots,
     resolve_repo_branch,
 )
+from project_code_intelligence.check_core import (
+    CheckFinding,
+    branch_label,
+    diff_against_baseline,
+    disambiguate_occurrences,
+    regression_line,
+)
 from project_code_intelligence.exceptions import DatabaseConnectionError
 from project_code_intelligence.mcp import db as mcp_db
 from project_code_intelligence.mcp.status import annotate_status_snapshots
+from project_code_intelligence.models import StaticFinding
+from project_code_intelligence.sarif.fingerprint import finding_fingerprint
+from project_code_intelligence.sarif.parse import json_object
+from project_code_intelligence.storage.check import load_baseline
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -221,6 +232,102 @@ def static_finding_counts(conn: db.DbConnection, snapshot: SnapshotRef) -> tuple
         if tool is not None and level is not None and count is not None:
             counts.append(StaticFindingCount(tool=tool, level=level, count=count))
     return commit, counts
+
+
+# --- --gate: reuse the pci check ratchet against already-ingested static findings ----------
+
+
+def _gate_repo_root(cwd: Path, repo: str) -> Path:
+    """Best-effort filesystem root for `repo`, for fingerprint source-context reads."""
+    if repo in {".", cwd.name}:
+        return cwd
+    candidate = cwd / repo
+    return candidate if candidate.exists() else cwd
+
+
+def static_findings_for_gate(conn: db.DbConnection, snapshot: SnapshotRef) -> list[CheckFinding]:
+    """The latest SARIF-bearing snapshot's findings for one repo, reduced to `CheckFinding`s.
+
+    Same "newest snapshot with findings" selection as `static_finding_counts` --
+    SARIF ingest is manual while reindex is post-commit, so findings often hang
+    off an older snapshot than the one being audited.
+    """
+    rows = conn.execute(
+        """
+        SELECT r.tool_name, f.rule_id, f.level, f.message, f.primary_source_path,
+               f.line_start, f.line_end, f.fingerprints
+        FROM project_code_intel_static_findings f
+        JOIN project_code_intel_static_runs r ON r.id = f.run_id
+        WHERE f.collection = %s AND f.repo = %s
+          AND f.snapshot_id = (
+              SELECT max(snapshot_id) FROM project_code_intel_static_findings
+              WHERE collection = %s AND repo = %s
+          )
+        """,
+        [snapshot.collection, snapshot.repo, snapshot.collection, snapshot.repo],
+    ).fetchall()
+    repo_root = _gate_repo_root(Path.cwd(), snapshot.repo)
+    findings: list[CheckFinding] = []
+    for row in rows:
+        fingerprints = json_object(row["fingerprints"])
+        finding = StaticFinding(
+            finding_key="gate",
+            rule_id=coerce_str(row["rule_id"]) or "unknown",
+            message=coerce_str(row["message"]) or "",
+            level=coerce_str(row["level"]),
+            primary_source_path=coerce_str(row["primary_source_path"]),
+            line_start=coerce_int(row["line_start"]),
+            line_end=coerce_int(row["line_end"]),
+            fingerprints=fingerprints,
+        )
+        findings.append(
+            CheckFinding(
+                fingerprint=finding_fingerprint(repo_root, finding),
+                rule_id=finding.rule_id,
+                level=finding.level,
+                tool_name=coerce_str(row["tool_name"]),
+                message=finding.message,
+                primary_source_path=finding.primary_source_path,
+                line_start=finding.line_start,
+                line_end=finding.line_end,
+            )
+        )
+    return disambiguate_occurrences(findings)
+
+
+@dataclass(frozen=True)
+class GateResult:
+    label: str
+    baseline_missing: bool
+    regressions: tuple[str, ...]
+
+
+def gate_snapshot(conn: db.DbConnection, snapshot: SnapshotRef) -> GateResult:
+    label = f"{snapshot.collection}/{snapshot.repo}@{branch_label(snapshot.branch)}"
+    baseline = load_baseline(conn, collection=snapshot.collection, repo=snapshot.repo, branch=snapshot.branch)
+    if baseline is None:
+        return GateResult(label=label, baseline_missing=True, regressions=())
+    findings = static_findings_for_gate(conn, snapshot)
+    regressions = diff_against_baseline(baseline, findings)
+    return GateResult(label=label, baseline_missing=False, regressions=tuple(regression_line(r) for r in regressions))
+
+
+def render_gate_results(results: Sequence[GateResult]) -> list[str]:
+    lines = ["### Gate (pci check baseline)", ""]
+    any_regressions = False
+    for result in results:
+        if result.baseline_missing:
+            lines.append(f"{result.label}: no baseline -- run `pci check --baseline` for this branch")
+            continue
+        if not result.regressions:
+            lines.append(f"{result.label}: no new or worsened findings")
+            continue
+        any_regressions = True
+        lines.append(f"{result.label}: {len(result.regressions)} new/worsened finding(s)")
+        lines.extend(f"  {line}" for line in result.regressions)
+    if not any_regressions:
+        lines.extend(("", "gate: pass"))
+    return lines
 
 
 def audit_snapshot(conn: db.DbConnection, snapshot: SnapshotRef, options: AnalysisOptions) -> AuditResult:
@@ -448,8 +555,12 @@ def _result_to_json(result: AuditResult) -> dict[str, object]:
     }
 
 
+def _results_to_json_payload(results: Sequence[AuditResult]) -> dict[str, object]:
+    return {result.label: _result_to_json(result) for result in results}
+
+
 def render_json(results: Sequence[AuditResult]) -> str:
-    payload = {result.label: _result_to_json(result) for result in results}
+    payload = _results_to_json_payload(results)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str) + "\n"
 
 
@@ -462,6 +573,7 @@ class AuditNamespace(argparse.Namespace):
     repo: str | None = None
     limit: int = DEFAULT_LIMIT
     json: bool = False
+    gate: bool = False
     extra: list[str] = field(default_factory=list)
 
 
@@ -479,12 +591,21 @@ def _audit_parser() -> argparse.ArgumentParser:
         help=f"Maximum redundancy groups to report per snapshot (default {DEFAULT_LIMIT}).",
     )
     _ = parser.add_argument("--json", action="store_true", help="Emit JSON instead of the text report.")
+    _ = parser.add_argument(
+        "--gate",
+        action="store_true",
+        help=(
+            "Diff each snapshot's ingested static findings against its `pci check` branch "
+            "baseline; exit 1 if any repo has a new or worsened finding."
+        ),
+    )
     return parser
 
 
-def audit_main(argv: list[str] | None = None) -> int:
-    parsed = _audit_parser().parse_args(argv, namespace=AuditNamespace())
-    options = AnalysisOptions(limit=parsed.limit)
+def _load_audit_results(
+    parsed: AuditNamespace,
+) -> tuple[list[AuditResult], list[GateResult]] | int:
+    """Everything `audit_main` needs from the database, or an exit code on early failure."""
     try:
         with mcp_db.connect() as conn:
             if not mcp_db.code_intel_tables_exist(conn):
@@ -500,18 +621,46 @@ def audit_main(argv: list[str] | None = None) -> int:
             if not snapshots:
                 _ = sys.stderr.write("pci audit: no matching snapshots found\n")
                 return 1
+            options = AnalysisOptions(limit=parsed.limit)
             results = [audit_snapshot(conn, snapshot, options) for snapshot in snapshots]
+            gate_results = [gate_snapshot(conn, snapshot) for snapshot in snapshots] if parsed.gate else []
     except DatabaseConnectionError as exc:
         _ = sys.stderr.write(f"pci audit: {exc}\n")
         return 1
+    return results, gate_results
+
+
+def _render_audit_output(parsed: AuditNamespace, results: list[AuditResult], gate_results: list[GateResult]) -> None:
     if parsed.json:
-        _ = sys.stdout.write(render_json(results))
+        payload = _results_to_json_payload(results)
+        if parsed.gate:
+            payload["gate"] = {
+                r.label: {"baseline_missing": r.baseline_missing, "regressions": list(r.regressions)}
+                for r in gate_results
+            }
+        _ = sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str) + "\n")
     elif console_ui.should_emit_pretty(sys.stdout):
         console = console_ui.build_console()
         for line in render_lines(results):
             console.print(Text(line, style=line_style(line) or ""))
+        if parsed.gate:
+            for line in render_gate_results(gate_results):
+                console.print(Text(line, style=line_style(line) or ""))
     else:
         _ = sys.stdout.write(render_text(results))
+        if parsed.gate:
+            _ = sys.stdout.write("\n".join(render_gate_results(gate_results)) + "\n")
+
+
+def audit_main(argv: list[str] | None = None) -> int:
+    parsed = _audit_parser().parse_args(argv, namespace=AuditNamespace())
+    loaded = _load_audit_results(parsed)
+    if isinstance(loaded, int):
+        return loaded
+    results, gate_results = loaded
+    _render_audit_output(parsed, results, gate_results)
+    if parsed.gate and any(r.regressions for r in gate_results):
+        return 1
     return 0
 
 

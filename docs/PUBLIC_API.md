@@ -14,6 +14,8 @@ A single console script, `pci`, is installed. Its subcommands are public:
 | Command | Purpose |
 | --- | --- |
 | `pci index` | Main indexing command. Requires one or more repository paths, such as `pci index .`. Can emit MCP client snippets and required environment exports with `--mcp-config {env,codex,claude,opencode,vscode,copilot,cline,zed}`. Low-level ingest flags are reachable via `pci index ... -- <flags>`. |
+| `pci check <sarif files...>` | SARIF regression ratchet. Ingests SARIF (any producer) and fails (exit 1) only on findings that are new or escalated in level since the current branch's frozen baseline; exit 0 otherwise. `pci check --baseline <sarif files...>` (re)freezes the baseline for the current branch. Baseline identity is (collection, repo, branch), same as snapshots. |
+| `pci audit --gate` | Adds a gate section to `pci audit`: diffs each snapshot's already-ingested static findings against its `pci check` branch baseline (same identity, same diff logic) and exits 1 if any repo has a new or worsened finding. |
 | `pci doctor` | Detects database, embedding endpoint, CPU, GPU, and NPU readiness. Also starts/stops bundled local services with `--start`, `--start-db`, `--start-embedding`, `--stop`, and `--clean`. |
 | `pci mcp` | stdio MCP server entry point. |
 | `pci smoke` | Basic MCP status and tool smoke check. Requires one or more repo paths, such as `pci smoke .`. |

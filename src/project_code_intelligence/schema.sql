@@ -245,6 +245,39 @@ CREATE TABLE IF NOT EXISTS project_code_intel_static_code_flows (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- pci check regression ratchet: one frozen baseline per (collection, repo,
+-- branch), the same identity scheme snapshots use. `branch` is nullable for a
+-- detached HEAD, matching project_code_intel_snapshots.branch -- NULL is a
+-- distinct bucket, not a branch literally named "HEAD". Postgres treats every
+-- NULL as distinct under UNIQUE, so this constraint only dedupes named
+-- branches; storage/check.py does the NULL-safe find-or-insert itself rather
+-- than relying on ON CONFLICT for the detached-HEAD case. Additive-only
+-- compatibility event; no existing table is touched.
+CREATE TABLE IF NOT EXISTS project_code_intel_check_baselines (
+    id bigserial PRIMARY KEY,
+    collection text NOT NULL,
+    repo text NOT NULL,
+    branch text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (collection, repo, branch)
+);
+
+CREATE TABLE IF NOT EXISTS project_code_intel_check_baseline_findings (
+    id bigserial PRIMARY KEY,
+    baseline_id bigint NOT NULL REFERENCES project_code_intel_check_baselines(id)
+        ON DELETE CASCADE,
+    fingerprint text NOT NULL,
+    rule_id text NOT NULL,
+    level text,
+    tool_name text,
+    message text,
+    primary_source_path text,
+    line_start integer,
+    line_end integer,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (baseline_id, fingerprint)
+);
+
 CREATE TABLE IF NOT EXISTS project_code_intel_index_runs (
     id bigserial PRIMARY KEY,
     collection text NOT NULL DEFAULT 'default',
