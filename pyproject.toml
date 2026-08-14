@@ -95,6 +95,18 @@ project_code_intelligence = [
   "docker/llamacpp-rocm/Dockerfile",
   "docker/llamacpp-rocm/entrypoint.sh",
   "docker/pgvector/init-extensions.sql",
+  "quadlet/pci-fastembed-models.volume",
+  "quadlet/pci-fastembed.build",
+  "quadlet/pci-fastembed.container",
+  "quadlet/pci-lemonade-cache.volume",
+  "quadlet/pci-lemonade-huggingface.volume",
+  "quadlet/pci-lemonade-llama.volume",
+  "quadlet/pci-lemonade-npu.container",
+  "quadlet/pci-llama-cuda.build",
+  "quadlet/pci-llama-cuda.container",
+  "quadlet/pci-llama-rocm.build",
+  "quadlet/pci-llama-rocm.container",
+  "quadlet/pci-llamacpp-rocm.volume",
   "scripts/select_llamacpp_rocm_bundle.py",
 ]
 

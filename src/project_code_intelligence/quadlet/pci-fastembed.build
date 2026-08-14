@@ -1,0 +1,7 @@
+[Unit]
+Description=Build image for the project-code-intelligence FastEmbed CPU embedding server
+
+[Build]
+File=docker/fastembed/Dockerfile
+SetWorkingDirectory=@BUILD_CONTEXT_DIR@
+ImageTag=localhost/pci-fastembed:latest

@@ -10,9 +10,15 @@ DEPTRY ?= $(if $(wildcard .venv/bin/deptry),.venv/bin/deptry,deptry)
 LINT_IMPORTS ?= $(if $(wildcard .venv/bin/lint-imports),.venv/bin/lint-imports,lint-imports)
 SEMGREP ?= $(if $(wildcard .venv/bin/semgrep),.venv/bin/semgrep,semgrep)
 UV_CACHE_DIR ?= .uv-cache
-# Container engine: docker preferred, podman as drop-in replacement.
+# Container engine: docker preferred, podman as drop-in replacement. Only used
+# for the pgvector database Compose service; the embedding backends run as
+# Podman Quadlet units (see PODMAN below), not Compose.
 # Override with `make ... DOCKER=podman` or by setting DOCKER in the environment.
 DOCKER ?= $(shell command -v docker 2>/dev/null || command -v podman 2>/dev/null)
+# Podman specifically, for the Quadlet embedding-backend services. Quadlet is
+# a Podman-only systemd generator, so unlike DOCKER above there is no
+# alternate-engine fallback here.
+PODMAN ?= $(shell command -v podman 2>/dev/null)
 SHELLCHECK ?= shellcheck
 SHFMT ?= shfmt
 RUFF_TARGETS := . $(wildcard src/project_code_intelligence/code_profiles/*.py)
@@ -43,7 +49,21 @@ PACKAGED_COMPOSE_ASSETS := \
 	docker/pgvector/init-extensions.sql:docker/pgvector/init-extensions.sql \
 	scripts/select_llamacpp_rocm_bundle.py:scripts/select_llamacpp_rocm_bundle.py
 
-.PHONY: help check lint format-check format shellcheck shell-format-check shell-format test coverage dead-code dependency-check architecture-check semgrep-check quality-strict typecheck security security-audit deps-audit doctor integration-smoke scan scan-dry-run mcp-smoke embedding-bench amd-rocm-bundle compose-check tool-install tool-uninstall
+PACKAGED_QUADLET_ASSETS := \
+	quadlet/pci-fastembed-models.volume:quadlet/pci-fastembed-models.volume \
+	quadlet/pci-fastembed.build:quadlet/pci-fastembed.build \
+	quadlet/pci-fastembed.container:quadlet/pci-fastembed.container \
+	quadlet/pci-lemonade-cache.volume:quadlet/pci-lemonade-cache.volume \
+	quadlet/pci-lemonade-huggingface.volume:quadlet/pci-lemonade-huggingface.volume \
+	quadlet/pci-lemonade-llama.volume:quadlet/pci-lemonade-llama.volume \
+	quadlet/pci-lemonade-npu.container:quadlet/pci-lemonade-npu.container \
+	quadlet/pci-llama-cuda.build:quadlet/pci-llama-cuda.build \
+	quadlet/pci-llama-cuda.container:quadlet/pci-llama-cuda.container \
+	quadlet/pci-llama-rocm.build:quadlet/pci-llama-rocm.build \
+	quadlet/pci-llama-rocm.container:quadlet/pci-llama-rocm.container \
+	quadlet/pci-llamacpp-rocm.volume:quadlet/pci-llamacpp-rocm.volume
+
+.PHONY: help check lint format-check format shellcheck shell-format-check shell-format test coverage dead-code dependency-check architecture-check semgrep-check quality-strict typecheck security security-audit deps-audit doctor integration-smoke scan scan-dry-run mcp-smoke embedding-bench amd-rocm-bundle compose-check quadlet-check tool-install tool-uninstall
 
 # Preserve the historical default (`make` runs the full quality gate); `help` is opt-in.
 .DEFAULT_GOAL := check
@@ -51,7 +71,7 @@ PACKAGED_COMPOSE_ASSETS := \
 help: ## Show this help and exit
 	@awk 'BEGIN {FS = ":[^#]*## "; print "Targets (default: check):"} /^[a-zA-Z][a-zA-Z0-9_-]+:[^=]*## / {printf "  %-22s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-check: format-check shell-format-check lint shellcheck dead-code dependency-check architecture-check semgrep-check coverage typecheck security deps-audit compose-check ## Run the full local quality gate
+check: format-check shell-format-check lint shellcheck dead-code dependency-check architecture-check semgrep-check coverage typecheck security deps-audit compose-check quadlet-check ## Run the full local quality gate
 
 lint: ## Lint Python with ruff
 	$(RUFF) check $(RUFF_TARGETS)
@@ -169,6 +189,32 @@ compose-check: ## Validate docker-compose.yml and bundled copy
 		$(DOCKER) compose config --quiet; \
 	else \
 		echo "warning: no container engine (docker or podman) with compose support found; skipping compose validation" >&2; \
+	fi
+
+quadlet-check: ## Validate Quadlet unit sources and bundled copy
+	@for mapping in $(PACKAGED_QUADLET_ASSETS); do \
+		package_path=$${mapping%%:*}; \
+		root_path=$${mapping#*:}; \
+		bundled_path="src/project_code_intelligence/$$package_path"; \
+		if ! diff -q "$$root_path" "$$bundled_path" >/dev/null 2>&1; then \
+			echo "error: $$root_path and $$bundled_path are out of sync" >&2; \
+			diff "$$root_path" "$$bundled_path" >&2; \
+			exit 1; \
+		fi; \
+	done
+	@generator=""; \
+	for candidate in /usr/lib/systemd/system-generators/podman-system-generator \
+		"$$(dirname "$$(readlink -f "$(PODMAN)" 2>/dev/null)" 2>/dev/null)/../lib/systemd/system-generators/podman-system-generator"; do \
+		if [ -x "$$candidate" ]; then generator="$$candidate"; break; fi; \
+	done; \
+	if [ -n "$(PODMAN)" ] && [ -n "$$generator" ]; then \
+		tmpdir=$$(mktemp -d); \
+		trap 'rm -rf "$$tmpdir"' EXIT INT TERM; \
+		PCI_QUADLET_UNIT_DIR="$$tmpdir" PYTHONPATH=$(PYTHONPATH) $(PYTHON) -c \
+			"from project_code_intelligence import process; process.materialize_quadlet_units()"; \
+		QUADLET_UNIT_DIRS="$$tmpdir" "$$generator" --user --dryrun >/dev/null; \
+	else \
+		echo "warning: no Podman Quadlet generator found; skipping Quadlet syntax validation" >&2; \
 	fi
 
 tool-install: ## Install or upgrade the pci-* binaries with uv

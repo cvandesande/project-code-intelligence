@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 from psycopg.errors import InsufficientPrivilege
 
-from project_code_intelligence import config, db, profile_context, progress
+from project_code_intelligence import config, db, mcp_credentials, profile_context, progress
 from project_code_intelligence import runtime as runtime_state
 from project_code_intelligence.analyze import resolve_repo_branch
 from project_code_intelligence.code_profiles import load_profile
@@ -124,11 +124,6 @@ MIN_PARALLEL_PARSE_FILES = 64
 PARSE_CHUNKS_PER_WORKER = 8
 _DB_WRITE_BATCH_SIZE = 500
 MCP_CONFIG_FORMATS = ("env", "codex", "claude", "opencode", "vscode", "copilot", "cline", "zed")
-MCP_PROJECT_ENV_NAMES = (
-    "PCI_MCP_DATABASE_URL",
-    "PCI_MCP_DATABASE_USER",
-    "PCI_MCP_DATABASE_PASSWORD",
-)
 MCP_STANDALONE_ENV_NAMES = (
     "PCI_MCP_DATABASE_URL",
     "PCI_MCP_DATABASE_USER",
@@ -1064,15 +1059,8 @@ def codex_mcp_config_block(context: McpConfigContext) -> str:
         f"cwd = {_toml_string(context.cwd)}",
         "startup_timeout_sec = 20",
         "tool_timeout_sec = 120",
-        "env_vars = [",
     ]
-    lines.extend(f"  {_toml_string(name)}," for name in MCP_PROJECT_ENV_NAMES)
-    lines.append("]")
     return "\n".join(lines)
-
-
-def _claude_env_references() -> dict[str, str]:
-    return {name: "${" + name + "}" for name in MCP_PROJECT_ENV_NAMES}
 
 
 def claude_mcp_config_block(context: McpConfigContext) -> str:
@@ -1083,19 +1071,10 @@ def claude_mcp_config_block(context: McpConfigContext) -> str:
                 "command": context.command,
                 "args": list(context.args),
                 "cwd": context.cwd,
-                "env": _claude_env_references(),
             }
         }
     }
     return json.dumps(payload, indent=2, sort_keys=False)
-
-
-def _opencode_env_references() -> dict[str, str]:
-    return {name: "{env:" + name + "}" for name in MCP_PROJECT_ENV_NAMES}
-
-
-def _vscode_env_references() -> dict[str, str]:
-    return {name: "${env:" + name + "}" for name in MCP_STANDALONE_ENV_NAMES}
 
 
 def vscode_mcp_config_block(context: McpConfigContext) -> str:
@@ -1105,7 +1084,6 @@ def vscode_mcp_config_block(context: McpConfigContext) -> str:
                 "type": "stdio",
                 "command": context.command,
                 "args": list(context.args),
-                "env": _vscode_env_references(),
             }
         }
     }
@@ -1116,7 +1094,6 @@ def zed_mcp_server_config(context: McpConfigContext) -> JsonObject:
     return {
         "command": context.command,
         "args": list(context.args),
-        "env": mcp_config_env(context),
     }
 
 
@@ -1138,7 +1115,6 @@ def opencode_mcp_config_block(context: McpConfigContext) -> str:
                 "command": [context.command, *context.args],
                 "enabled": True,
                 "cwd": context.cwd,
-                "environment": _opencode_env_references(),
             }
         },
     }
@@ -1151,7 +1127,6 @@ def cline_mcp_config_block(context: McpConfigContext) -> str:
             context.server_name: {
                 "command": context.command,
                 "args": list(context.args),
-                "env": mcp_config_env(context),
                 "autoApprove": list[str](),
                 "disabled": False,
             }
@@ -1183,8 +1158,7 @@ def cline_mcp_config_guidance(context: McpConfigContext, body: str) -> str:
         f"Add or merge this snippet under mcpServers in {mcp_project_config_path(context, 'cline')}.",
         "Open it from Cline's MCP Servers icon, Configure tab, then Configure MCP Servers.",
         "Cline's VS Code MCP settings are user-scoped; use --mcp-server-name for per-project server keys.",
-        "This JSON contains read-only database credentials because Cline does not document VS Code-style "
-        "environment substitution here. Keep it local and do not commit it.",
+        "Credentials stay in PCI's private user config; this JSON contains only the project scope path.",
         "",
         body,
     ))
@@ -1195,10 +1169,8 @@ def zed_mcp_config_guidance(context: McpConfigContext, body: str) -> str:
         "",
         "Zed project-scoped MCP config",
         f"Write or merge this snippet into: {mcp_project_config_path(context, 'zed')}",
-        "This Zed project settings snippet contains read-only database credentials because Zed does "
-        "not document environment-variable interpolation for MCP env values.",
-        "Keep .zed/settings.json local and do not commit it. Trust the worktree in Zed so project "
-        "settings can start MCP servers.",
+        "Credentials stay in PCI's private user config. Trust the worktree in Zed so project settings "
+        "can start MCP servers.",
         "",
         body,
     ))
@@ -1208,8 +1180,6 @@ def mcp_project_config_guidance(
     context: McpConfigContext,
     config_format: str,
     body: str,
-    *,
-    env_names: tuple[str, ...] = MCP_PROJECT_ENV_NAMES,
 ) -> str:
     client = {
         "codex": "Codex",
@@ -1224,17 +1194,10 @@ def mcp_project_config_guidance(
         "",
         f"{client} project-scoped MCP config",
         f"Write this snippet to: {target}",
-        "This snippet is project-scoped and references environment variables for credentials.",
-        "Load the required environment variables below before starting the MCP client.",
+        "This snippet contains no database credentials; pci mcp loads them from private user config.",
         "Do not paste this into a global MCP config; the server key is intentionally reused per project.",
         "",
         body,
-        "",
-        _mcp_env_export_block(
-            context,
-            title="Required environment variables for pci mcp (RO)",
-            env_names=env_names,
-        ),
     ))
 
 
@@ -1245,23 +1208,19 @@ def mcp_config_block(context: McpConfigContext | None, config_format: str) -> st
         return mcp_ro_export_block(context)
     if config_format == "codex":
         body = codex_mcp_config_block(context)
-        env_names = MCP_PROJECT_ENV_NAMES
     elif config_format == "claude":
         body = claude_mcp_config_block(context)
-        env_names = MCP_PROJECT_ENV_NAMES
     elif config_format == "opencode":
         body = opencode_mcp_config_block(context)
-        env_names = MCP_PROJECT_ENV_NAMES
     elif config_format in {"vscode", "copilot"}:
         body = vscode_mcp_config_block(context)
-        env_names = MCP_STANDALONE_ENV_NAMES
     elif config_format == "cline":
         return cline_mcp_config_guidance(context, cline_mcp_config_block(context))
     elif config_format == "zed":
         return zed_mcp_config_guidance(context, zed_mcp_config_block(context))
     else:
         raise ValueError(f"unsupported MCP config format: {config_format}")
-    return mcp_project_config_guidance(context, config_format, body, env_names=env_names)
+    return mcp_project_config_guidance(context, config_format, body)
 
 
 def _bootstrap_used_fast_path(bootstrap: db.DatabaseBootstrapResult | None) -> bool:
@@ -1278,10 +1237,11 @@ def _bootstrap_used_fast_path(bootstrap: db.DatabaseBootstrapResult | None) -> b
 
 
 def emit_mcp_config(plan: IngestPlan, bootstrap: db.DatabaseBootstrapResult | None) -> None:
-    if progress.detect_summary_mode() == "json":
+    if progress.detect_summary_mode() == "json" and not plan.args.mcp_config:
         return
     config_format = plan.args.mcp_config or "env"
-    context = mcp_config_context(plan, bootstrap)
+    scope = str(config.configured_database_scope_path())
+    context = mcp_config_context(plan, bootstrap, args=("mcp", "--scope", scope))
     block = mcp_config_block(context, config_format)
     if block is None:
         if plan.args.mcp_config:
@@ -1298,7 +1258,11 @@ def emit_mcp_config(plan: IngestPlan, bootstrap: db.DatabaseBootstrapResult | No
                 "PCI_DATABASE_ADMIN_PASSWORD set, then rerun the MCP config command."
             )
         return
+    if context is None:
+        raise AssertionError("MCP config block exists without a credential context")
+    credential_file = mcp_credentials.write(Path(context.database_scope_path), mcp_config_env(context))
     write_stdout(block)
+    write_stdout(f"Stored project read-only MCP credentials in {credential_file} (mode 0600).")
 
 
 def prepare_writable_database(args: CliArgs, *, embedding_requested: bool) -> db.DatabaseBootstrapResult | None:

@@ -1,0 +1,25 @@
+[Unit]
+Description=project-code-intelligence llama.cpp ROCm embedding server
+
+[Container]
+Image=pci-llama-rocm.build
+ContainerName=llama-rocm
+@ROCM_ENVIRONMENT@
+PublishPort=@ROCM_PUBLISH_PORT@
+AddDevice=/dev/kfd
+AddDevice=/dev/dri
+PodmanArgs=--ipc=host
+SeccompProfile=unconfined
+Volume=pci-llamacpp-rocm.volume:/opt/llamacpp-rocm
+Volume=@PROJECT_DIR@/models:/models
+HealthCmd=curl -fsS http://127.0.0.1:18081/v1/models
+HealthInterval=10s
+HealthTimeout=5s
+HealthRetries=30
+HealthStartPeriod=10m
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target

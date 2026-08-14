@@ -1,7 +1,7 @@
 """``pci-hook`` command: install the hooks, and serve as the hook runtime.
 
-    pci hook install --target opencode|claude|git [--project DIR | --user]
-    pci hook run     --target opencode|claude|git --behavior evidence|reindex
+    pci hook install --target opencode|claude|codex|git [--project DIR | --user]
+    pci hook run     --target opencode|claude|codex|git --behavior evidence|reindex
 
 ``install`` renders a Rich summary panel in the shared pci style; ``run`` is
 machine-facing and writes only the agent's injection payload to stdout.
@@ -24,7 +24,7 @@ from project_code_intelligence.hooks import runtime
 if TYPE_CHECKING:
     from project_code_intelligence.console_ui import PillKind
 
-_AGENTS = ("opencode", "claude", "git")
+_AGENTS = ("opencode", "claude", "codex", "git")
 _BEHAVIORS = ("evidence", "reindex", "banner")
 _COLOR_FORCE: dict[str, bool | None] = {"auto": None, "always": True, "never": False}
 
@@ -49,7 +49,9 @@ def _parser() -> argparse.ArgumentParser:
     install = sub.add_parser("install", help="Wire the pci hooks into a target's config.")
     _ = install.add_argument("--target", "--agent", dest="agent", required=True, choices=_AGENTS)
     _ = install.add_argument("--project", help="Project directory to install into (default: current directory).")
-    _ = install.add_argument("--user", action="store_true", help="Claude only: install to user settings (~/.claude).")
+    _ = install.add_argument(
+        "--user", action="store_true", help="Install Claude or Codex hooks in the user-level configuration."
+    )
     _ = install.add_argument("--uninstall", action="store_true", help="Remove the pci hooks instead of adding them.")
     _ = install.add_argument("--dry-run", action="store_true", help="Report what would change without writing.")
     _ = install.add_argument("--color", choices=("auto", "always", "never"), default="auto")
@@ -126,8 +128,8 @@ def _install_git_with_nested(parsed: HookNamespace) -> list[install_mod.InstallO
 
 
 def _run_install(parsed: HookNamespace) -> int:
-    if parsed.user and parsed.agent != "claude":
-        _ = sys.stderr.write("pci-hook: --user applies to Claude only\n")
+    if parsed.user and parsed.agent not in {"claude", "codex"}:
+        _ = sys.stderr.write("pci-hook: --user applies to Claude and Codex only\n")
         return 2
     if parsed.agent == "claude":
         user_scope = parsed.user
@@ -139,6 +141,12 @@ def _run_install(parsed: HookNamespace) -> int:
         else:
             settings = Path(parsed.project or ".").resolve() / ".claude" / "settings.json"
         outcomes = [install_mod.install_claude(settings, uninstall=parsed.uninstall, dry_run=parsed.dry_run)]
+    elif parsed.agent == "codex":
+        if parsed.user:
+            hooks_path = Path.home() / ".codex" / "hooks.json"
+        else:
+            hooks_path = Path(parsed.project or ".").resolve() / ".codex" / "hooks.json"
+        outcomes = [install_mod.install_codex(hooks_path, uninstall=parsed.uninstall, dry_run=parsed.dry_run)]
     elif parsed.agent == "git":
         outcomes = _install_git_with_nested(parsed)
     else:

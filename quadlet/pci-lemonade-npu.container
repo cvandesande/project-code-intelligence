@@ -1,0 +1,20 @@
+[Unit]
+Description=project-code-intelligence Lemonade AMD NPU embedding server
+
+[Container]
+Image=@PCI_LEMONADE_IMAGE@
+ContainerName=lemonade-npu
+Exec=./lemond --host 0.0.0.0 --port 13305
+@LEMONADE_ENVIRONMENT@
+PublishPort=@LEMONADE_PUBLISH_PORT@
+AddDevice=/dev/accel/accel0:/dev/accel/accel0
+Ulimit=memlock=-1:-1
+Volume=pci-lemonade-huggingface.volume:/root/.cache/huggingface
+Volume=pci-lemonade-llama.volume:/opt/lemonade/llama
+Volume=pci-lemonade-cache.volume:/root/.cache/lemonade
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target

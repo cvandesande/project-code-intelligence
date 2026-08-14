@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -39,10 +38,11 @@ VOYAGE_EMBEDDING_ENDPOINT = "https://api.voyageai.com/v1/embeddings"
 
 def default_gpu_model_detail(env: config.Env) -> str:
     model_file = config.env_text("PCI_HF_MODEL_FILE", GPU_QWEN3_DEFAULT_MODEL, env=env)
-    model_path = Path("models") / (model_file or GPU_QWEN3_DEFAULT_MODEL)
+    models_dir = process.models_dir()
+    model_path = models_dir / (model_file or GPU_QWEN3_DEFAULT_MODEL)
     if model_path.is_file():
         return f"default GGUF present at {model_path}"
-    return f"default GGUF is {model_file}; Linux GPU profiles download it into ./models."
+    return f"default GGUF is {model_file}; GPU profiles download it into {models_dir}."
 
 
 def check_embedding_options(
@@ -65,7 +65,7 @@ def check_embedding_options(
                 "option-npu",
                 "ok",
                 f"AMD NPU embeddings: Lemonade FLM default {config.DEFAULT_LEMONADE_EMBEDDING_MODEL}.",
-                f"Use {process.container_engine_name()} compose --profile npu up -d lemonade-npu. Set "
+                "Use systemctl --user start pci-lemonade-npu.service. Set "
                 "PCI_EMBEDDING_ENDPOINT_MODEL only to override the default.",
             )
         )
@@ -80,14 +80,13 @@ def check_embedding_options(
         )
 
     gpu_model_detail = default_gpu_model_detail(env)
-    engine = process.container_engine_name()
     if has_gpu_vendor(gpus, "AMD"):
         results.append(
             result(
                 "option-gpu-amd",
                 "ok",
                 f"AMD GPU embeddings: llama.cpp ROCm default {GPU_QWEN3_DEFAULT_MODEL}.",
-                f"{gpu_model_detail} Use {engine} compose --profile amdgpu up -d --build llama-rocm.",
+                f"{gpu_model_detail} Use systemctl --user start pci-llama-rocm.service.",
             )
         )
     if has_gpu_vendor(gpus, "NVIDIA"):
@@ -96,7 +95,7 @@ def check_embedding_options(
                 "option-gpu-nvidia",
                 "ok",
                 f"NVIDIA GPU embeddings: llama.cpp CUDA default {GPU_QWEN3_DEFAULT_MODEL}.",
-                f"{gpu_model_detail} Use {engine} compose --profile nvidia up -d --build llama-cuda.",
+                f"{gpu_model_detail} Use systemctl --user start pci-llama-cuda.service.",
             )
         )
     if has_gpu_vendor(gpus, "Apple"):

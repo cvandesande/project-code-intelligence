@@ -27,6 +27,12 @@ class PciDispatchTests(unittest.TestCase):
             code = pci.main(args)
         self.assertEqual(code, 0)
 
+    def test_dispatch_accepts_codex_hook_target(self) -> None:
+        with TemporaryDirectory() as tmp:
+            args = ["hook", "install", "--target", "codex", "--project", tmp, "--dry-run", "--color", "never"]
+            code = pci.main(args)
+        self.assertEqual(code, 0)
+
     def test_services_verbs_map_to_doctor_flags(self) -> None:
         self.assertEqual(
             pci.resolve("services", ["start"]), (("project_code_intelligence.doctor", "main", ["--start"]), [])
@@ -94,3 +100,8 @@ class PciDispatchTests(unittest.TestCase):
             pci.resolve("mcp", []),
             (("project_code_intelligence.server", "main", []), []),
         )
+
+    def test_mcp_install_dispatches_without_entering_stdio(self) -> None:
+        with TemporaryDirectory() as tmp:
+            code = pci.main(["mcp", "install", "--target", "codex", "--project", tmp, "--dry-run"])
+        self.assertEqual(code, 0)

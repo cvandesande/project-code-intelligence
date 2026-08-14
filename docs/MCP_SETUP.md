@@ -143,12 +143,8 @@ PCI_MCP_DATABASE_USER=project_ro
 PCI_MCP_DATABASE_PASSWORD=password
 ```
 
-When `PCI_DATABASE_ADMIN_USER` and
-`PCI_DATABASE_ADMIN_PASSWORD` are available, `pci index`
-prints the project-specific `Export for pci mcp (RO)` block after
-`pci index --init-db` and ordinary index runs.
-
-To print copy/paste-ready MCP client configuration, use `--mcp-config`:
+To create private read-only MCP credentials and print a credential-free client
+configuration, use `--mcp-config`:
 
 ```sh
 pci index --init-db --mcp-config codex .
@@ -162,27 +158,17 @@ pci index --init-db --mcp-config zed .
 Generated client config uses the generic server key
 `project-code-intelligence`. That key is intentionally reused when the config
 belongs to the indexed repo/workspace. Do not paste project-scoped snippets
-into global MCP config. Codex, Claude Code, OpenCode, and VS Code Copilot
-snippets reference environment variables instead of embedding credential
-values; the export block printed after the config contains the project
-read-only credentials. Zed's `.zed/settings.json` snippet is project-scoped and
-contains the read-only database values directly because Zed does not document
-environment-variable interpolation for MCP `env` values; keep it local and do
-not commit it. Codex, Claude Code, and OpenCode configs set the server `cwd`,
-so they do not need
-`PCI_DATABASE_SCOPE_PATH` in their generated environment
-blocks. Cline's VS Code extension MCP settings are user-scoped, so the
-generated Cline snippet also contains the read-only database values directly
-and must stay local. The collection is inferred from the project `cwd` for
-clients that support it; VS Code Copilot, Cline, and Zed pass the collection
-explicitly because their documented config shapes do not include a server
-working directory. Use `PCI_COLLECTION` only as an
-explicit MCP runtime scope. For index runs, prefer
-`pci index --collection NAME`; an inherited collection environment variable is
-ignored unless
-`PCI_ALLOW_COLLECTION_OVERRIDE=1` is also set. Use
-`--mcp-server-name NAME` only when you are deliberately creating a
-non-project-scoped setup.
+into global MCP config. Every supported harness launches
+`pci mcp --scope /absolute/project/path`. PCI resolves that scope to a
+project-keyed credential file under the user's PCI config directory, stored
+with mode `0600`; no database URL, username, or password is written to the
+repository or harness config.
+
+Install or update a generated config with `pci mcp install --target TARGET`.
+Use `--uninstall` to remove only PCI's server entry while preserving unrelated
+client settings. Supported targets are `codex`, `claude`, `opencode`,
+`vscode`, `copilot`, `cline`, and `zed`; Cline also needs `--config-path` for
+its user-scoped settings file.
 
 If those MCP-specific variables are unset, `pci mcp` falls back to the generic
 database variables.
@@ -231,12 +217,10 @@ package, but `PCI_COMPOSE_FILE` keeps your Compose customization outside the
 package lifecycle.
 
 Do not commit real database credentials or private export files. Generated
-project-scoped snippets for Codex, Claude Code, OpenCode, and VS Code Copilot
-avoid embedding credentials and are suitable to share only when the repo path
-and server command are also acceptable to share. Zed project settings embed
-read-only database credentials and must stay local. The MCP export block
-contains read-only database credentials; load those values from your shell,
-direnv, a private env file, or a system secret manager. The
+project-scoped snippets for every supported harness avoid embedding credentials
+and are suitable to share only when the repo path and server command are also
+acceptable to share. PCI stores the per-project read-only values outside the
+repository in its private user config directory with mode `0600`. The
 `pci doctor --init-postgres` user config contains non-superuser credentials for
 `pci index`; keep it private and at `0600`.
 
@@ -256,34 +240,20 @@ The command prints the project target path before the TOML:
 ```text
 Codex project-scoped MCP config
 Write this snippet to: /home/you/src/project-code-intelligence/.codex/config.toml
-This snippet is project-scoped and references environment variables for credentials.
-Load the required environment variables below before starting the MCP client.
+This snippet contains no database credentials; pci mcp loads them from private user config.
 Do not paste this into a global MCP config; the server key is intentionally reused per project.
 ```
 
 ```toml
 [mcp_servers.project-code-intelligence]
 command = "/home/you/.local/bin/pci"
-args = ["mcp"]
+args = ["mcp", "--scope", "/home/you/src/project-code-intelligence"]
 cwd = "/home/you/src/project-code-intelligence"
 startup_timeout_sec = 20
 tool_timeout_sec = 120
-env_vars = [
-  "PCI_MCP_DATABASE_URL",
-  "PCI_MCP_DATABASE_USER",
-  "PCI_MCP_DATABASE_PASSWORD",
-]
 ```
 
-```sh
-export PCI_MCP_DATABASE_URL='postgresql://host:5432?sslmode=prefer'
-export PCI_MCP_DATABASE_USER=project_ro
-export PCI_MCP_DATABASE_PASSWORD=password
-```
-
-For a single-repo local setup using the Compose database, you can omit the
-`env_vars` list and export block if the MCP client launches `pci mcp` from the
-repo root and the default local database credentials are acceptable.
+Run `pci mcp install --target codex` to merge this entry automatically.
 
 ## Claude Code
 

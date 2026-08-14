@@ -128,22 +128,19 @@ class EmbeddingLogHintTests(unittest.TestCase):
             hint = status_cli.embedding_log_hint()
         self.assertEqual(hint, str(status_cli.APPLE_EMBED_SERVER_LOG_FILE))
 
-    def test_docker_container_running_points_at_docker_logs(self) -> None:
-        completed = status_cli.process.CompletedProcess(
-            args=["docker"], returncode=0, stdout="pgvector-1\nproject-code-intelligence-fastembed-1\n"
-        )
+    def test_podman_container_running_points_at_podman_logs(self) -> None:
+        completed = status_cli.process.CompletedProcess(args=["podman"], returncode=0, stdout="fastembed\n")
         with (
             patch.object(status_cli, "apple_embed_server_is_running", return_value=False),
-            patch.object(status_cli.process, "run_docker", return_value=completed),
-            patch.object(status_cli.process, "container_engine_name", return_value="docker"),
+            patch.object(status_cli.process, "run_podman", return_value=completed),
         ):
             hint = status_cli.embedding_log_hint()
-        self.assertEqual(hint, "docker logs project-code-intelligence-fastembed-1")
+        self.assertEqual(hint, "podman logs fastembed")
 
     def test_no_backend_running_returns_none(self) -> None:
         with (
             patch.object(status_cli, "apple_embed_server_is_running", return_value=False),
-            patch.object(status_cli.process, "run_docker", side_effect=FileNotFoundError),
+            patch.object(status_cli.process, "run_podman", side_effect=FileNotFoundError),
         ):
             self.assertIsNone(status_cli.embedding_log_hint())
 

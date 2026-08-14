@@ -3617,6 +3617,17 @@ class McpServerEntryPointTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         stdio_main.assert_called_once_with()
 
+    def test_pci_mcp_scope_loads_private_credentials_before_stdio(self) -> None:
+        with (
+            patch("project_code_intelligence.server.mcp_credentials.load") as load,
+            patch("project_code_intelligence.server.stdio_main", return_value=0) as stdio_main,
+        ):
+            exit_code = mcp_server.main(["--scope", "/work/demo"])
+
+        self.assertEqual(exit_code, 0)
+        load.assert_called_once_with(Path("/work/demo"))
+        stdio_main.assert_called_once_with()
+
 
 class ToolRegistryConsistencyTests(unittest.TestCase):
     """Catch drift between the three name-keyed tool registries.

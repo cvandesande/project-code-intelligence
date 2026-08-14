@@ -1,0 +1,8 @@
+[Unit]
+Description=Build image for the project-code-intelligence llama.cpp ROCm embedding server
+
+[Build]
+File=docker/llamacpp-rocm/Dockerfile
+SetWorkingDirectory=@BUILD_CONTEXT_DIR@
+ImageTag=localhost/pci-llama-rocm:latest
+BuildArg=ROCM_BASE_IMAGE=@PCI_ROCM_BASE_IMAGE@

@@ -33,6 +33,7 @@ from project_code_intelligence.doctor import (
 )
 from project_code_intelligence.doctor import cli as doctor_cli
 from project_code_intelligence.doctor.database import check_database
+from project_code_intelligence.doctor.embeddings import default_gpu_model_detail
 from project_code_intelligence.embedding.bench import EmbeddingRequestResult
 
 
@@ -86,6 +87,9 @@ class DoctorCleanTests(unittest.TestCase):
             cache_dir = Path(tmp) / "compose-cache"
             cache_dir.mkdir()
             _ = (cache_dir / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+            quadlet_dir = Path(tmp) / "quadlet"
+            quadlet_dir.mkdir()
+            _ = (quadlet_dir / "pci-fastembed.container").write_text("[Container]\n", encoding="utf-8")
             user_config = Path(tmp) / "config" / "project-code-intelligence" / "pci-index.env"
             user_config.parent.mkdir(parents=True)
             _ = user_config.write_text("PCI_DATABASE_URL=postgresql://example\n", encoding="utf-8")
@@ -97,19 +101,27 @@ class DoctorCleanTests(unittest.TestCase):
                 patch("project_code_intelligence.config.pci_index_user_config_path", return_value=user_config),
                 patch("project_code_intelligence.process.compose_cache_dir", return_value=cache_dir),
                 patch("project_code_intelligence.process.compose_file_args", return_value=["-f", "compose.yml"]),
+                patch("project_code_intelligence.process.quadlet_unit_dir", return_value=quadlet_dir),
                 patch("project_code_intelligence.process.run_docker") as run_docker,
+                patch("project_code_intelligence.process.run_podman") as run_podman,
+                patch("project_code_intelligence.process.run_systemctl_user") as run_systemctl,
             ):
                 result = doctor_cli.clean_all()
 
             self.assertEqual(result, 0)
             self.assertFalse(cache_dir.exists())
             self.assertFalse(user_config.exists())
+            self.assertFalse((quadlet_dir / "pci-fastembed.container").exists())
             run_docker.assert_called_once()
+            self.assertEqual(run_podman.call_count, len(doctor_cli.EMBEDDING_VOLUME_NAMES))
+            run_systemctl.assert_called_once_with(["daemon-reload"])
 
     def test_clean_all_keeps_compose_cache_when_confirmation_is_declined(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp) / "compose-cache"
             cache_dir.mkdir()
+            quadlet_dir = Path(tmp) / "quadlet"
+            quadlet_dir.mkdir()
             user_config = Path(tmp) / "config" / "project-code-intelligence" / "pci-index.env"
             user_config.parent.mkdir(parents=True)
             _ = user_config.write_text("PCI_DATABASE_URL=postgresql://example\n", encoding="utf-8")
@@ -119,8 +131,10 @@ class DoctorCleanTests(unittest.TestCase):
                 patch.object(doctor_cli, "_confirm", return_value=False),
                 patch("project_code_intelligence.config.pci_index_user_config_path", return_value=user_config),
                 patch("project_code_intelligence.process.compose_cache_dir", return_value=cache_dir),
+                patch("project_code_intelligence.process.quadlet_unit_dir", return_value=quadlet_dir),
                 patch.object(doctor_cli, "stop_embedding_services") as stop_embedding,
                 patch("project_code_intelligence.process.run_docker") as run_docker,
+                patch("project_code_intelligence.process.run_podman") as run_podman,
             ):
                 result = doctor_cli.clean_all()
 
@@ -129,6 +143,7 @@ class DoctorCleanTests(unittest.TestCase):
             self.assertTrue(user_config.exists())
             stop_embedding.assert_not_called()
             run_docker.assert_not_called()
+            run_podman.assert_not_called()
 
 
 class DoctorHelpTests(unittest.TestCase):
@@ -142,7 +157,7 @@ class DoctorHelpTests(unittest.TestCase):
         self.assertIn("PCI_ALLOW_REMOTE_EMBEDDING=1", help_text)
         self.assertIn("PCI_EMBEDDING_ENDPOINT='https://api.openai.com/v1/embeddings'", help_text)
         self.assertIn("PCI_EMBEDDING_ENDPOINT_MODEL='text-embedding-3-small'", help_text)
-        self.assertIn("pci-doctor --start-db", help_text)
+        self.assertIn("pci doctor --start-db", help_text)
 
 
 class DoctorTests(unittest.TestCase):
@@ -214,7 +229,7 @@ class DoctorTests(unittest.TestCase):
         with (
             patch("project_code_intelligence.doctor.hardware.shutil.which", side_effect=which),
             patch("project_code_intelligence.doctor.hardware.Path.exists", return_value=True),
-            patch("project_code_intelligence.doctor.hardware.docker_has_nvidia_runtime", return_value=(False, None)),
+            patch("project_code_intelligence.doctor.hardware.podman_has_nvidia_cdi", return_value=(False, None)),
         ):
             results = check_gpu_support([GpuInfo(name="NVIDIA L4", vendor="NVIDIA")])
 
@@ -222,10 +237,10 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(item.status, "warn")
         self.assertIn("nvidia-ctk", item.message)
         self.assertIn("NVIDIA Container Toolkit", item.message)
-        self.assertIn("nvidia-ctk runtime configure", item.detail or "")
+        self.assertIn("nvidia-ctk cdi generate", item.detail or "")
         self.assertIn("https://docs.nvidia.com/datacenter/cloud-native/container-toolkit", item.detail or "")
 
-    def test_nvidia_runtime_warns_when_docker_lacks_nvidia_runtime(self) -> None:
+    def test_nvidia_runtime_warns_when_podman_is_not_ready_for_cdi(self) -> None:
         def which(command: str) -> str | None:
             if command in {"nvidia-smi", "nvidia-ctk"}:
                 return f"/usr/bin/{command}"
@@ -235,16 +250,16 @@ class DoctorTests(unittest.TestCase):
             patch("project_code_intelligence.doctor.hardware.shutil.which", side_effect=which),
             patch("project_code_intelligence.doctor.hardware.Path.exists", return_value=True),
             patch(
-                "project_code_intelligence.doctor.hardware.docker_has_nvidia_runtime",
-                return_value=(False, "Docker did not report an nvidia runtime."),
+                "project_code_intelligence.doctor.hardware.podman_has_nvidia_cdi",
+                return_value=(False, "podman was not found."),
             ),
         ):
             results = check_gpu_support([GpuInfo(name="NVIDIA L4", vendor="NVIDIA")])
 
         item = next(result for result in results if result.name == "gpu-runtime-nvidia")
         self.assertEqual(item.status, "warn")
-        self.assertIn("Docker is not configured", item.message)
-        self.assertIn("Docker did not report an nvidia runtime", item.detail or "")
+        self.assertIn("Podman is not ready", item.message)
+        self.assertIn("podman was not found.", item.detail or "")
         self.assertIn("https://docs.nvidia.com/datacenter/cloud-native/container-toolkit", item.detail or "")
 
     def test_color_output_can_be_forced_or_disabled(self) -> None:
@@ -334,16 +349,16 @@ class DoctorTests(unittest.TestCase):
             )
 
         self.assertIn("Start the bundled local database", output)
-        self.assertIn("pci-doctor --start-db", output)
+        self.assertIn("pci doctor --start-db", output)
         self.assertNotIn("docker compose up -d pgvector", output)
         self.assertNotIn("Index a repo and bootstrap its inferred database", output)
         self.assertNotIn("pci-index .", output)
         self.assertIn("Use an existing Postgres instead", output)
         self.assertNotIn("Bootstrap a remote Postgres", output)
-        self.assertNotIn("pci-doctor --init-postgres", output)
+        self.assertNotIn("pci doctor --init-postgres", output)
         self.assertNotIn("Prepare Postgres roles", output)
         self.assertNotIn("Prepare inferred DB roles", output)
-        self.assertNotIn("pci-doctor --init-db", output)
+        self.assertNotIn("pci doctor --init-db", output)
 
     def test_format_summary_suggests_init_postgres_for_remote_db_target(self) -> None:
         with (
@@ -363,7 +378,7 @@ class DoctorTests(unittest.TestCase):
             )
 
         self.assertIn("Bootstrap a remote Postgres", output)
-        self.assertIn("pci-doctor --init-postgres", output)
+        self.assertIn("pci doctor --init-postgres", output)
         self.assertNotIn("Index a repo and bootstrap its inferred database", output)
         self.assertNotIn("pci-index .", output)
         self.assertNotIn("Start a local database", output)
@@ -436,24 +451,23 @@ class DoctorTests(unittest.TestCase):
         self.assertNotIn("remote: no embedding container needed", output)
 
     def test_format_summary_colorizes_headings_and_startup_profiles(self) -> None:
-        with patch("project_code_intelligence.process.container_engine_name", return_value="docker"):
-            output = format_summary(
-                [
-                    CheckResult("platform", "ok", "Python 3.13 on Linux"),
-                    CheckResult("gpu", "skip", "No local GPU was detected."),
-                    CheckResult("npu", "skip", "No supported local NPU device was detected."),
-                    CheckResult("database", "ok", "connected to codeintel as codeintel"),
-                    CheckResult("embedding-endpoint", "warn", "no endpoint configured"),
-                    CheckResult("option-cpu", "ok", "CPU embeddings: FastEmbed default demo."),
-                ],
-                color=True,
-            )
+        output = format_summary(
+            [
+                CheckResult("platform", "ok", "Python 3.13 on Linux"),
+                CheckResult("gpu", "skip", "No local GPU was detected."),
+                CheckResult("npu", "skip", "No supported local NPU device was detected."),
+                CheckResult("database", "ok", "connected to codeintel as codeintel"),
+                CheckResult("embedding-endpoint", "warn", "no endpoint configured"),
+                CheckResult("option-cpu", "ok", "CPU embeddings: FastEmbed default demo."),
+            ],
+            color=True,
+        )
 
         self.assertIn("\033[1m", output)
         self.assertIn("\033[2m", output)
         self.assertIn("System", output)
         self.assertIn("Start CPU embeddings", output)
-        self.assertIn("docker compose --profile cpu up -d --build fastembed", output)
+        self.assertIn("systemctl --user start pci-fastembed.service", output)
 
     def test_format_summary_uses_user_facing_issue_labels(self) -> None:
         output = format_summary(
@@ -475,6 +489,30 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("AMD NPU firmware version", output)
         self.assertNotIn("npu-kernel", output)
         self.assertNotIn("npu-firmware", output)
+
+
+class DoctorGpuModelDetailTests(unittest.TestCase):
+    def test_default_gpu_model_detail_checks_the_resolved_models_dir_not_cwd(self) -> None:
+        """Regression test: this used to check Path("models") relative to CWD,
+        which is wrong whenever models_dir() resolves elsewhere (e.g. an
+        installed package with no source checkout uses a cache directory)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp) / "models"
+            models_dir.mkdir()
+            gguf = models_dir / "Qwen3-Embedding-0.6B-Q8_0.gguf"
+            _ = gguf.write_text("stub", encoding="utf-8")
+
+            with patch("project_code_intelligence.doctor.embeddings.process.models_dir", return_value=models_dir):
+                present = default_gpu_model_detail({})
+                self.assertIn(str(gguf), present)
+
+            with patch(
+                "project_code_intelligence.doctor.embeddings.process.models_dir",
+                return_value=Path(tmp) / "elsewhere",
+            ):
+                missing = default_gpu_model_detail({})
+                self.assertIn(str(Path(tmp) / "elsewhere"), missing)
+                self.assertNotIn("./models", missing)
 
 
 class DoctorDatabaseTests(unittest.TestCase):
@@ -502,7 +540,7 @@ class DoctorDatabaseTests(unittest.TestCase):
 
         self.assertIn("✓ Postgres", output)
         self.assertNotIn("Project DB", output)
-        self.assertNotIn("pci-doctor --init-db", output)
+        self.assertNotIn("pci doctor --init-db", output)
         self.assertNotIn("docker compose up -d pgvector", output)
 
     def test_check_database_uses_postgres_admin_for_host_only_database_url(self) -> None:
@@ -570,7 +608,7 @@ class DoctorDatabaseTests(unittest.TestCase):
         self.assertIn("export PCI_DATABASE_ADMIN_USER=pci_index_admin", output)
         self.assertIn("export PCI_DATABASE_ADMIN_PASSWORD='secret value'", output)
         self.assertNotIn("Project DB", output)
-        self.assertNotIn("pci-doctor --init-db", output)
+        self.assertNotIn("pci doctor --init-db", output)
 
     def test_format_postgres_bootstrap_result_prints_ready_for_existing_index_admin(self) -> None:
         credential = " ".join(("secret", "value"))

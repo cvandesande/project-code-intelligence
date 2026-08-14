@@ -19,7 +19,7 @@ from rich.text import Text
 
 from project_code_intelligence import console_ui, db, process
 from project_code_intelligence import runtime as runtime_state
-from project_code_intelligence.doctor.cli import DOCKER_EMBEDDING_SERVICES
+from project_code_intelligence.doctor.cli import EMBEDDING_CONTAINER_NAMES
 from project_code_intelligence.embedding.apple_embed_server import (
     APPLE_EMBED_SERVER_LOG_FILE,
     apple_embed_server_is_running,
@@ -169,16 +169,16 @@ def load_status(collection: str | None, limit: int) -> tuple[list[JsonObject], l
 
 
 def _running_embedding_container() -> str | None:
-    """Name of a running compose embedding container, or None. Errors are swallowed."""
+    """Name of a running Quadlet-managed embedding container, or None. Errors are swallowed."""
     try:
-        result = process.run_docker(
+        result = process.run_podman(
             ["ps", "--format", "{{.Names}}"],
             process.RunOptions(capture_output=True, timeout=5),
         )
     except (OSError, process.SubprocessError):
         return None
     for name in (result.stdout or "").split():
-        if any(service in name for service in DOCKER_EMBEDDING_SERVICES):
+        if any(service in name for service in EMBEDDING_CONTAINER_NAMES):
             return name
     return None
 
@@ -216,7 +216,7 @@ def embedding_log_hint() -> str | None:
         return str(APPLE_EMBED_SERVER_LOG_FILE)
     container = _running_embedding_container()
     if container is not None:
-        return f"{process.container_engine_name()} logs {container}"
+        return f"podman logs {container}"
     return None
 
 

@@ -512,7 +512,7 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         self.assertEqual(default_mcp_server_name("demo-workspace"), "project-code-intelligence")
         self.assertEqual(default_mcp_server_name("hexyl"), "project-code-intelligence")
 
-    def test_codex_mcp_config_block_references_inherited_environment(self) -> None:
+    def test_codex_mcp_config_block_uses_scope_without_credentials(self) -> None:
         ro_value = " ".join(("ro", "fixture"))
         plan = build_ingest_plan(
             cli_args(collection="demo-workspace", root=Path.cwd(), repos=".", mcp_server_name="pci-demo")
@@ -532,7 +532,12 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
             {"PCI_DATABASE_SCOPE_PATH": "/work/demo-workspace"},
             clear=False,
         ):
-            context = mcp_config_context(plan, bootstrap, command="/usr/bin/pci")
+            context = mcp_config_context(
+                plan,
+                bootstrap,
+                command="/usr/bin/pci",
+                args=("mcp", "--scope", "/work/demo-workspace"),
+            )
 
         if context is None:
             raise AssertionError("expected MCP config context")
@@ -540,12 +545,9 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
 
         self.assertIn("[mcp_servers.pci-demo]", output)
         self.assertIn('command = "/usr/bin/pci"', output)
-        self.assertIn('args = ["mcp"]', output)
+        self.assertIn('args = ["mcp", "--scope", "/work/demo-workspace"]', output)
         self.assertIn('cwd = "/work/demo-workspace"', output)
-        self.assertIn("env_vars = [", output)
-        self.assertIn('"PCI_MCP_DATABASE_URL"', output)
-        self.assertIn('"PCI_MCP_DATABASE_USER"', output)
-        self.assertIn('"PCI_MCP_DATABASE_PASSWORD"', output)
+        self.assertNotIn("PCI_MCP_DATABASE", output)
         self.assertNotIn('"PCI_DATABASE_SCOPE_PATH"', output)
         self.assertNotIn('"PCI_COLLECTION"', output)
         self.assertNotIn("postgresql://db.example.invalid", output)
@@ -553,7 +555,7 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         self.assertNotIn("ro fixture", output)
         self.assertNotIn("pci_demo_ro:ro%20fixture@", output)
 
-    def test_json_mcp_config_blocks_reference_environment(self) -> None:
+    def test_json_mcp_config_blocks_use_scope_without_credentials(self) -> None:
         ro_value = "-".join(("ro", "fixture"))
         plan = build_ingest_plan(cli_args(collection="demo-workspace", root=Path.cwd(), repos="."))
         bootstrap = db.DatabaseBootstrapResult(
@@ -565,7 +567,12 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
                 database_url="postgresql://pci_demo_ro:ro-fixture@db.example.invalid:5432/pci_demo?sslmode=prefer",
             ),
         )
-        context = mcp_config_context(plan, bootstrap, command="/usr/bin/pci")
+        context = mcp_config_context(
+            plan,
+            bootstrap,
+            command="/usr/bin/pci",
+            args=("mcp", "--scope", "/work/demo-workspace"),
+        )
 
         if context is None:
             raise AssertionError("expected MCP config context")
@@ -574,41 +581,19 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         opencode_output = opencode_mcp_config_block(context)
         vscode_output = vscode_mcp_config_block(context)
         zed_output = zed_mcp_config_block(context)
-        credential_key = "PCI_MCP_DATABASE_" + "PASSWORD"
-
-        self.assertIn(f'"{credential_key}": "${{{credential_key}}}"', claude_output)
-        self.assertIn(f'"{credential_key}": "{{env:{credential_key}}}"', opencode_output)
-        self.assertIn(f'"{credential_key}": "${{env:{credential_key}}}"', vscode_output)
         self.assertIn('"type": "stdio"', vscode_output)
         self.assertIn('"servers": {', vscode_output)
-        self.assertIn('"args": [\n        "mcp"\n      ]', vscode_output)
-        self.assertIn('"args": [\n        "mcp"\n      ]', claude_output)
-        self.assertIn(
-            '"PCI_COLLECTION": "${env:PCI_COLLECTION}"',
-            vscode_output,
-        )
         self.assertIn('"context_servers": {', zed_output)
         self.assertIn('"project-code-intelligence": {', zed_output)
         self.assertIn('"command": "/usr/bin/pci"', zed_output)
-        self.assertIn('"PCI_COLLECTION": "demo-workspace"', zed_output)
-        self.assertIn('"PCI_DATABASE_SCOPE_PATH":', zed_output)
-        self.assertIn('"PCI_MCP_DATABASE_PASSWORD": "ro-fixture"', zed_output)
-        self.assertIn(
-            '"PCI_MCP_DATABASE_URL": "postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer"',
-            zed_output,
-        )
-        self.assertNotIn("PCI_COLLECTION", claude_output)
-        self.assertNotIn("PCI_COLLECTION", opencode_output)
-        self.assertNotIn("PCI_DATABASE_SCOPE_PATH", claude_output)
-        self.assertNotIn("PCI_DATABASE_SCOPE_PATH", opencode_output)
-        self.assertNotIn(ro_value, claude_output)
-        self.assertNotIn(ro_value, opencode_output)
-        self.assertNotIn(ro_value, vscode_output)
-        self.assertNotIn("postgresql://db.example.invalid", claude_output)
-        self.assertNotIn("postgresql://db.example.invalid", opencode_output)
-        self.assertNotIn("postgresql://db.example.invalid", vscode_output)
+        for output in (claude_output, opencode_output, vscode_output, zed_output):
+            self.assertIn('"--scope"', output)
+            self.assertIn('"/work/demo-workspace"', output)
+            self.assertNotIn("PCI_MCP_DATABASE", output)
+            self.assertNotIn(ro_value, output)
+            self.assertNotIn("postgresql://db.example.invalid", output)
 
-    def test_cline_mcp_config_block_embeds_user_scoped_environment(self) -> None:
+    def test_cline_mcp_config_block_uses_scope_without_credentials(self) -> None:
         ro_value = "-".join(("ro", "fixture"))
         plan = build_ingest_plan(cli_args(collection="demo-workspace", root=Path.cwd(), repos="."))
         bootstrap = db.DatabaseBootstrapResult(
@@ -620,7 +605,12 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
                 database_url="postgresql://pci_demo_ro:ro-fixture@db.example.invalid:5432/pci_demo?sslmode=prefer",
             ),
         )
-        context = mcp_config_context(plan, bootstrap, command="/usr/bin/pci")
+        context = mcp_config_context(
+            plan,
+            bootstrap,
+            command="/usr/bin/pci",
+            args=("mcp", "--scope", "/work/demo-workspace"),
+        )
 
         if context is None:
             raise AssertionError("expected MCP config context")
@@ -631,12 +621,10 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         self.assertIn('"command": "/usr/bin/pci"', output)
         self.assertIn('"autoApprove": []', output)
         self.assertIn('"disabled": false', output)
-        self.assertIn('"PCI_MCP_DATABASE_PASSWORD": "ro-fixture"', output)
-        self.assertIn('"PCI_COLLECTION": "demo-workspace"', output)
-        self.assertIn(
-            '"PCI_MCP_DATABASE_URL": "postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer"',
-            output,
-        )
+        self.assertIn('"--scope"', output)
+        self.assertIn('"/work/demo-workspace"', output)
+        self.assertNotIn("PCI_MCP_DATABASE", output)
+        self.assertNotIn(ro_value, output)
 
     def test_mcp_config_block_wraps_client_config_with_project_scoped_guidance(self) -> None:
         ro_value = " ".join(("ro", "fixture"))
@@ -656,7 +644,12 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
             {"PCI_DATABASE_SCOPE_PATH": "/work/demo-workspace"},
             clear=False,
         ):
-            context = mcp_config_context(plan, bootstrap, command="/usr/bin/pci")
+            context = mcp_config_context(
+                plan,
+                bootstrap,
+                command="/usr/bin/pci",
+                args=("mcp", "--scope", "/work/demo-workspace"),
+            )
 
         if context is None:
             raise AssertionError("expected MCP config context")
@@ -674,22 +667,13 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
             raise AssertionError("expected MCP config block")
         self.assertIn("Codex project-scoped MCP config", output)
         self.assertIn("Write this snippet to: /work/demo-workspace/.codex/config.toml", output)
-        self.assertIn("references environment variables for credentials", output)
+        self.assertIn("contains no database credentials", output)
+        self.assertIn("private user config", output)
         self.assertIn("Do not paste this into a global MCP config", output)
         self.assertIn("[mcp_servers.project-code-intelligence]", output)
-        self.assertIn("Required environment variables for pci mcp (RO)", output)
-        self.assertIn(
-            "export PCI_MCP_DATABASE_URL='postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer'",
-            output,
-        )
-        self.assertIn("export PCI_MCP_DATABASE_PASSWORD='ro fixture'", output)
-        self.assertNotIn("export PCI_COLLECTION=", output)
-        self.assertNotIn("export PCI_DATABASE_SCOPE_PATH=", output)
-
-        project_config = output.split("Required environment variables for pci mcp (RO)", maxsplit=1)[0]
-        self.assertNotIn("ro fixture", project_config)
-        self.assertNotIn("postgresql://db.example.invalid", project_config)
-        self.assertNotIn("PCI_DATABASE_SCOPE_PATH", project_config)
+        self.assertIn("--scope", output)
+        self.assertNotIn("ro fixture", output)
+        self.assertNotIn("postgresql://db.example.invalid", output)
 
         vscode_output = mcp_config_block(context, "vscode")
 
@@ -698,8 +682,8 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         self.assertIn("VS Code Copilot project-scoped MCP config", vscode_output)
         self.assertIn("Write this snippet to: /work/demo-workspace/.vscode/mcp.json", vscode_output)
         self.assertIn('"servers": {', vscode_output)
-        self.assertIn("export PCI_COLLECTION=demo-workspace", vscode_output)
-        self.assertIn("export PCI_DATABASE_SCOPE_PATH=/work/demo-workspace", vscode_output)
+        self.assertIn("--scope", vscode_output)
+        self.assertNotIn("PCI_MCP_DATABASE", vscode_output)
 
         cline_output = mcp_config_block(context, "cline")
 
@@ -708,11 +692,11 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         self.assertIn("Cline VS Code MCP config", cline_output)
         self.assertIn("Add or merge this snippet under mcpServers", cline_output)
         self.assertIn("Cline's VS Code MCP settings are user-scoped", cline_output)
-        self.assertIn("This JSON contains read-only database credentials", cline_output)
-        self.assertIn('"PCI_MCP_DATABASE_PASSWORD": "ro fixture"', cline_output)
+        self.assertIn("Credentials stay in PCI's private user config", cline_output)
+        self.assertNotIn("PCI_MCP_DATABASE", cline_output)
         self.assertNotIn("Required environment variables for pci mcp (RO)", cline_output)
 
-    def test_zed_mcp_config_block_embeds_project_settings_environment(self) -> None:
+    def test_zed_mcp_config_block_uses_scope_without_credentials(self) -> None:
         ro_value = " ".join(("ro", "fixture"))
         plan = build_ingest_plan(cli_args(collection="demo-workspace", root=Path.cwd(), repos="."))
         bootstrap = db.DatabaseBootstrapResult(
@@ -730,7 +714,12 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
             {"PCI_DATABASE_SCOPE_PATH": "/work/demo-workspace"},
             clear=False,
         ):
-            context = mcp_config_context(plan, bootstrap, command="/usr/bin/pci")
+            context = mcp_config_context(
+                plan,
+                bootstrap,
+                command="/usr/bin/pci",
+                args=("mcp", "--scope", "/work/demo-workspace"),
+            )
 
         if context is None:
             raise AssertionError("expected MCP config context")
@@ -744,18 +733,11 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         self.assertIn("Write or merge this snippet into: /work/demo-workspace/.zed/settings.json", zed_output)
         self.assertIn('{\n  "context_servers": {\n    "project-code-intelligence": {', zed_output)
         self.assertIn('"command": "/usr/bin/pci"', zed_output)
-        self.assertIn('"PCI_MCP_DATABASE_URL"', zed_output)
-        self.assertIn('"PCI_MCP_DATABASE_USER": "pci_demo_ro"', zed_output)
-        self.assertIn('"PCI_MCP_DATABASE_PASSWORD": "ro fixture"', zed_output)
-        self.assertIn(
-            '"PCI_MCP_DATABASE_URL": "postgresql://db.example.invalid:5432/pci_demo?sslmode=prefer"',
-            zed_output,
-        )
-        self.assertIn('"PCI_COLLECTION": "demo-workspace"', zed_output)
-        self.assertIn('"PCI_DATABASE_SCOPE_PATH": "/work/demo-workspace"', zed_output)
-        self.assertIn("contains read-only database credentials", zed_output)
+        self.assertIn('"--scope"', zed_output)
+        self.assertIn('"/work/demo-workspace"', zed_output)
+        self.assertNotIn("PCI_MCP_DATABASE", zed_output)
+        self.assertIn("Credentials stay in PCI's private user config", zed_output)
         self.assertIn("Trust the worktree in Zed", zed_output)
-        self.assertIn("do not commit it", zed_output)
         self.assertNotIn("Add MCP Server", zed_output)
         self.assertNotIn("Required environment variables for pci mcp (RO)", zed_output)
         self.assertNotIn("export PCI_COLLECTION=", zed_output)

@@ -317,7 +317,7 @@ class _StubReports:
         return self.mapping.get(symbol, [])
 
 
-class EvidenceRuntimeTests(unittest.TestCase):
+class EvidenceRuntimeTests(unittest.TestCase):  # noqa: PLR0904 - one shared event-runtime fixture
     def _run(self, agent: str, event: Mapping[str, object], reports: _StubReports) -> str:
         out = io.StringIO()
         with mock.patch.object(runtime.evidence, "render_symbol_reports", reports):
@@ -345,6 +345,53 @@ class EvidenceRuntimeTests(unittest.TestCase):
         # Output event name echoes the firing event (preventive PreToolUse).
         self.assertEqual(hook_out["hookEventName"], "PreToolUse")
         self.assertIn("[pci blast-radius", cast("str", hook_out["additionalContext"]))
+
+    def test_codex_apply_patch_delete_wraps_in_additional_context(self) -> None:
+        reports = _StubReports({"gone": ["gone  function  a.py:1-3\ncallers (0)"]})
+        event = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "apply_patch",
+            "tool_input": {
+                "command": "*** Begin Patch\n*** Update File: a.py\n@@\n-def gone():\n-    pass\n*** End Patch"
+            },
+        }
+        payload = cast("dict[str, object]", json.loads(self._run("codex", event, reports)))
+        hook_out = cast("dict[str, object]", payload["hookSpecificOutput"])
+        self.assertEqual(hook_out["hookEventName"], "PreToolUse")
+        self.assertIn("[pci blast-radius", cast("str", hook_out["additionalContext"]))
+        self.assertEqual(reports.calls, ["gone"])
+
+    def test_codex_multi_file_patch_checks_each_file(self) -> None:
+        reports = _StubReports({
+            "one": ["one  function  a.py:1-2\ncallers (0)"],
+            "two": ["two  function  b.py:1-2\ncallers (0)"],
+        })
+        event = {
+            "hook_event_name": "PreToolUse",
+            "tool_input": {
+                "command": (
+                    "*** Begin Patch\n*** Update File: a.py\n@@\n-def one():\n-    pass\n"
+                    "*** Update File: b.py\n@@\n-def two():\n-    pass\n*** End Patch"
+                )
+            },
+        }
+        text = self._run("codex", event, reports)
+        self.assertIn("one  function", text)
+        self.assertIn("two  function", text)
+        self.assertEqual(reports.calls, ["one", "two"])
+
+    def test_codex_delete_file_reads_existing_content(self) -> None:
+        reports = _StubReports({"gone": ["gone  function  a.py:1-2\ncallers (0)"]})
+        with TemporaryDirectory() as tmp:
+            target = Path(tmp) / "a.py"
+            _ = target.write_text("def gone():\n    pass\n", encoding="utf-8")
+            event = {
+                "hook_event_name": "PreToolUse",
+                "tool_input": {"command": f"*** Begin Patch\n*** Delete File: {target}\n*** End Patch"},
+            }
+            text = self._run("codex", event, reports)
+        self.assertIn("[pci blast-radius", text)
+        self.assertEqual(reports.calls, ["gone"])
 
     def test_in_place_edit_is_silent(self) -> None:
         reports = _StubReports({"gone": ["should not appear"]})
@@ -696,6 +743,40 @@ def _prompt_scope_in(cwd: Path, reply: str) -> bool:
         mock.patch.object(hooks_cli.sys, "stderr", io.StringIO()),
     ):
         return hooks_cli.prompt_claude_scope()
+
+
+class InstallCodexTests(unittest.TestCase):
+    def test_install_merges_is_idempotent_and_uninstalls(self) -> None:
+        with TemporaryDirectory() as tmp:
+            hooks_path = Path(tmp) / ".codex" / "hooks.json"
+            hooks_path.parent.mkdir(parents=True)
+            foreign = {"hooks": {"PostToolUse": [{"hooks": [{"type": "command", "command": "lint"}]}]}}
+            _ = hooks_path.write_text(json.dumps(foreign), encoding="utf-8")
+
+            first = install.install_codex(hooks_path, uninstall=False, dry_run=False)
+            self.assertEqual(first.action, "installed")
+            second = install.install_codex(hooks_path, uninstall=False, dry_run=False)
+            self.assertEqual(second.action, "updated")
+            hooks = cast("dict[str, object]", _read_json_file(hooks_path)["hooks"])
+            self.assertEqual(len(cast("list[object]", hooks["PreToolUse"])), 1)
+            self.assertEqual(len(cast("list[object]", hooks["SessionStart"])), 1)
+            group = cast("dict[str, object]", cast("list[object]", hooks["PreToolUse"])[0])
+            handler = cast("dict[str, object]", cast("list[object]", group["hooks"])[0])
+            self.assertIn("run --target codex --behavior evidence", cast("str", handler["command"]))
+
+            removed = install.install_codex(hooks_path, uninstall=True, dry_run=False)
+            self.assertEqual(removed.action, "removed")
+            hooks_after = cast("dict[str, object]", _read_json_file(hooks_path)["hooks"])
+            self.assertNotIn("PreToolUse", hooks_after)
+            self.assertNotIn("SessionStart", hooks_after)
+            self.assertIn("PostToolUse", hooks_after)
+
+    def test_dry_run_writes_nothing(self) -> None:
+        with TemporaryDirectory() as tmp:
+            hooks_path = Path(tmp) / ".codex" / "hooks.json"
+            outcome = install.install_codex(hooks_path, uninstall=False, dry_run=True)
+            self.assertEqual(outcome.action, "installed")
+            self.assertFalse(hooks_path.exists())
 
 
 class PromptClaudeScopeTests(unittest.TestCase):
