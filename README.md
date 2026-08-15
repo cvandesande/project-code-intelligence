@@ -1,157 +1,157 @@
 # Project Code Intelligence
 
-Coding agents are only as good as the context they get. Reading isn't the hard
-part; knowing what to read is.
+**Repository intelligence and change-safety evidence for coding agents.**
 
-When an agent works through a codebase without tooling, it reads files to find
-what it needs. The waste is everything it loads that turns out not to matter. A
-file gets opened because it might contain the answer. Sometimes it does, often
-it doesn't. On a large codebase, that speculative loading burns tokens fast.
+Project Code Intelligence (PCI) indexes Git repositories and gives coding
+agents structured evidence for research, refactoring, maintenance, and security
+work. Agents can search by concept or identifier, inspect candidate
+relationships, estimate a change's blast radius, find repeated implementation
+shapes, and query static-analysis findings before they edit code.
 
-`project-code-intelligence` inverts that workflow. Instead of reading to find,
-agents query to decide what's worth reading. The index stores source files, code
-records, SARIF static-analysis findings, semantic embeddings, and candidate
-relationships in Postgres/pgvector, then exposes them through an MCP server.
-It does not replace reading code. It replaces the part where you are not sure
-what to read yet.
+PCI is not an autonomous reviewer and its graph is not a compiler-grade call
+graph. It narrows discovery and supplies evidence; the agent still verifies
+important conclusions in source.
 
-The default setup is local: Postgres/pgvector and embeddings can run on your
-machine, so source-derived text does not need to leave it. Remote databases and
-OpenAI-compatible embedding endpoints are supported when you choose that
-tradeoff.
+## What It Helps With
 
-## Where It Pays Off
+### Research and orientation
 
-**Large and generated files.** Protobuf output, generated clients, ORM models,
-and other machine-written files can be hundreds of kilobytes. Usually you need
-one method, not the whole file. Query the index for the symbol, then fetch the
-specific record or chunk.
+- Search exact identifiers, filenames, configuration keys, and known strings.
+- Search by behavior when the relevant names are unknown.
+- Inspect repository languages, file roles, snapshots, parser coverage, and
+  index freshness.
+- Fetch bounded records with paths, line ranges, metadata, and source snippets.
+- Work across several repositories through named collections and repo filters.
 
-**Unknown terms.** Grep requires knowing the word. Semantic search can answer
-questions like "where does TLS configuration get assembled" before you know the
-identifier names.
+### Safer changes
 
-**Project orientation.** `code_intel_status` and `list_code_intel_files` show
-languages, generated/test/source roles, snapshots, parser health, and indexed
-record counts without exploratory file reads.
+- Find candidate callers, callees, references, tests, and module-level wiring.
+- Check blast-radius evidence before removing, renaming, or changing a symbol.
+- Surface entry-point, orphan, and test-coverage signals.
+- Inject nearby evidence into supported coding agents when definitions are
+  added or removed.
 
-**Related code.** `related_code_intel` returns candidate related/caller/callee
-records with paths, line ranges, and snippets across the indexed codebase.
+### Maintenance and redundancy
 
-**Static-analysis context.** SARIF findings are indexed alongside code records,
-so agents can search findings and fetch code-flow details without opening report
-artifacts directly.
+- Find groups of functions that repeat a call-shape motif.
+- Rank redundancy candidates by similarity, estimated abstraction cost, and
+  likely net value.
+- Run a repository audit for stale indexes, duplicate names, redundancy
+  candidates, and static findings.
 
-## How Agents Use This
+### Security and static analysis
 
-An agent connected to `project-code-intelligence` handles discovery questions
-differently. "Where is `Foo` used?", "what calls `Bar`?", "find code that
-handles X" become one-hop queries that return file paths, line ranges, and
-snippets — not the answer, but enough to decide which files are worth reading.
+- Ingest SARIF reports alongside source records.
+- Search normalized findings by tool, rule, level, baseline state, or path.
+- Fetch diagnostics, code flows, and run metadata without making an agent parse
+  raw SARIF artifacts.
 
-The agent still reads files. The change is in the *find* step: on a large or
-unfamiliar codebase, that step is where speculative-read tokens add up. The
-index cuts them down.
+## How It Works
 
-How much it actually saves depends on the codebase and the work. The included
-[session-retrospective prompt](docs/SESSION_RETROSPECTIVE_PROMPT.md)
-helps you tell, and [docs/EVALUATING_VALUE.md](docs/EVALUATING_VALUE.md) walks
-through how to interpret the answer. The system prompt is shaped so an agent
-doesn't over-apply MCP on questions where `Read` is cheaper.
+`pci index` parses repository files into bounded records, extracts metadata and
+candidate relationships, and stores snapshots in Postgres/pgvector. Semantic
+embeddings are optional: lexical search and most structural evidence remain
+available with `--no-embed`.
 
-## Limits
+`pci mcp` exposes the index through a local stdio MCP server. Coding agents use
+its filter-oriented tools to discover likely-relevant code, then read and
+verify the live source before acting.
 
-- Known-target reads, such as "show lines 60-80 of `internal/foo/bar.go`", are
-  cheaper with raw shell tools and a bounded file read.
-- Related-code edges are heuristic candidates, not type-checked call graph
-  facts. Verify important relationships in source.
-- Text search uses several fallback strategies. If exact search returns noise,
-  try semantic search; it uses a different mechanism.
-- Text-only indexing (`--no-embed`) works for lexical search, but semantic
-  search requires an embedding endpoint.
+The default local architecture is:
 
-For small or familiar codebases the overhead may not pay back at all. See
-[docs/EVALUATING_VALUE.md](docs/EVALUATING_VALUE.md) for a session
-retrospective workflow you can run against your own usage to decide
-whether the install is earning its keep.
+- **Postgres/pgvector:** Docker or Podman Compose.
+- **Linux embedding services:** Podman Quadlet units managed by user systemd.
+- **Apple Silicon embeddings:** a native MLX service.
+- **Agent integration:** a stdio MCP server, with optional edit-evidence hooks.
+
+Remote Postgres and OpenAI-compatible embedding endpoints are supported when
+that tradeoff is intentional.
 
 ## Quick Start
 
-Install the CLI tools, then choose the startup path that fits the machine.
-For a local all-in-one setup with a bundled pgvector database and a local
-embedding service:
+Install the CLI from a checkout:
 
 ```sh
 uv tool install /path/to/project-code-intelligence
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Start the bundled database and the best available local embedding backend:
+
+```sh
 pci doctor --start
 pci doctor
 ```
 
-On low-power machines, or when embeddings should run elsewhere, start only the
-bundled database and point PCI at an OpenAI-compatible embedding endpoint:
-
-```sh
-uv tool install /path/to/project-code-intelligence
-pci doctor --start-db
-export PCI_ALLOW_REMOTE_EMBEDDING=1
-export PCI_EMBEDDING_ENDPOINT=https://api.openai.com/v1/embeddings
-export PCI_EMBEDDING_ENDPOINT_MODEL=text-embedding-3-small
-export OPENAI_API_KEY=...
-pci doctor
-```
-
-When `pci doctor` reports the database and embedding endpoint are ready, index a
-repository:
+Index a Git repository:
 
 ```sh
 cd /path/to/repo
 pci index .
 ```
 
-For lexical search only, skip embeddings explicitly:
+Install MCP configuration for your coding agent:
 
 ```sh
+pci mcp install --target codex
+```
+
+Supported targets include `claude`, `codex`, `opencode`, `pi`, `vscode`,
+`copilot`, `cline`, and `zed`. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md) for
+client-specific setup, project scoping, and credential handling.
+
+For lexical search without embeddings:
+
+```sh
+pci doctor --start-db
 pci index --no-embed .
 ```
 
-Then point your MCP client at `pci mcp`. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md)
-for client-specific configuration.
+## Core Agent Tools
 
----
+| Tool | Purpose |
+| --- | --- |
+| `code_intel_status` | Index freshness, scope, record counts, and query capabilities. |
+| `list_code_intel_files` | File inventory filtered by language, role, path, or generated/test status. |
+| `search_code_intel_text` | Exact indexed search for symbols, filenames, keys, and known strings. |
+| `search_code_intel_semantic` | Concept search when identifiers are unknown. |
+| `get_code_intel_record` | Fetch complete indexed records and metadata. |
+| `related_code_intel` | Candidate caller, callee, reference, and related-symbol evidence. |
+| `blast_radius` | Callers, tests, wiring, entry-point signals, and semantic neighbors for a proposed change. |
+| `find_redundancy` | Repeated call-shape groups ranked by likely refactoring value. |
+| `search_static_findings` | Filter normalized SARIF findings. |
+| `get_static_finding` | Fetch diagnostics, code flows, and static-analysis run details. |
 
-## Supported Hardware
+Run `pci audit` for a whole-tree evidence report.
 
-`pci doctor` is the source of truth for the current machine. It detects usable
-local runtimes and prints the exact startup command for each available path.
+## Evidence, Not Verdicts
 
-| Path | Runtime | Notes |
-| --- | --- | --- |
-| CPU | FastEmbed | Portable default for local testing and machines without accelerator support; runs as a Podman Quadlet unit. |
-| Apple Silicon | MLX | Native MLX embedding server (`pci embed apple`) using the GPU; no container involved. |
-| AMD Ryzen AI NPU | Lemonade FLM | Experimental; requires supported XDNA hardware, driver, and firmware; runs as a Podman Quadlet unit. |
-| AMD GPU | llama.cpp ROCm | Runs as a Podman Quadlet unit (`pci doctor --start-embedding`). |
-| NVIDIA GPU | llama.cpp CUDA | Requires the NVIDIA driver and NVIDIA Container Toolkit; runs as a Podman Quadlet unit. |
-| Remote provider | OpenAI-compatible embeddings endpoint | Useful when local embeddings are not desired; source-derived text leaves the machine. |
+PCI deliberately distinguishes stronger indexed facts from approximate and
+heuristic evidence.
 
-The bundled Postgres/pgvector database still runs under Docker (or Podman)
-Compose. The local embedding backends above run as Podman Quadlet units,
-managed through `systemctl --user`, not Compose.
+- Candidate relationship edges are not type-checked call-graph facts.
+- Blast radius cannot prove that a change is safe.
+- Redundancy scores cannot decide whether two functions should share an
+  abstraction.
+- Static findings retain the limitations of their originating analyzer.
+- An index can be stale after uncommitted or newly committed changes.
+- Semantic retrieval can miss relevant code or return plausible neighbors.
+
+Verify important callers and findings in live source. Use direct file reads for
+known paths and small bounded questions; PCI is most useful when the location,
+name, or impact is not yet known.
 
 ## Installation
 
-Install the CLI tools for your user with `uv`:
+### Python CLI
+
+Install for the current user with `uv`:
 
 ```sh
 uv tool install /path/to/project-code-intelligence
 ```
 
-This places the console scripts on your PATH, usually `~/.local/bin`:
-
-```sh
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-Without `uv`, use a virtualenv:
+For an editable development install:
 
 ```sh
 cd /path/to/project-code-intelligence
@@ -160,8 +160,9 @@ python -m venv .venv
 python -m pip install -e .
 ```
 
-On NixOS, or on another Linux host with Nix flakes enabled, build or run the
-core CLI package directly from a checkout:
+### Nix
+
+On NixOS or another Linux host with flakes enabled:
 
 ```sh
 nix build
@@ -169,164 +170,242 @@ nix run . -- doctor --skip-db --embedding skip
 nix develop
 ```
 
-To install the commands persistently into your user profile:
+Install persistently into the user profile:
 
 ```sh
 nix profile install .#project-code-intelligence
 ```
 
-To uninstall that profile entry later:
+The Nix closure contains the CLI, MCP server, Python dependencies, and bundled
+Compose and Quadlet assets. Heavy Linux embedding runtimes remain in Podman
+containers rather than becoming host-native Nix dependencies.
+
+### Local database
+
+Start only the bundled Postgres/pgvector database:
 
 ```sh
-nix profile list
-nix profile remove <index>
+pci doctor --start-db
 ```
 
-The Nix package intentionally keeps the Nix closure focused on the
-CLI/MCP/indexing commands, Python runtime dependencies, and bundled Compose
-assets. Heavy embedding runtimes are not added as host-native Nix dependencies.
-Use `pci doctor --start-db` for the bundled database, then either index
-text-only with `pci index --no-embed .` or configure a trusted
-OpenAI-compatible remote embedding endpoint explicitly:
-
-```sh
-export PCI_ALLOW_REMOTE_EMBEDDING=1
-export PCI_EMBEDDING_ENDPOINT=https://api.openai.com/v1/embeddings
-export PCI_EMBEDDING_ENDPOINT_MODEL=text-embedding-3-small
-export OPENAI_API_KEY=...
-```
-
-The bundled Compose file is materialized from installed package data when the
-project is installed through `uv tool` or Nix. To customize Compose behavior,
-copy the repo's `docker-compose.yml` and point PCI at your copy instead of
-editing installed package files:
+The installed Compose file is materialized into a user cache. To use a custom
+copy instead:
 
 ```sh
 export PCI_COMPOSE_FILE=/path/to/docker-compose.yml
 pci doctor --start-db
 ```
 
-`pci doctor --clean` stops local services, removes the bundled database volume,
-removes generated Compose cache files and Quadlet unit files, and removes the
-generated `pci index` user config. `make tool-uninstall` runs that cleanup
-first, then uninstalls the `uv tool` command shims.
+### Local embedding service
 
-The full list of installed commands lives in [docs/PUBLIC_API.md](docs/PUBLIC_API.md).
-
-## MCP Setup
-
-To create private project-scoped read-only credentials and print a
-credential-free client config:
+The CLI includes the service templates; there is no separate PCI embedding
+package. On Linux, install Podman and ensure `systemctl --user` works, then run:
 
 ```sh
-pci index --init-db --mcp-config codex .
+pci doctor
+pci doctor --start-embedding
 ```
 
-`--mcp-config` also supports `claude`, `opencode`, `vscode`, `copilot`, `cline`,
-and `zed`. The generated config launches `pci mcp --scope /path/to/project`;
-database credentials are stored under the user's PCI config directory with
-mode `0600`, never in the repository or harness config. Install or remove the
-printed configuration with:
+PCI detects available hardware, materializes only the selected backend under
+`~/.config/containers/systemd/`, reloads user systemd, and starts it. Stale PCI
+units for other embedding backends are stopped and removed. Images and default
+models download on first use.
+
+Choose a backend explicitly when desired:
 
 ```sh
-pci mcp install --target codex
-pci mcp install --target codex --uninstall
+# AMD GPU
+pci doctor --start-embedding --embedding-backend rocm
+
+# NVIDIA GPU
+pci doctor --start-embedding --embedding-backend cuda
+
+# Portable CPU fallback
+pci doctor --start-embedding --embedding-backend fastembed
+
+# AMD Ryzen AI NPU (experimental)
+pci doctor --start-embedding --embedding-backend lemonade
 ```
 
-The install command supports every target above plus `pi`. Pi installs a
-project-local `.pi/extensions/` MCP bridge; add its evidence hooks with
-`pci hook install --target pi`. Cline additionally requires `--config-path`
-because its settings file is user-scoped. See
-[docs/MCP_SETUP.md](docs/MCP_SETUP.md) for database and scope guidance.
+Available selectors are `auto`, `fastembed`, `lemonade`, `rocm`, `cuda`, and
+`apple`. PCI rejects a requested backend when its required hardware or runtime
+is unavailable. `apple` runs natively rather than through Quadlet.
 
-A ready-to-paste system prompt for the connected agent lives at
-[docs/SYSTEM_PROMPT.md](docs/SYSTEM_PROMPT.md). The design
-notes in [docs/SYSTEM_PROMPT_RATIONALE.md](docs/SYSTEM_PROMPT_RATIONALE.md)
-cover the prompt-engineering choices behind it (e.g., asking the agent for
-negative-only self-reports instead of token-savings estimates it can't compute
-honestly) — useful reading if you're tuning agent prompts for any MCP server,
-not just this one.
-
-To install PCI's edit evidence and session banner hooks for Codex in the
-current repository:
+To start the database and an explicit backend together:
 
 ```sh
-pci hook install --target codex
+pci doctor --start --embedding-backend rocm
 ```
 
-Codex requires reviewing newly installed command hooks with `/hooks` before
-they run. Add `--user` for `~/.codex/hooks.json`, or `--uninstall` to remove
-only PCI's handlers while preserving other hooks.
+Containerized backends publish an OpenAI-compatible endpoint at
+`http://127.0.0.1:18081/v1/embeddings` by default. Run one local backend at a
+time because they share this endpoint.
 
-Install MCP server configuration without reindexing (`--target` also supports
-`claude`, `opencode`, `pi`, `vscode`, `copilot`, `cline`, and `zed`):
+| Hardware | Backend | Runtime notes |
+| --- | --- | --- |
+| CPU | FastEmbed | Portable fallback; Podman Quadlet. |
+| Apple Silicon | MLX | Native process using the Apple GPU. |
+| AMD Ryzen AI NPU | Lemonade FLM | Experimental; requires supported XDNA hardware, driver, and firmware. |
+| AMD GPU | llama.cpp ROCm | Podman Quadlet with `/dev/kfd` and `/dev/dri`. |
+| NVIDIA GPU | llama.cpp CUDA | Requires the NVIDIA driver, Container Toolkit, and Podman CDI support. |
+
+Stop embedding services without touching the database:
 
 ```sh
-pci mcp install --target codex
+pci doctor --stop-embedding
 ```
 
-The command preserves unrelated Codex TOML and can be reversed with
-`pci mcp install --target codex --uninstall`.
+Remove generated local services, caches, and the bundled database volume:
 
-## Indexing
+```sh
+pci doctor --clean
+```
 
-`pci index .` indexes the current Git repository. Pass multiple repo paths to
-index a workspace:
+`--clean` is destructive and prompts before removing data.
+
+### Remote embeddings
+
+Start only the database, then configure a trusted OpenAI-compatible provider:
+
+```sh
+pci doctor --start-db
+export PCI_ALLOW_REMOTE_EMBEDDING=1
+export PCI_EMBEDDING_ENDPOINT=https://api.openai.com/v1/embeddings
+export PCI_EMBEDDING_ENDPOINT_MODEL=text-embedding-3-small
+export OPENAI_API_KEY=...
+pci doctor
+```
+
+Remote endpoints receive source-derived text. Enable them only when that is
+acceptable for the repositories being indexed.
+
+## Indexing Repositories
+
+Index one repository:
+
+```sh
+pci index /path/to/repo
+```
+
+Index several repositories as a workspace:
 
 ```sh
 cd /path/to/workspace
 pci index service-api web-ui shared-lib
 ```
 
-`pci index` infers a collection name from the paths. MCP tool filters then use
-repo names like `service-api`, not absolute filesystem paths. See
-[docs/MCP_SETUP.md](docs/MCP_SETUP.md) for the collection model.
+PCI infers collection and repository names from the paths. MCP clients filter
+by these logical names rather than absolute filesystem paths. Indexing is
+incremental: unchanged files are reused when compatible snapshots exist.
 
-Rerunning the same command is incremental: unchanged files are skipped and the
-Git snapshot is reused when the working tree hasn't changed. SARIF reports under
-the indexed repo paths are picked up automatically.
-
-To reset one repo's indexed data and rebuild it:
+SARIF reports found under indexed repository paths are ingested automatically.
+Reset and rebuild one repository with:
 
 ```sh
-pci index --reset .
+pci index --reset /path/to/repo
 ```
 
-For advanced flags, see `pci index --help`.
+Use `pci status` to inspect indexing runs and `pci index --help` for parser,
+embedding, collection, and database options.
 
-## Embeddings And Privacy
+## MCP and Agent Hooks
 
-Embeddings power semantic search. Local CPU, NPU, and GPU embedding services all
-publish the same default endpoint at `http://127.0.0.1:18081/v1/embeddings`.
-Run only one local embedding service at a time. `pci doctor --start` starts the
-bundled database and picks the best available local embedding path.
-`pci doctor --start-db` starts only the bundled pgvector database, which is the
-better default when embeddings come from a remote provider or should be skipped.
-Default local models download on first run.
+Create project-scoped read-only database credentials and print an MCP config:
 
-Remote embedding endpoints receive source-derived text. Set
-`PCI_ALLOW_REMOTE_EMBEDDING=1` only when that is
-intentional.
+```sh
+pci index --init-db --mcp-config codex .
+```
 
-Do not publish database dumps, restore artifacts, SARIF output, embedding
-caches, model files, vector indexes, local MCP configs, or generated data from
-private repositories. These can contain source snippets, internal paths, symbols,
-findings, metadata, and embeddings derived from source text.
+Install or remove MCP configuration without reindexing:
 
-Collections help organize multiple repos in one database, but they are not a
-security boundary. Use separate databases or database users when repos need
-stronger isolation. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md#security-model).
+```sh
+pci mcp install --target codex
+pci mcp install --target codex --uninstall
+```
+
+Generated client configuration contains no database password. Credentials are
+stored under the user's PCI configuration directory with mode `0600`. Pi uses a
+project-local `.pi/extensions/` MCP bridge. Cline requires `--config-path`
+because its settings file is user-scoped.
+
+Optional hooks can remind an agent to use the index and inject evidence near
+edits that add or remove definitions:
+
+```sh
+pci hook install --target codex
+```
+
+Hook support and installation details vary by client. Hooks are an aid, not an
+enforcement or correctness mechanism. See [docs/MCP_SETUP.md](docs/MCP_SETUP.md)
+and [docs/SYSTEM_PROMPT.md](docs/SYSTEM_PROMPT.md).
+
+## Privacy and Security
+
+The local default keeps source-derived records and embeddings on the machine.
+That does not make every artifact safe to publish.
+
+Do not commit or distribute database dumps, restore artifacts, SARIF output,
+embedding caches, model files, vector indexes, generated data from private
+repositories, or local MCP credential files. They can contain source snippets,
+paths, symbols, findings, metadata, and embeddings derived from source.
+
+Collections organize repositories but are not a security boundary. Use separate
+databases or database users when repositories require stronger isolation.
+Project-scoped MCP credentials restrict normal access, but they do not replace
+host and database security.
+
+## When PCI Is a Good Fit
+
+PCI tends to help when:
+
+- the repository or workspace is large or unfamiliar;
+- identifiers are unknown at the start of a task;
+- generated files make broad reads expensive or noisy;
+- a refactor needs caller, test, and wiring evidence;
+- maintenance work needs repeated-pattern discovery;
+- static findings need to be correlated with source;
+- several repositories must be searched through one interface.
+
+It may add little value for a small familiar repository, a known file and line
+range, or a question answered by one bounded `rg` or file read. The goal is not
+to replace standard developer tools; it is to improve the uncertain discovery
+and change-planning steps around them.
+
+Token and cost reduction can be a useful side effect, but PCI does not promise
+it. Measure whether the index improves real sessions using
+[docs/EVALUATING_VALUE.md](docs/EVALUATING_VALUE.md) and the
+[session retrospective prompt](docs/SESSION_RETROSPECTIVE_PROMPT.md).
+
+## Development
+
+The MCP server uses stdio; Docker Compose is for the local database, not for
+hosting the MCP process. Run the full development gate with:
+
+```sh
+nix develop
+make check
+```
+
+For ingest, database, or MCP behavior changes, also run:
+
+```sh
+docker compose up -d pgvector
+make integration-smoke
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for project
+conventions and publication safeguards.
 
 ## Documentation
 
-- [docs/MCP_SETUP.md](docs/MCP_SETUP.md) — MCP client configuration, collections, repo filters, security model
-- [docs/PUBLIC_API.md](docs/PUBLIC_API.md) — installed CLI commands, environment variables, MCP tool surface, Python imports
-- [docs/EVALUATING_VALUE.md](docs/EVALUATING_VALUE.md) — how to tell whether the install is earning its keep on your codebase
-- [.env.example](.env.example) — available environment variables
-- [docs/SYSTEM_PROMPT.md](docs/SYSTEM_PROMPT.md) — ready-to-paste system prompt for an agent connected to the MCP server (rationale in [SYSTEM_PROMPT_RATIONALE.md](docs/SYSTEM_PROMPT_RATIONALE.md))
-- [docs/SESSION_RETROSPECTIVE_PROMPT.md](docs/SESSION_RETROSPECTIVE_PROMPT.md) — pasteable end-of-session retrospective for evaluating MCP usage
-- [AGENTS.md](AGENTS.md) — instructions for assistants working on this repo
-- [CONTRIBUTING.md](CONTRIBUTING.md) — contributor workflow, local checks, and guardrails
+- [docs/MCP_SETUP.md](docs/MCP_SETUP.md) — MCP clients, scopes, credentials, and security model
+- [docs/PUBLIC_API.md](docs/PUBLIC_API.md) — CLI, environment, MCP, and Python compatibility surfaces
+- [docs/EVALUATING_VALUE.md](docs/EVALUATING_VALUE.md) — evaluating PCI on real coding sessions
+- [docs/SYSTEM_PROMPT.md](docs/SYSTEM_PROMPT.md) — agent instructions for using PCI
+- [docs/SYSTEM_PROMPT_RATIONALE.md](docs/SYSTEM_PROMPT_RATIONALE.md) — prompt-design rationale
+- [docs/SESSION_RETROSPECTIVE_PROMPT.md](docs/SESSION_RETROSPECTIVE_PROMPT.md) — end-of-session evaluation prompt
+- [.env.example](.env.example) — environment configuration reference
+- [CONTRIBUTING.md](CONTRIBUTING.md) — development workflow
 
 ## License
 

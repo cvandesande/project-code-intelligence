@@ -350,6 +350,7 @@ class CliWrapperTests(unittest.TestCase):
         self.assertIn("vscode", help_text)
         self.assertIn("cline", help_text)
         self.assertIn("zed", help_text)
+        self.assertIn("pi", help_text)
         self.assertIn("--mcp-server-name", cli.index_parser().format_help())
         self.assertIn("--mcp-config", forwarded)
         self.assertEqual(forwarded[forwarded.index("--mcp-config") + 1], "codex")

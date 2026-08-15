@@ -133,6 +133,9 @@ def check_label(name: str) -> str:
         "npu-kernel": "NPU kernel",
         "pgvector": "pgvector",
         "platform": "Platform",
+        "project": "Project",
+        "project-hooks": "Agent hooks",
+        "project-mcp": "MCP configuration",
         "schema": "Schema",
         "schema-version": "Schema version",
     }.get(name, name)
@@ -334,6 +337,19 @@ def _services_section(by_name: Mapping[str, CheckResult]) -> Table:
     return table
 
 
+def _project_section(by_name: Mapping[str, CheckResult]) -> Table | None:
+    project = by_name.get("project")
+    if project is None:
+        return None
+    table = _section_table()
+    _row(table, project.status, "Directory", project.message)
+    if mcp := by_name.get("project-mcp"):
+        _row(table, mcp.status, "MCP", mcp.message)
+    if hooks := by_name.get("project-hooks"):
+        _row(table, hooks.status, "Hooks", hooks.message)
+    return table
+
+
 def _active_path_section(by_name: Mapping[str, CheckResult]) -> Group | None:
     endpoint = by_name.get("embedding-endpoint")
     if endpoint is None or endpoint.status != "ok":
@@ -374,6 +390,9 @@ def _build_main_panel(by_name: Mapping[str, CheckResult], results: Sequence[Chec
         Text("Services", style="bold"),
         _services_section(by_name),
     ]
+    project_section = _project_section(by_name)
+    if project_section is not None:
+        parts.extend((Text(), Text("Current project", style="bold"), project_section))
     issues = summary_issue_items(results)
     service_names = {
         "database",
@@ -382,6 +401,7 @@ def _build_main_panel(by_name: Mapping[str, CheckResult], results: Sequence[Chec
         "embedding-endpoint",
         "embedding-config",
         "embedding",
+        "project-mcp",
     }
     non_service_issues = [item for item in issues if item.name not in service_names]
     if non_service_issues:
@@ -464,7 +484,17 @@ def _next_steps(
             (_PROFILE_FRIENDLY_DESCRIPTIONS.get(profile, f"Start {profile} embeddings"), cmd)
             for profile, cmd in local_embedding_startup_commands(by_name)
         )
-        steps.append(("Use a remote provider", "set PCI_EMBEDDING_ENDPOINT"))
+        steps.append((
+            "Configure OpenAI embeddings",
+            "export PCI_ALLOW_REMOTE_EMBEDDING=1 "
+            "PCI_EMBEDDING_ENDPOINT=https://api.openai.com/v1/embeddings "
+            f"PCI_EMBEDDING_ENDPOINT_MODEL={config.DEFAULT_OPENAI_EMBEDDING_MODEL} OPENAI_API_KEY=...",
+        ))
+    if "project-mcp" in issue_names:
+        steps.extend((
+            ("Install MCP for this project", "pci mcp install --target <client>"),
+            ("Optionally install agent hooks", "pci hook install --target <client>"),
+        ))
     return steps
 
 

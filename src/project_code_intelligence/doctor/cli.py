@@ -10,9 +10,10 @@ import shutil
 import signal
 import sys
 from dataclasses import asdict
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from project_code_intelligence import config, db, process
+from project_code_intelligence import config, db, mcp_install, process
 from project_code_intelligence.doctor.common import (
     human_bytes,
     result,
@@ -56,10 +57,10 @@ from project_code_intelligence.doctor.types import (
 from project_code_intelligence.embedding import apple_embed_server
 from project_code_intelligence.embedding.apple_embed_server import APPLE_EMBED_SERVER_PID_FILE
 from project_code_intelligence.exceptions import ConfigError
+from project_code_intelligence.hooks import install as hook_install
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
-    from pathlib import Path
 
 __all__ = [
     "CheckResult",
@@ -100,6 +101,7 @@ class DoctorArgs(argparse.Namespace):
     start: bool
     start_db: bool
     start_embedding: bool
+    embedding_backend: str
     init_postgres: bool
     write_config: bool
 
@@ -178,7 +180,13 @@ def parser() -> argparse.ArgumentParser:
     _ = argument_parser.add_argument(
         "--start-embedding",
         action="store_true",
-        help="Start the best available local embedding service for this hardware.",
+        help="Start a local embedding service.",
+    )
+    _ = argument_parser.add_argument(
+        "--embedding-backend",
+        choices=("auto", "fastembed", "lemonade", "rocm", "cuda", "apple"),
+        default="auto",
+        help="Backend for --start or --start-embedding. Defaults to the best available hardware.",
     )
     _ = argument_parser.add_argument(
         "--init-postgres",
@@ -199,6 +207,79 @@ def parser() -> argparse.ArgumentParser:
     return argument_parser
 
 
+def _configured_mcp_targets(project: Path) -> list[str]:
+    targets: list[str] = []
+    installers = {
+        "codex": lambda: mcp_install.install_codex(project, uninstall=False, dry_run=True),
+        "claude": lambda: mcp_install.install_json_target(
+            "claude", project, config_path=None, uninstall=False, dry_run=True
+        ),
+        "opencode": lambda: mcp_install.install_json_target(
+            "opencode", project, config_path=None, uninstall=False, dry_run=True
+        ),
+        "vscode": lambda: mcp_install.install_json_target(
+            "vscode", project, config_path=None, uninstall=False, dry_run=True
+        ),
+        "zed": lambda: mcp_install.install_json_target("zed", project, config_path=None, uninstall=False, dry_run=True),
+        "pi": lambda: mcp_install.pi_support.install_extension(
+            project, "mcp", pci_command="pci", uninstall=False, dry_run=True
+        ),
+    }
+    for target, inspect in installers.items():
+        try:
+            action, _path = inspect()
+        except (OSError, TypeError, ValueError):
+            continue
+        if action in {"updated", "unchanged"}:
+            targets.append(target)
+    return targets
+
+
+def _configured_hook_targets(project: Path) -> list[str]:
+    targets: list[str] = []
+    installers = {
+        "claude": lambda: hook_install.install_claude(
+            project / ".claude" / "settings.json", uninstall=False, dry_run=True
+        ),
+        "codex": lambda: hook_install.install_codex(project / ".codex" / "hooks.json", uninstall=False, dry_run=True),
+        "opencode": lambda: hook_install.install_opencode(project, uninstall=False, dry_run=True),
+        "pi": lambda: hook_install.install_pi(project, uninstall=False, dry_run=True),
+    }
+    for target, inspect in installers.items():
+        try:
+            outcome = inspect()
+        except OSError:
+            continue
+        if outcome.action in {"updated", "unchanged"}:
+            targets.append(target)
+    if hook_install.has_git_hook(project):
+        targets.append("git")
+    return targets
+
+
+def check_project_integrations(project: Path) -> list[CheckResult]:
+    """Report project-local PCI integrations under ``project``."""
+    project = project.resolve()
+    if not (project / ".git").exists():
+        return [result("project", "skip", f"{project} is not a Git repository")]
+
+    mcp_targets = _configured_mcp_targets(project)
+    hook_targets = _configured_hook_targets(project)
+    return [
+        result("project", "ok", str(project)),
+        result(
+            "project-mcp",
+            "ok" if mcp_targets else "warn",
+            f"installed for {', '.join(mcp_targets)}" if mcp_targets else "not installed for this project",
+        ),
+        result(
+            "project-hooks",
+            "ok" if hook_targets else "skip",
+            f"installed for {', '.join(hook_targets)}" if hook_targets else "not installed (optional)",
+        ),
+    ]
+
+
 def check_results(args: DoctorArgs, env: config.Env | None = None) -> list[CheckResult]:
     env = os.environ if env is None else env
     gpus = discover_gpus()
@@ -212,6 +293,7 @@ def check_results(args: DoctorArgs, env: config.Env | None = None) -> list[Check
     else:
         results.extend(check_database())
     results.extend(check_embedding_endpoint(env=env, mode=args.embedding, timeout=args.timeout))
+    results.extend(check_project_integrations(Path.cwd()))
     return results
 
 
@@ -222,6 +304,25 @@ _EMBEDDING_SERVICE_UNITS: dict[str, str] = {
     "npu": "pci-lemonade-npu.service",
     "amdgpu": "pci-llama-rocm.service",
     "nvidia": "pci-llama-cuda.service",
+}
+_BACKEND_PROFILES = {
+    "fastembed": "cpu",
+    "lemonade": "npu",
+    "rocm": "amdgpu",
+    "cuda": "nvidia",
+    "apple": "apple",
+}
+_BACKEND_QUADLET_FILES = {
+    "cpu": ("pci-fastembed.build", "pci-fastembed-models.volume", "pci-fastembed.container"),
+    "npu": (
+        "pci-lemonade-huggingface.volume",
+        "pci-lemonade-llama.volume",
+        "pci-lemonade-cache.volume",
+        "pci-lemonade-npu.container",
+    ),
+    "amdgpu": ("pci-llama-rocm.build", "pci-llamacpp-rocm.volume", "pci-llama-rocm.container"),
+    "nvidia": ("pci-llama-cuda.build", "pci-llama-cuda.container"),
+    "apple": (),
 }
 EMBEDDING_VOLUME_NAMES = (
     "pci-fastembed-models",
@@ -466,52 +567,68 @@ def start_database() -> int:
     return 0
 
 
-def start_embedding_services() -> int:
-    """Detect available hardware and start the best local embedding service."""
+def _quadlet_service_name(filename: str) -> str:
+    stem, _separator, kind = filename.rpartition(".")
+    suffix = "" if kind == "container" else f"-{kind}"
+    return f"{stem}{suffix}.service"
+
+
+def start_embedding_services(backend: str = "auto") -> int:
+    """Start the requested, or best available, local embedding service."""
     by_name = _detect_embedding_options()
     commands = local_embedding_startup_commands(by_name)
-    if not commands:
-        write_stdout("No local embedding service is available for this hardware.")
+    available = dict(commands)
+    profile = _BACKEND_PROFILES.get(backend) if backend != "auto" else (commands[-1][0] if commands else None)
+    if profile is None or profile not in available:
+        requested = f" {backend!r}" if backend != "auto" else ""
+        write_stdout(f"No available local embedding backend{requested} was found on this hardware.")
         return 1
-    # Take the last option: Apple is always last when present; otherwise the most
-    # capable detected hardware (NVIDIA/AMD > NPU > CPU) ends up last.
-    profile, display_command = commands[-1]
+    display_command = available[profile]
     write_stdout(f"Starting {profile} embedding: {display_command}")
-    if profile == "apple":
-        # In-process call: the launcher daemonizes itself with sys.executable,
-        # so no separate executable needs to be on PATH.
-        apple_embed_server.main()
-        return 0
-    unit = _EMBEDDING_SERVICE_UNITS.get(profile)
-    if unit is None:
-        write_stdout(f"Unknown embedding profile: {profile!r}")
+    selected_files = set(_BACKEND_QUADLET_FILES[profile])
+    unselected_units = [
+        _quadlet_service_name(filename) for filename in process.QUADLET_UNIT_FILES if filename not in selected_files
+    ]
+    try:
+        for unit in unselected_units:
+            _ = process.run_systemctl_user(["stop", unit], process.RunOptions(capture_output=True))
+        changed = process.materialize_quadlet_units(selected_files=selected_files)
+    except FileNotFoundError:
+        write_stdout("podman/systemctl not found; cannot start embedding service.")
         return 1
     try:
-        changed = process.materialize_quadlet_units()
         if changed:
             _ = process.run_systemctl_user(["daemon-reload"])
-        _ = process.run_systemctl_user(["start", unit])
+        _ = process.run_systemctl_user(["reset-failed", *unselected_units], process.RunOptions(capture_output=True))
     except FileNotFoundError:
-        write_stdout("podman/systemctl not found; cannot start embedding container.")
+        write_stdout("systemctl not found; cannot load embedding service.")
+        return 1
+    if profile == "apple":
+        apple_embed_server.main()
+        return 0
+    try:
+        _ = process.run_systemctl_user(["start", _EMBEDDING_SERVICE_UNITS[profile]])
+    except FileNotFoundError:
+        write_stdout("systemctl not found; cannot start embedding service.")
         return 1
     return 0
 
 
-def start_all_services() -> int:
-    """Start the database and best available embedding service."""
+def start_all_services(backend: str = "auto") -> int:
+    """Start the database and requested local embedding service."""
     db_code = start_database()
-    emb_code = start_embedding_services()
+    emb_code = start_embedding_services(backend)
     return db_code or emb_code
 
 
 def _dispatch_start(parsed: DoctorArgs) -> int | None:
     """Handle start flags and return exit code, or None to continue."""
     if parsed.start:
-        return start_all_services()
+        return start_all_services(parsed.embedding_backend)
     if parsed.start_db:
         return start_database()
     if parsed.start_embedding:
-        return start_embedding_services()
+        return start_embedding_services(parsed.embedding_backend)
     return None
 
 

@@ -97,14 +97,17 @@ def install_opencode(project: Path, *, uninstall: bool, dry_run: bool) -> Instal
         return InstallOutcome("opencode", action, str(base), rows)
 
     existed = all(path.exists() for path in targets.values())
-    if not dry_run:
+    unchanged = existed and all(
+        targets[rel].read_text(encoding="utf-8") == content for rel, content in OPENCODE_FILES.items()
+    )
+    if not dry_run and not unchanged:
         for rel, content in OPENCODE_FILES.items():
             path = targets[rel]
             path.parent.mkdir(parents=True, exist_ok=True)
             _ = path.write_text(content, encoding="utf-8")
     return InstallOutcome(
         "opencode",
-        "updated" if existed else "installed",
+        "unchanged" if unchanged else "updated" if existed else "installed",
         str(base),
         [("plugin", rel) for rel in OPENCODE_FILES],
     )
@@ -232,9 +235,12 @@ def install_claude(settings_path: Path, *, uninstall: bool, dry_run: bool) -> In
     else:
         _ = data.pop("hooks", None)
 
-    if not dry_run:
+    content = json.dumps(data, indent=2) + "\n"
+    if existed and settings_path.read_text(encoding="utf-8") == content:
+        action = "unchanged"
+    if not dry_run and action != "unchanged":
         settings_path.parent.mkdir(parents=True, exist_ok=True)
-        _ = settings_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        _ = settings_path.write_text(content, encoding="utf-8")
     return InstallOutcome("claude", action, str(settings_path), rows)
 
 
@@ -289,9 +295,12 @@ def install_codex(hooks_path: Path, *, uninstall: bool, dry_run: bool) -> Instal
         data["hooks"] = hooks
     else:
         _ = data.pop("hooks", None)
-    if not dry_run:
+    content = json.dumps(data, indent=2) + "\n"
+    if existed and hooks_path.read_text(encoding="utf-8") == content:
+        action = "unchanged"
+    if not dry_run and action != "unchanged":
         hooks_path.parent.mkdir(parents=True, exist_ok=True)
-        _ = hooks_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        _ = hooks_path.write_text(content, encoding="utf-8")
     return InstallOutcome("codex", action, str(hooks_path), rows)
 
 
@@ -383,11 +392,13 @@ def _install_one(hook_path: Path, *, block: str, uninstall: bool, dry_run: bool)
         base = "#!/bin/sh\n" + base
     if not base.endswith("\n"):
         base += "\n"
-    if not dry_run:
+    content = base + block
+    unchanged = had_block and existing == content
+    if not dry_run and not unchanged:
         hook_path.parent.mkdir(parents=True, exist_ok=True)
-        _ = hook_path.write_text(base + block, encoding="utf-8")
+        _ = hook_path.write_text(content, encoding="utf-8")
         hook_path.chmod(0o755)
-    return ("updated" if had_block else "installed"), had_block
+    return ("unchanged" if unchanged else "updated" if had_block else "installed"), had_block
 
 
 def install_git(repo: Path, *, uninstall: bool, dry_run: bool) -> InstallOutcome:
@@ -409,7 +420,10 @@ def install_git(repo: Path, *, uninstall: bool, dry_run: bool) -> InstallOutcome
         ]
         return InstallOutcome("git", action, str(repo / ".git" / "hooks"), rows)
 
-    action = "updated" if any_had_block else "installed"
+    actions = [result for _, _, result, _ in results]
+    action = (
+        "unchanged" if all(result == "unchanged" for result in actions) else "updated" if any_had_block else "installed"
+    )
     rows = [(name, str(path)) for name, path, _, _ in results]
     rows.append(("command", command_line))
     return InstallOutcome("git", action, str(repo / ".git" / "hooks"), rows)

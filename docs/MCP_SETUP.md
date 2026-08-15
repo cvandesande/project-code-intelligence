@@ -153,6 +153,7 @@ pci index --init-db --mcp-config opencode .
 pci index --init-db --mcp-config vscode .
 pci index --init-db --mcp-config cline .
 pci index --init-db --mcp-config zed .
+pci index --init-db --mcp-config pi .
 ```
 
 Generated client config uses the generic server key
@@ -460,20 +461,22 @@ Pi has no built-in MCP client, so PCI installs a project-local extension that
 launches the stdio server and registers its discovered tools dynamically:
 
 ```sh
+pci index --init-db --mcp-config pi .
 pci mcp install --target pi
 pci hook install --target pi
 ```
 
-The commands write separate managed extensions under `.pi/extensions/`.
+The index command creates the private read-only credentials and prints the MCP
+installer command. The install commands write separate managed extensions under `.pi/extensions/`.
 Restart Pi and trust the project to load them. Use the corresponding
 `--uninstall` command to remove only PCI's extension. The hook extension adds
 the session banner and runs edit evidence for Pi's `edit` and `write` tools.
 
 ## Other MCP Clients
 
-`pci index --mcp-config` intentionally emits project-scoped config only for
-Codex, Claude Code, OpenCode, VS Code Copilot, and Zed, plus user-scoped Cline
-config for the VS Code extension. For other clients, use the `env` export block
+`pci index --mcp-config` emits project-scoped setup for Codex, Claude Code,
+OpenCode, Pi, VS Code Copilot, and Zed, plus user-scoped Cline config for the
+VS Code extension. For other clients, use the `env` export block
 with that client's project/workspace configuration if it has one.
 
 ## Agent Guidance

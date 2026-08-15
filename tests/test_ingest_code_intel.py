@@ -46,6 +46,7 @@ from project_code_intelligence.ingest_code_intel import (
     mcp_project_config_path,
     mcp_ro_export_block,
     opencode_mcp_config_block,
+    pi_mcp_config_guidance,
     replace_repos_for_full_ingests,
     resolve_scan_workers,
     run_ingest_plan,
@@ -695,6 +696,34 @@ class DatabaseBootstrapReportTests(unittest.TestCase):
         self.assertIn("Credentials stay in PCI's private user config", cline_output)
         self.assertNotIn("PCI_MCP_DATABASE", cline_output)
         self.assertNotIn("Required environment variables for pci mcp (RO)", cline_output)
+
+    def test_pi_mcp_config_prints_project_extension_install_guidance(self) -> None:
+        ro_value = " ".join(("ro", "fixture"))
+        plan = build_ingest_plan(cli_args(collection="demo-workspace", root=Path.cwd(), repos="."))
+        bootstrap = db.DatabaseBootstrapResult(
+            dbname="pci_demo",
+            ro_role=db.DatabaseRole(
+                name="pci_demo_ro",
+                password=ro_value,
+                created=True,
+                database_url="postgresql://pci_demo_ro@db.example.invalid:5432/pci_demo",
+            ),
+        )
+        with patch.dict(os.environ, {"PCI_DATABASE_SCOPE_PATH": "/work/demo-workspace"}, clear=False):
+            context = mcp_config_context(plan, bootstrap, command="/usr/bin/pci")
+        if context is None:
+            raise AssertionError("expected MCP config context")
+
+        output = mcp_config_block(context, "pi")
+
+        if output is None:
+            raise AssertionError("expected Pi MCP config guidance")
+        self.assertEqual(output, pi_mcp_config_guidance(context))
+        self.assertIn("Pi project-scoped MCP extension", output)
+        self.assertIn("pci mcp install --target pi --project /work/demo-workspace", output)
+        self.assertIn("trust the project", output)
+        self.assertNotIn("PCI_MCP_DATABASE", output)
+        self.assertNotIn(ro_value, output)
 
     def test_zed_mcp_config_block_uses_scope_without_credentials(self) -> None:
         ro_value = " ".join(("ro", "fixture"))
