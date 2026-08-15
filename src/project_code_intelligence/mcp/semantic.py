@@ -237,34 +237,34 @@ def semantic_executable_symbol_distance_boost(args: Json, query: str) -> float:
     return SEMANTIC_EXECUTABLE_SYMBOL_DISTANCE_BOOST if semantic_has_implementation_intent(args, query) else 0.0
 
 
-def semantic_structural_symbol_distance_penalty(args: Json, query: str) -> float:
+def semantic_implementation_distance_penalty(args: Json, query: str, penalty: float) -> float:
     if any(optional_text(args, name) for name in ("source_path", "source_path_prefix", "file_role", "content_class")):
         return 0.0
-    return SEMANTIC_STRUCTURAL_SYMBOL_DISTANCE_PENALTY if semantic_has_implementation_intent(args, query) else 0.0
+    return penalty if semantic_has_implementation_intent(args, query) else 0.0
+
+
+def semantic_source_distance_penalty(args: Json, query: str, penalty: float) -> float:
+    if any(optional_text(args, name) for name in ("source_path", "source_path_prefix", "file_role", "content_class")):
+        return 0.0
+    if semantic_query_terms(query) & SEMANTIC_NON_SOURCE_QUERY_TERMS:
+        return 0.0
+    return penalty
+
+
+def semantic_structural_symbol_distance_penalty(args: Json, query: str) -> float:
+    return semantic_implementation_distance_penalty(args, query, SEMANTIC_STRUCTURAL_SYMBOL_DISTANCE_PENALTY)
 
 
 def semantic_validation_distance_penalty(args: Json, query: str) -> float:
-    if any(optional_text(args, name) for name in ("source_path", "source_path_prefix", "file_role", "content_class")):
-        return 0.0
-    return SEMANTIC_VALIDATION_DISTANCE_PENALTY if semantic_has_implementation_intent(args, query) else 0.0
+    return semantic_implementation_distance_penalty(args, query, SEMANTIC_VALIDATION_DISTANCE_PENALTY)
 
 
 def semantic_generated_distance_penalty(args: Json, query: str) -> float:
-    if any(optional_text(args, name) for name in ("source_path", "source_path_prefix", "file_role", "content_class")):
-        return 0.0
-    query_terms = semantic_query_terms(query)
-    if query_terms & SEMANTIC_NON_SOURCE_QUERY_TERMS:
-        return 0.0
-    return SEMANTIC_GENERATED_DISTANCE_PENALTY
+    return semantic_source_distance_penalty(args, query, SEMANTIC_GENERATED_DISTANCE_PENALTY)
 
 
 def semantic_non_source_distance_penalty(args: Json, query: str) -> float:
-    if any(optional_text(args, name) for name in ("source_path", "source_path_prefix", "file_role", "content_class")):
-        return 0.0
-    query_terms = semantic_query_terms(query)
-    if query_terms & SEMANTIC_NON_SOURCE_QUERY_TERMS:
-        return 0.0
-    return SEMANTIC_NON_SOURCE_DISTANCE_PENALTY
+    return semantic_source_distance_penalty(args, query, SEMANTIC_NON_SOURCE_DISTANCE_PENALTY)
 
 
 def semantic_search_diversity_enabled(args: Json) -> bool:

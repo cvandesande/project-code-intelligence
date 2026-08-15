@@ -192,11 +192,7 @@ def worktree_ingest_args(spec: str) -> list[str]:
 
 
 def inferred_collection_for_repo_paths(repo_paths: list[str]) -> str:
-    absolute_paths = [Path(path).expanduser().resolve(strict=False) for path in repo_paths]
-    if len(absolute_paths) == 1:
-        return default_collection(absolute_paths[0])
-    root, _ = multi_repo_workspace_and_repos(repo_paths)
-    return default_collection(root)
+    return default_collection(inferred_database_scope_path_for_repo_paths(repo_paths))
 
 
 def inferred_database_scope_path_for_repo_paths(repo_paths: list[str]) -> Path:

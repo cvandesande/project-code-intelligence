@@ -37,6 +37,7 @@ class SymbolChunkSpec:
     # user symbol in the codebase.
     non_resolvable_targets: frozenset[str] = frozenset()
     referenced_symbols: list[str] | None = None
+    reference_metadata: dict[str, JsonObject] | None = None
     file_role: str | None = None
     content_class: str | None = None
 
@@ -130,14 +131,20 @@ def brace_delta(line: str, *, in_block_comment: bool) -> tuple[int, bool, bool]:
 
 
 def bounded_brace_body(
-    lines: list[str], start_idx: int, max_lines: int = 180, max_chars: int = 5200
+    lines: list[str],
+    start_idx: int,
+    max_lines: int = 180,
+    max_chars: int = 5200,
+    *,
+    open_location: tuple[int, int] | None = None,
 ) -> tuple[int, str, bool]:
     depth = 0
     saw_open = False
     end_idx = min(len(lines) - 1, start_idx + max_lines - 1)
     in_block_comment = False
-    for idx in range(start_idx, min(len(lines), start_idx + max_lines)):
-        line = lines[idx]
+    open_idx, open_col = open_location or (start_idx, 0)
+    for idx in range(open_idx, min(len(lines), start_idx + max_lines)):
+        line = lines[idx][open_col:] if idx == open_idx else lines[idx]
         delta, in_block_comment, line_saw_open = brace_delta(line, in_block_comment=in_block_comment)
         depth += delta
         if line_saw_open:
@@ -212,6 +219,7 @@ def make_symbol_chunk(intel_file: IntelFile, spec: SymbolChunkSpec) -> tuple[Int
             target_symbol=ref,
             source_path=intel_file.source_path,
             confidence_kind="heuristic_candidate",
+            metadata=(spec.reference_metadata or {}).get(ref, {}),
         )
         for ref in refs[:80]
     ]

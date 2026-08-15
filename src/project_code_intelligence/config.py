@@ -341,21 +341,21 @@ def database_url_with_dbname(dsn: str, dbname: str) -> str:
     parts = _split_pg_dsn(dsn)
     if parts is None:
         return dsn
-    return urlunsplit((parts.scheme, parts.netloc, "/" + quote(dbname, safe=""), parts.query, parts.fragment))
+    return parts._replace(path="/" + quote(dbname, safe="")).geturl()
 
 
 def database_url_without_credentials_or_dbname(dsn: str) -> str:
     parts = _split_pg_dsn(dsn)
     if parts is None:
         return dsn
-    return urlunsplit((parts.scheme, _bracketed_netloc(parts), "", parts.query, parts.fragment))
+    return parts._replace(netloc=_bracketed_netloc(parts), path="").geturl()
 
 
 def database_url_without_credentials(dsn: str) -> str:
     parts = _split_pg_dsn(dsn)
     if parts is None:
         return dsn
-    return urlunsplit((parts.scheme, _bracketed_netloc(parts), parts.path, parts.query, parts.fragment))
+    return parts._replace(netloc=_bracketed_netloc(parts)).geturl()
 
 
 def database_url_with_credentials(dsn: str, user: str, password: str | None = None) -> str:
@@ -365,7 +365,7 @@ def database_url_with_credentials(dsn: str, user: str, password: str | None = No
     userinfo = quote(user, safe="")
     if password is not None:
         userinfo += ":" + quote(password, safe="")
-    return urlunsplit((parts.scheme, f"{userinfo}@{_bracketed_netloc(parts)}", parts.path, parts.query, parts.fragment))
+    return parts._replace(netloc=f"{userinfo}@{_bracketed_netloc(parts)}").geturl()
 
 
 def configured_database_scope_path(env: Env | None = None) -> Path:

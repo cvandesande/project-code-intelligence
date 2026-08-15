@@ -88,14 +88,8 @@ def connect() -> Generator[db.DbConnection]:
 
 
 def code_intel_tables_exist(conn: db.DbConnection) -> bool:
-    row = conn.execute(
-        """
-        SELECT to_regclass('public.project_code_intel_records') IS NOT NULL AS exists
-        """
-    ).fetchone()
-    return bool(db.require_row(row, "code-intel table existence")["exists"])
+    return db.table_exists(conn, "project_code_intel_records")
 
 
 def table_regclass_exists(conn: db.DbConnection, table: str) -> bool:
-    row = conn.execute("SELECT to_regclass(%s) IS NOT NULL AS exists", [f"public.{table}"]).fetchone()
-    return bool(db.require_row(row, "table existence")["exists"])
+    return db.table_exists(conn, table)

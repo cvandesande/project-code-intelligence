@@ -113,20 +113,24 @@ def _is_compact_noise(key: str, value: object) -> bool:
     return value is False and key in _STRIP_WHEN_FALSE
 
 
-def _row_str(row: Mapping[str, object], key: str) -> str | None:
+def _row_text(row: Mapping[str, object], key: str) -> str | None:
     value = row.get(key)
-    return value if isinstance(value, str) and value else None
+    return value if isinstance(value, str) else None
+
+
+def _inject_relative_path(out: dict[str, object], row: Mapping[str, object], source_key: str, target_key: str) -> None:
+    source_path = _row_text(row, source_key)
+    if not source_path:
+        return
+    repo = _row_text(row, "repo")
+    rel = repo_relative_path(source_path, repo)
+    if rel:
+        out[target_key] = rel
 
 
 def _inject_repo_path(out: dict[str, object], row: Mapping[str, object]) -> None:
     """Add `repo_path` (repo-relative form of source_path) to a record/file dict."""
-    source_path = _row_str(row, "source_path")
-    if not source_path:
-        return
-    repo = _row_str(row, "repo")
-    rel = repo_relative_path(source_path, repo)
-    if rel:
-        out["repo_path"] = rel
+    _inject_relative_path(out, row, "source_path", "repo_path")
 
 
 def _inject_similarity(out: dict[str, object], row: Mapping[str, object]) -> None:
@@ -149,17 +153,8 @@ def _inject_similarity(out: dict[str, object], row: Mapping[str, object]) -> Non
 
 def _inject_edge_repo_paths(out: dict[str, object], row: Mapping[str, object]) -> None:
     """Add `source_repo_path` / `target_repo_path` to an edge dict."""
-    repo = _row_str(row, "repo")
-    source_path = _row_str(row, "source_path")
-    if source_path:
-        source_rel = repo_relative_path(source_path, repo)
-        if source_rel:
-            out["source_repo_path"] = source_rel
-    target_path = _row_str(row, "target_path")
-    if target_path:
-        target_rel = repo_relative_path(target_path, repo)
-        if target_rel:
-            out["target_repo_path"] = target_rel
+    _inject_relative_path(out, row, "source_path", "source_repo_path")
+    _inject_relative_path(out, row, "target_path", "target_repo_path")
 
 
 def verbose_record(row: Mapping[str, object]) -> dict[str, object]:
@@ -253,11 +248,6 @@ def _extract_snippet(
     return _centered_text_window(code, _first_snippet_match(code, terms), length)
 
 
-def _row_text(row: db.DbRow, key: str) -> str | None:
-    value = row.get(key)
-    return value if isinstance(value, str) else None
-
-
 def compact_record(
     row: db.DbRow,
     snippet_length: int = DEFAULT_SNIPPET_LENGTH,
@@ -313,13 +303,6 @@ def compact_file(row: db.DbRow) -> dict[str, object]:
     # `repo` is selected so `_inject_repo_path` can strip the prefix; it's still
     # redundant with the response envelope for compact output, so drop it after use.
     out = {k: v for k, v in row.items() if not _is_compact_noise(k, v) and k != "repo"}
-    _inject_repo_path(out, row)
-    return out
-
-
-def verbose_file(row: db.DbRow) -> dict[str, object]:
-    """Verbose file dict for list_code_intel_files. Mirrors `dict(row)` plus `repo_path`."""
-    out: dict[str, object] = dict(row)
     _inject_repo_path(out, row)
     return out
 

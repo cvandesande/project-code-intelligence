@@ -25,26 +25,28 @@ batch. Exit 1 = regression.
 
 | # | duplication | where |
 |---|-------------|-------|
-| 1 | `verbose_record`/`verbose_file` — byte-identical bodies | `mcp/formatting.py` |
-| 2 | `parse_embedding_response` reimplements the parse `parse_embedding_items` owns | `embedding/bench.py` vs `embedding/endpoint.py` |
-| 3 | `hooks/install._as_object` == `console_ui.as_object` exactly | `hooks/install.py`, `console_ui.py` |
-| 4 | `hooks/install._as_list` ~= `console_ui.as_list` (failure value differs) | `hooks/install.py`, `console_ui.py` |
-| 5 | LIKE-escape chain x3 (`source_path_*_pattern`) | `mcp/filters.py` |
-| 6 | `_row_str`/`_row_text` — differ only on empty-string handling | `mcp/formatting.py` |
-| 7 | `table_exists`/`table_regclass_exists`/`code_intel_tables_exist` — same `to_regclass` query x3 | `doctor/common.py`, `mcp/db.py` |
-| 8 | `_format_seconds` / `format_duration` — two duration formatters, one a superset | `progress.py`, `runtime.py` |
-| 9 | `_postgres_admin_check_settings` / `postgres_admin_target_fallback_settings` — same credential check | `doctor/database.py`, `ingest_code_intel.py` |
-| 10 | 4 semantic penalty fns — identical modulo returned constant | `mcp/semantic.py:240-267` |
-| 11 | `endpoint_is_remote` duplicated verbatim | `doctor/embeddings.py`, `embedding/framework.py` |
-| 12 | HMAC password-derivation core x2 — crypto deserves one home | `db.py:254-268` |
-| 13 | repo-root inference x2 — drift here would be a bug | `cli.py:162-177` |
-| 14 | DSN split/rebuild frame x4 | `config.py:340-368` |
-| 15 | `bounded_brace_body` / `bounded_brace_body_from_open` — incl. shared `-38` truncation magic | `parsers/core.py`, `parsers/javascript.py` |
-| 16 | repo-path inject idiom x3 (`_inject_*`) | `mcp/formatting.py` |
-| 17 | `js_symbol_records` reimplements `make_symbol_chunk` — record_id/title formats must stay in sync | `parsers/javascript.py`, `parsers/core.py` |
+| 1 | ~~`verbose_record`/`verbose_file` — byte-identical bodies~~ | `mcp/formatting.py` |
+| 2 | ~~`parse_embedding_response` reimplements the parse `parse_embedding_items` owns~~ | `embedding/bench.py` vs `embedding/endpoint.py` |
+| 3 | ~~`hooks/install._as_object` == `console_ui.as_object` exactly~~ | `hooks/install.py`, `console_ui.py` |
+| 4 | ~~`hooks/install._as_list` ~= `console_ui.as_list` (failure value differs)~~ | `hooks/install.py`, `console_ui.py` |
+| 5 | ~~LIKE-escape chain x3 (`source_path_*_pattern`)~~ | `mcp/filters.py` |
+| 6 | ~~`_row_str`/`_row_text` — differ only on empty-string handling~~ | `mcp/formatting.py` |
+| 7 | ~~`table_exists`/`table_regclass_exists`/`code_intel_tables_exist` — same `to_regclass` query x3~~ | `doctor/common.py`, `mcp/db.py` |
+| 8 | ~~`_format_seconds` / `format_duration` — two duration formatters, one a superset~~ | `progress.py`, `runtime.py` |
+| 9 | ~~`_postgres_admin_check_settings` / `postgres_admin_target_fallback_settings` — same credential check~~ | `doctor/database.py`, `ingest_code_intel.py` |
+| 10 | ~~4 semantic penalty fns — identical modulo returned constant~~ | `mcp/semantic.py:240-267` |
+| 11 | ~~`endpoint_is_remote` duplicated verbatim~~ | `doctor/embeddings.py`, `embedding/framework.py` |
+| 12 | ~~HMAC password-derivation core x2 — crypto deserves one home~~ | `db.py:254-268` |
+| 13 | ~~repo-root inference x2 — drift here would be a bug~~ | `cli.py:162-177` |
+| 14 | ~~DSN split/rebuild frame x4~~ | `config.py:340-368` |
+| 15 | ~~`bounded_brace_body` / `bounded_brace_body_from_open` — incl. shared `-38` truncation magic~~ | `parsers/core.py`, `parsers/javascript.py` |
+| 16 | ~~repo-path inject idiom x3 (`_inject_*`)~~ | `mcp/formatting.py` |
+| 17 | ~~`js_symbol_records` reimplements `make_symbol_chunk` — record_id/title formats must stay in sync~~ | `parsers/javascript.py`, `parsers/core.py` |
 
 Fixed since labeling:
 
+- (2026-08-15) `verbose_file` folded into `verbose_record`.
+- (2026-08-15) Remaining 16 source-verified seed duplications collapsed; see the struck rows above.
 - (2026-08-11) `evidence._select_snapshots` == `analyze.select_snapshots`
   (not in the 17; caught in the same cycle, folded into `analyze`).
 - (2026-08-11) `_coerce_str`/`_coerce_int` x3 (`analyze.py`, `evidence.py`,

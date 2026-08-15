@@ -100,22 +100,19 @@ def snapshot_scope_response(args: Json) -> Json:
     return result
 
 
+def _scoped_snapshot_clauses(args: Json, alias: str, *, snapshot_table: bool) -> tuple[list[str], QueryParams]:
+    scope, snapshot_id = snapshot_scope(args)
+    if snapshot_id is not None:
+        id_column = "id" if snapshot_table else "snapshot_id"
+        return [f"{column(alias, id_column)} = %s"], [snapshot_id]
+    if scope == "historical":
+        return [], []
+    latest_clause = latest_snapshot_table_clause(alias) if snapshot_table else latest_record_snapshot_clause(alias)
+    return [latest_clause], []
+
+
 def scoped_snapshot_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]:
-    scope, snapshot_id = snapshot_scope(args)
-    if snapshot_id is not None:
-        return [f"{column(alias, 'snapshot_id')} = %s"], [snapshot_id]
-    if scope == "historical":
-        return [], []
-    return [latest_record_snapshot_clause(alias)], []
-
-
-def scoped_snapshot_table_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]:
-    scope, snapshot_id = snapshot_scope(args)
-    if snapshot_id is not None:
-        return [f"{column(alias, 'id')} = %s"], [snapshot_id]
-    if scope == "historical":
-        return [], []
-    return [latest_snapshot_table_clause(alias)], []
+    return _scoped_snapshot_clauses(args, alias, snapshot_table=False)
 
 
 def _collection_repo_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]:
@@ -132,20 +129,24 @@ def _collection_repo_clauses(args: Json, alias: str) -> tuple[list[str], QueryPa
     return clauses, params
 
 
-def scoped_collection_repo_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]:
+def _scoped_collection_repo_clauses(args: Json, alias: str, *, snapshot_table: bool) -> tuple[list[str], QueryParams]:
     clauses, params = _collection_repo_clauses(args, alias)
-    snapshot_clauses, snapshot_params = scoped_snapshot_clauses(args, alias)
+    snapshot_clauses, snapshot_params = _scoped_snapshot_clauses(args, alias, snapshot_table=snapshot_table)
     clauses.extend(snapshot_clauses)
     params.extend(snapshot_params)
     return clauses, params
+
+
+def scoped_collection_repo_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]:
+    return _scoped_collection_repo_clauses(args, alias, snapshot_table=False)
 
 
 def scoped_snapshot_table_collection_repo_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]:
-    clauses, params = _collection_repo_clauses(args, alias)
-    snapshot_clauses, snapshot_params = scoped_snapshot_table_clauses(args, alias)
-    clauses.extend(snapshot_clauses)
-    params.extend(snapshot_params)
-    return clauses, params
+    return _scoped_collection_repo_clauses(args, alias, snapshot_table=True)
+
+
+def escape_like_pattern(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def source_path_prefix_pattern(prefix: str) -> str:
@@ -153,19 +154,16 @@ def source_path_prefix_pattern(prefix: str) -> str:
     # same subtree match. The pattern matches strict descendants only — to match a
     # file at the exact path, use source_path instead.
     normalized = prefix.rstrip("/")
-    escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"{escaped}/%"
+    return f"{escape_like_pattern(normalized)}/%"
 
 
 def source_path_suffix_pattern(path: str) -> str:
-    escaped = path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"%/{escaped}"
+    return f"%/{escape_like_pattern(path)}"
 
 
 def source_path_prefix_suffix_pattern(prefix: str) -> str:
     normalized = prefix.rstrip("/")
-    escaped = normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"%/{escaped}/%"
+    return f"%/{escape_like_pattern(normalized)}/%"
 
 
 _WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:/")

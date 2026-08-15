@@ -63,8 +63,8 @@ class McpDatabaseSessionTests(unittest.TestCase):
 
         self.assertTrue(records_exist)
         self.assertFalse(static_exists)
-        self.assertIn("project_code_intel_records", fake.calls[0][0])
-        self.assertEqual(fake.calls[0][1], [])
+        self.assertIn("to_regclass(%s)", fake.calls[0][0])
+        self.assertEqual(fake.calls[0][1], ["public.project_code_intel_records"])
         self.assertEqual(fake.calls[1][1], ["public.project_code_intel_static_runs"])
 
 

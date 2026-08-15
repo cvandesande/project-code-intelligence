@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence import config
 
+SECONDS_PER_MINUTE = 60
+
 if TYPE_CHECKING:
     import queue
 
@@ -342,14 +344,19 @@ def reset_active_metrics() -> RuntimeMetrics:
     return _MetricsState.instance
 
 
-def format_duration(seconds: float) -> str:
+def format_duration(seconds: float, *, precise: bool = False) -> str:
+    if precise and seconds < 1:
+        return f"{round(seconds * 1000)} ms"
+    if precise and seconds < SECONDS_PER_MINUTE:
+        return f"{seconds:.1f} s"
     whole = int(seconds)
     hours, remainder = divmod(whole, 3600)
-    minutes, secs = divmod(remainder, 60)
+    minutes, secs = divmod(remainder, SECONDS_PER_MINUTE)
     if hours:
-        return f"{hours}h{minutes:02d}m{secs:02d}s"
+        separator = " " if precise else ""
+        return f"{hours}h{separator}{minutes:02d}m{separator}{secs:02d}s"
     if minutes:
-        return f"{minutes}m{secs:02d}s"
+        return f"{minutes}m{' ' if precise else ''}{secs:02d}s"
     return f"{secs}s"
 
 

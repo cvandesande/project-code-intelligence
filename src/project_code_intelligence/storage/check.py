@@ -93,10 +93,7 @@ def freeze_baseline(
 def check_tables_exist(conn: db.DbConnection) -> bool:
     """False on a database that has never run `pci check --baseline` (read-only callers can't
     create the tables themselves, so they need to distinguish "no baseline yet" from an error)."""
-    row = conn.execute(
-        "SELECT to_regclass('public.project_code_intel_check_baselines') IS NOT NULL AS exists"
-    ).fetchone()
-    return bool(db.require_row(row, "check-baseline table existence")["exists"])
+    return db.table_exists(conn, "project_code_intel_check_baselines")
 
 
 def load_baseline(

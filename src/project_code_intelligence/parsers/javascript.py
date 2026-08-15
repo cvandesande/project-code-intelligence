@@ -4,18 +4,25 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from project_code_intelligence.models import IntelEdge, IntelFile, IntelRecord, JsonObject
-from project_code_intelligence.parsers.core import advance_block_comment, advance_quote, bounded_brace_body, brace_delta
-from project_code_intelligence.parsers.security import security_api_refs
+from project_code_intelligence.parsers.core import (
+    SymbolChunkSpec,
+    advance_block_comment,
+    advance_quote,
+    bounded_brace_body,
+    brace_delta,
+    make_symbol_chunk,
+)
 from project_code_intelligence.records import (
-    RecordSpec,
     common_extracts,
     extract_referenced_symbols,
     line_window_records,
     make_code_record,
-    make_record,
 )
+
+if TYPE_CHECKING:
+    from project_code_intelligence.models import IntelEdge, IntelFile, IntelRecord, JsonObject
 
 JS_IDENTIFIER = r"[$A-Za-z_][$A-Za-z0-9_$]*"
 JS_DECL_ANNOTATION = r"(?:/\*[^*]*\*/\s*)*"
@@ -227,38 +234,20 @@ def find_js_function_body_open(lines: list[str], start_idx: int, *, max_lines: i
     return None
 
 
-def bounded_brace_body_from_open(
-    lines: list[str],
-    start_idx: int,
-    open_location: tuple[int, int],
-    *,
-    max_lines: int = 260,
-    max_chars: int = 7200,
-) -> tuple[int, str]:
-    depth = 0
-    end_idx = min(len(lines) - 1, start_idx + max_lines - 1)
-    in_block_comment = False
-    open_idx, open_col = open_location
-    for idx in range(open_idx, min(len(lines), start_idx + max_lines)):
-        line = lines[idx][open_col:] if idx == open_idx else lines[idx]
-        delta, in_block_comment, _saw_open = brace_delta(line, in_block_comment=in_block_comment)
-        depth += delta
-        end_idx = idx
-        if depth <= 0:
-            break
-    body = "\n".join(lines[start_idx : end_idx + 1])
-    if len(body) > max_chars:
-        body = body[: max_chars - 38].rstrip() + "\n/* symbol candidate truncated */"
-    return end_idx + 1, body
-
-
 def js_function_body(
     lines: list[str], start_idx: int, *, max_lines: int = 260, max_chars: int = 7200
 ) -> tuple[int, str]:
     body_open = find_js_function_body_open(lines, start_idx, max_lines=max_lines)
     if body_open is None:
         return statement_body(lines, start_idx)
-    return bounded_brace_body_from_open(lines, start_idx, body_open, max_lines=max_lines, max_chars=max_chars)
+    end_idx, body, _truncated = bounded_brace_body(
+        lines,
+        start_idx,
+        max_lines=max_lines,
+        max_chars=max_chars,
+        open_location=body_open,
+    )
+    return end_idx, body
 
 
 def js_symbol_body(lines: list[str], start_idx: int, *, kind: str) -> tuple[int, str]:
@@ -391,63 +380,21 @@ def js_symbol_records(
     spec: JsSymbolSpec,
 ) -> tuple[list[IntelRecord], list[IntelEdge]]:
     refs = js_referenced_symbols(spec.body, spec.name)
-    ref_symbols = [ref.symbol for ref in refs]
-    metadata: JsonObject = {
-        **common_extracts(spec.body),
-        "symbols_defined": [spec.name],
-        "symbols_referenced": ref_symbols,
-        "security_sensitive_apis": security_api_refs(spec.body, language=intel_file.language),
-        "bounded_symbol_parser": True,
-    }
-    record_id = f"{intel_file.source_path}::{spec.kind}::{spec.name}::{spec.line_start:06d}"
-    records = [
-        make_record(
-            intel_file,
-            RecordSpec(
-                record_type="symbol_definition",
-                record_id=record_id,
-                title=f"{spec.name} in {intel_file.source_path}:{spec.line_start}-{spec.line_end}",
-                summary=f"{intel_file.language} {spec.kind} definition {spec.name} in {intel_file.source_path}",
-                body=spec.body,
-                line_start=spec.line_start,
-                line_end=spec.line_end,
-                symbol=spec.name,
-                symbol_kind=spec.kind,
-                metadata=metadata,
-                confidence_kind="approximate_fact",
-            ),
+    symbol_record, chunk_record, edges = make_symbol_chunk(
+        intel_file,
+        SymbolChunkSpec(
+            language_label=intel_file.language,
+            name=spec.name,
+            kind=spec.kind,
+            line_start=spec.line_start,
+            line_end=spec.line_end,
+            body=spec.body,
+            metadata={"bounded_symbol_parser": True},
+            referenced_symbols=[ref.symbol for ref in refs],
+            reference_metadata={ref.symbol: ref.metadata for ref in refs},
         ),
-        make_record(
-            intel_file,
-            RecordSpec(
-                record_type="code_chunk",
-                record_id=f"{intel_file.source_path}::{spec.kind}_chunk::{spec.name}::{spec.line_start:06d}",
-                title=f"{spec.name} body in {intel_file.source_path}:{spec.line_start}-{spec.line_end}",
-                summary=f"{intel_file.language} {spec.kind} chunk for {spec.name}",
-                body=spec.body,
-                line_start=spec.line_start,
-                line_end=spec.line_end,
-                symbol=spec.name,
-                symbol_kind=spec.kind,
-                metadata=metadata,
-                parent_record_id=record_id,
-                confidence_kind="approximate_fact",
-            ),
-        ),
-    ]
-    edges = [
-        IntelEdge(
-            source_record_id=record_id,
-            edge_type="call_candidate",
-            source_symbol=spec.name,
-            target_symbol=ref.symbol,
-            source_path=intel_file.source_path,
-            confidence_kind="heuristic_candidate",
-            metadata=ref.metadata,
-        )
-        for ref in refs[:80]
-    ]
-    return records, edges if spec.emit_edges else []
+    )
+    return [symbol_record, chunk_record], edges if spec.emit_edges else []
 
 
 def javascript_records(
