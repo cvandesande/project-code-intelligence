@@ -38,7 +38,7 @@ batch. Exit 1 = regression.
 | 11 | ~~`endpoint_is_remote` duplicated verbatim~~ | `doctor/embeddings.py`, `embedding/framework.py` |
 | 12 | ~~HMAC password-derivation core x2 — crypto deserves one home~~ | `db.py:254-268` |
 | 13 | ~~repo-root inference x2 — drift here would be a bug~~ | `cli.py:162-177` |
-| 14 | ~~DSN split/rebuild frame x4~~ | `config.py:340-368` |
+| 14 | DSN split/rebuild frame x4 | `config.py:340-368` |
 | 15 | ~~`bounded_brace_body` / `bounded_brace_body_from_open` — incl. shared `-38` truncation magic~~ | `parsers/core.py`, `parsers/javascript.py` |
 | 16 | ~~repo-path inject idiom x3 (`_inject_*`)~~ | `mcp/formatting.py` |
 | 17 | ~~`js_symbol_records` reimplements `make_symbol_chunk` — record_id/title formats must stay in sync~~ | `parsers/javascript.py`, `parsers/core.py` |
@@ -46,7 +46,7 @@ batch. Exit 1 = regression.
 Fixed since labeling:
 
 - (2026-08-15) `verbose_file` folded into `verbose_record`.
-- (2026-08-15) Remaining 16 source-verified seed duplications collapsed; see the struck rows above.
+- (2026-08-15) 15 additional source-verified seed duplications collapsed; see the struck rows above.
 - (2026-08-11) `evidence._select_snapshots` == `analyze.select_snapshots`
   (not in the 17; caught in the same cycle, folded into `analyze`).
 - (2026-08-11) `_coerce_str`/`_coerce_int` x3 (`analyze.py`, `evidence.py`,
@@ -57,7 +57,8 @@ Fixed since labeling:
 Dismissed after investigation:
 
 <!-- format: - (date) `symbols` — one-line reason the collapse is not worth it -->
-- none yet
+- (2026-08-15) DSN rewrite wrappers — `_split_pg_dsn` and `SplitResult._replace()` now centralize parsing and
+  rebuilding mechanics; the remaining named transformations are intentionally separate compatibility helpers.
 
 ## Measurement context
 

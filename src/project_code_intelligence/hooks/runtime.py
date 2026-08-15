@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence import evidence, git_utils, inventory, process
+from project_code_intelligence.console_ui import as_object
 from project_code_intelligence.exceptions import DatabaseConnectionError, McpProtocolError
 from project_code_intelligence.hooks import detect, similar
 
@@ -97,13 +98,6 @@ Agent = str  # "opencode" | "claude" | "codex"
 # --- input coercion -------------------------------------------------------------
 
 
-def _as_object(value: object) -> dict[str, object]:
-    if not isinstance(value, dict):
-        return {}
-    typed = cast("dict[object, object]", value)
-    return {str(k): v for k, v in typed.items()}
-
-
 def _as_str(value: object) -> str:
     return value if isinstance(value, str) else ""
 
@@ -116,7 +110,7 @@ def _read_json(stream: IO[str]) -> dict[str, object]:
         loaded = cast("object", json.loads(raw))
     except json.JSONDecodeError:
         return {}
-    return _as_object(loaded)
+    return as_object(loaded)
 
 
 # --- event -> (file_path, removed names) ----------------------------------------
@@ -133,7 +127,7 @@ def _disk_text(path: str) -> str:
 def _edit_fields(agent: Agent, event: dict[str, object]) -> tuple[str, str, str]:
     """Return (file_path, old_string, new_string) for the agent's edit event."""
     if agent == "claude":
-        tool_input = _as_object(event.get("tool_input"))
+        tool_input = as_object(event.get("tool_input"))
         file_path = _as_str(tool_input.get("file_path"))
         content = tool_input.get("content")
         if isinstance(content, str):
@@ -156,7 +150,7 @@ def _edit_fields(agent: Agent, event: dict[str, object]) -> tuple[str, str, str]
 
 def _codex_edits(event: dict[str, object]) -> list[tuple[str, str, str]]:
     """Extract per-file before/after fragments from a Codex apply_patch envelope."""
-    command = _as_str(_as_object(event.get("tool_input")).get("command"))
+    command = _as_str(as_object(event.get("tool_input")).get("command"))
     edits: list[tuple[str, str, str]] = []
     path = ""
     mode = ""
@@ -462,7 +456,7 @@ def _read_marker(git_dir: Path) -> tuple[Path, list[str], str | None] | None:
         data = cast("object", json.loads((git_dir / _MARKER_NAME).read_text(encoding="utf-8")))
     except (OSError, ValueError):
         return None
-    marker = _as_object(data)
+    marker = as_object(data)
     cwd = marker.get("cwd")
     raw = marker.get("repo_paths")
     if not (isinstance(cwd, str) and Path(cwd).is_dir() and isinstance(raw, list)):

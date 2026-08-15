@@ -331,13 +331,10 @@ def _compact_edge(row: Mapping[str, object]) -> dict[str, object]:
     return out
 
 
-def _verbose_edge(row: Mapping[str, object]) -> dict[str, object]:
-    out: dict[str, object] = dict(row)
-    _inject_edge_repo_paths(out, row)
-    return out
-
-
 def format_edges(rows: Sequence[Mapping[str, object]], *, verbose: bool) -> list[dict[str, object]]:
     if verbose:
-        return [_verbose_edge(row) for row in rows]
+        formatted = [dict(row) for row in rows]
+        for out, row in zip(formatted, rows, strict=True):
+            _inject_edge_repo_paths(out, row)
+        return formatted
     return [_compact_edge(row) for row in rows]
