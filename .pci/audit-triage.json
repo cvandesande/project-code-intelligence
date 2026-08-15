@@ -16,20 +16,20 @@
         "parser src/project_code_intelligence/doctor/cli.py",
         "parser src/project_code_intelligence/embedding/bench.py"
       ],
-      "reason": null,
+      "reason": "Independent CLI parsers define different command schemas; sharing argparse setup would couple unrelated entry points.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:57:29+00:00"
     },
     "redundancy-0c40d05c0c95": {
       "members": [
         "normalize_github_repo src/project_code_intelligence/rocm_bundles.py",
         "normalize_release_tag src/project_code_intelligence/rocm_bundles.py"
       ],
-      "reason": null,
+      "reason": "The normalizers remove different syntax and validate different domains; only their small control shape matches.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:57:50+00:00"
     },
     "redundancy-0e461c8555ef": {
       "members": [
@@ -46,30 +46,30 @@
         "_compact_edge src/project_code_intelligence/mcp/formatting.py",
         "compact_file src/project_code_intelligence/mcp/formatting.py"
       ],
-      "reason": null,
+      "reason": "Compact files and edges project different wire-contract fields and derive different path keys.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:57:50+00:00"
     },
     "redundancy-22014d1cd8d7": {
       "members": [
         "rust_local_closure_binding_names src/project_code_intelligence/parsers/cfamily.py",
         "rust_pattern_binding_names src/project_code_intelligence/parsers/cfamily.py"
       ],
-      "reason": null,
+      "reason": "Closure bindings and Rust pattern bindings parse different grammar contexts and return different semantic sets.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:57:50+00:00"
     },
     "redundancy-25324dcc5e6e": {
       "members": [
         "_snapshot_detail src/project_code_intelligence/status_cli.py",
         "_snapshot_line src/project_code_intelligence/mcp_smoke_render.py"
       ],
-      "reason": null,
+      "reason": "Status and smoke renderers consume different payloads and intentionally produce different text contracts.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:57:50+00:00"
     },
     "redundancy-2bf163476303": {
       "members": [
@@ -96,20 +96,20 @@
         "semantic_boost_terms src/project_code_intelligence/mcp/semantic.py",
         "semantic_query_terms src/project_code_intelligence/mcp/semantic.py"
       ],
-      "reason": null,
+      "reason": "Query terms tokenize user input while boost terms conditionally add metadata; their short set operations have different semantics.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:57:50+00:00"
     },
     "redundancy-30a57c1a376c": {
       "members": [
         "database_url_dbname src/project_code_intelligence/config.py",
         "database_url_defines_database src/project_code_intelligence/config.py"
       ],
-      "reason": null,
+      "reason": "DSN database extraction and presence testing intentionally differ for non-Postgres schemes and return different types.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:57:50+00:00"
     },
     "redundancy-32f1ab85d442": {
       "members": [
@@ -128,30 +128,30 @@
         "make_code_record src/project_code_intelligence/records.py",
         "make_module_record src/project_code_intelligence/records.py"
       ],
-      "reason": null,
+      "reason": "Code and module records have distinct IDs, metadata, hierarchy, and edge behavior; a parameterized constructor would obscure the wire format.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:57:51+00:00"
     },
     "redundancy-36665df4dd2c": {
       "members": [
         "_files_row_text src/project_code_intelligence/progress.py",
         "_sarif_row_text src/project_code_intelligence/progress.py"
       ],
-      "reason": null,
+      "reason": "File and SARIF summary rows calculate different metrics and wording; only renderer scaffolding is shared.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:57:50+00:00"
     },
     "redundancy-36efe21a7ab0": {
       "members": [
         "_render_outcome src/project_code_intelligence/hooks/cli.py",
         "render_pretty src/project_code_intelligence/status_cli.py"
       ],
-      "reason": null,
+      "reason": "The hook outcome renderer and full status renderer have unrelated inputs, layout, and state logic.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:57:50+00:00"
     },
     "redundancy-381e66aec577": {
       "members": [
@@ -169,10 +169,10 @@
         "optional_int src/project_code_intelligence/mcp/protocol.py",
         "optional_text src/project_code_intelligence/mcp/protocol.py"
       ],
-      "reason": null,
+      "reason": "Typed optional validators deliberately preserve bool-before-int ordering and type-specific errors; separate functions keep validation explicit.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:57:50+00:00"
     },
     "redundancy-4068b862b88e": {
       "members": [
@@ -187,10 +187,10 @@
         "sarif_rule_id src/project_code_intelligence/sarif/parse.py",
         "sarif_tool_metadata src/project_code_intelligence/sarif/parse.py"
       ],
-      "reason": null,
+      "reason": "The group combines unrelated SARIF field extractors and a progress warning counter; common dict access is not a useful abstraction.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:57:50+00:00"
     },
     "redundancy-49eba77767de": {
       "members": [
@@ -208,20 +208,20 @@
         "RuntimeMetrics.add_embedding_inputs src/project_code_intelligence/runtime.py",
         "add_repo_ingest_metrics src/project_code_intelligence/ingest_code_intel.py"
       ],
-      "reason": null,
+      "reason": "Repository ingest aggregation and RuntimeMetrics mutation operate at different lifecycle layers and update different counters.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:57:51+00:00"
     },
     "redundancy-5161ba7990e2": {
       "members": [
         "format_edges src/project_code_intelligence/mcp/formatting.py",
         "format_record_batch_response src/project_code_intelligence/mcp/records.py"
       ],
-      "reason": null,
+      "reason": "Edge formatting and batch-record response construction implement different MCP response contracts.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:57:50+00:00"
     },
     "redundancy-5d00d962775b": {
       "members": [
@@ -239,30 +239,30 @@
         "classification_bool src/project_code_intelligence/inventory.py",
         "classification_text src/project_code_intelligence/inventory.py"
       ],
-      "reason": null,
+      "reason": "Text and boolean classification accessors intentionally enforce different value types and defaults.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:57:50+00:00"
     },
     "redundancy-69be10138547": {
       "members": [
         "coerce_int src/project_code_intelligence/analyze.py",
         "coerce_str src/project_code_intelligence/analyze.py"
       ],
-      "reason": null,
+      "reason": "String and integer row coercers are intentionally separate typed validators; a generic coercer would weaken clarity and typing.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:57:50+00:00"
     },
     "redundancy-70fb79021fa8": {
       "members": [
         "unique_limited src/project_code_intelligence/language_profiles/base.py",
         "unique_sources src/project_code_intelligence/power.py"
       ],
-      "reason": null,
+      "reason": "Both functions preserve uniqueness, but one is bounded language-profile normalization and the other aggregates typed power sources.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:20+00:00"
     },
     "redundancy-733191a80064": {
       "members": [
@@ -270,20 +270,20 @@
         "parse_sarif_result src/project_code_intelligence/sarif/parse.py",
         "sarif_rule_items src/project_code_intelligence/sarif/parse.py"
       ],
-      "reason": null,
+      "reason": "The SARIF routines parse rules, code-flow threads, and complete results with distinct schemas; shared iteration shape is incidental.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:20+00:00"
     },
     "redundancy-74e58c6b7488": {
       "members": [
         "search_mode src/project_code_intelligence/mcp/search.py",
         "search_query_mode src/project_code_intelligence/mcp/search.py"
       ],
-      "reason": null,
+      "reason": "One helper reads an explicit query mode while the other resolves defaults and validates cross-field behavior.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:20+00:00"
     },
     "redundancy-78d93855a704": {
       "members": [
@@ -303,10 +303,10 @@
         "print_init_db_report src/project_code_intelligence/ingest_code_intel.py",
         "print_reset_only_report src/project_code_intelligence/ingest_code_intel.py"
       ],
-      "reason": null,
+      "reason": "Reset, embed-only, and init reports expose different mode-specific metrics and side effects; only summary emission is common.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:21+00:00"
     },
     "redundancy-86f07052f2a4": {
       "members": [
@@ -323,10 +323,10 @@
         "_cache_root src/project_code_intelligence/process.py",
         "quadlet_unit_dir src/project_code_intelligence/process.py"
       ],
-      "reason": null,
+      "reason": "The cache root follows XDG cache semantics while the Quadlet directory follows XDG config semantics and migration rules.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:20+00:00"
     },
     "redundancy-928b40146aec": {
       "members": [
@@ -347,10 +347,10 @@
         "_insert_static_run src/project_code_intelligence/storage/static.py",
         "insert_snapshot src/project_code_intelligence/storage/core.py"
       ],
-      "reason": null,
+      "reason": "These are table-specific persistence operations with different columns, conflict rules, returned IDs, and child relationships.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:21+00:00"
     },
     "redundancy-9a6a8265c658": {
       "members": [
@@ -367,20 +367,20 @@
         "path_mapping_for_repo_path src/project_code_intelligence/sarif/paths.py",
         "source_path_known_or_exists src/project_code_intelligence/sarif/paths.py"
       ],
-      "reason": null,
+      "reason": "Existence validation and SARIF path-mapping lookup answer different questions and have different fallback behavior.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:21+00:00"
     },
     "redundancy-a09993e07eea": {
       "members": [
         "rust_doc_fence_boundary src/project_code_intelligence/parsers/cfamily.py",
         "rust_test_attribute_before src/project_code_intelligence/parsers/cfamily.py"
       ],
-      "reason": null,
+      "reason": "Rust doc-fence boundaries and test-attribute lookback recognize different syntax and search directions.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:20+00:00"
     },
     "redundancy-a32e2ed32ab5": {
       "members": [
@@ -389,10 +389,10 @@
         "_add_live_records_row src/project_code_intelligence/progress.py",
         "_add_live_workers_row src/project_code_intelligence/progress.py"
       ],
-      "reason": null,
+      "reason": "Live rows calculate distinct file, record, edge, and worker metrics; a parameterized renderer would hide their domain rules.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:21+00:00"
     },
     "redundancy-a8caf6259bba": {
       "members": [
@@ -410,10 +410,10 @@
         "_add_database_role_rows src/project_code_intelligence/progress.py",
         "_add_live_write_op_row src/project_code_intelligence/progress.py"
       ],
-      "reason": null,
+      "reason": "The members mutate or render unrelated database-write, role, and embedding-usage state; the matched call shape is incidental.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:21+00:00"
     },
     "redundancy-b56a6b7c7c46": {
       "members": [
@@ -431,10 +431,10 @@
         "create_index_admin_role_sql src/project_code_intelligence/db.py",
         "create_role_sql src/project_code_intelligence/db.py"
       ],
-      "reason": null,
+      "reason": "Small SQL constructors deliberately encode distinct PostgreSQL privileges and validation; parameterizing SQL keywords would reduce auditability.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:20+00:00"
     },
     "redundancy-b922594609c9": {
       "members": [
@@ -451,10 +451,10 @@
         "embedding_config_endpoint src/project_code_intelligence/doctor/output.py",
         "embedding_response_model src/project_code_intelligence/doctor/output.py"
       ],
-      "reason": null,
+      "reason": "Endpoint and response-model extractors select different checks, patterns, and whitespace rules.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:20+00:00"
     },
     "redundancy-c191caa8537f": {
       "members": [
@@ -471,20 +471,20 @@
         "install_claude src/project_code_intelligence/hooks/install.py",
         "install_codex src/project_code_intelligence/hooks/install.py"
       ],
-      "reason": null,
+      "reason": "Claude and Codex installers target different configuration schemas, matchers, migration rules, and output identities.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:21+00:00"
     },
     "redundancy-c5480c07342b": {
       "members": [
         "json_array src/project_code_intelligence/sarif/parse.py",
         "json_object src/project_code_intelligence/sarif/parse.py"
       ],
-      "reason": null,
+      "reason": "Object and array guards are intentionally separate typed JSON boundary helpers with different return types.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:20+00:00"
     },
     "redundancy-c54d15e9a63d": {
       "members": [
@@ -501,10 +501,10 @@
         "_check_apple_metal src/project_code_intelligence/doctor/hardware.py",
         "_check_darwin_npu src/project_code_intelligence/doctor/hardware.py"
       ],
-      "reason": null,
+      "reason": "The Darwin NPU skip result and Apple Metal service check represent different hardware capabilities and statuses.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:20+00:00"
     },
     "redundancy-ca731915c97b": {
       "members": [
@@ -523,30 +523,30 @@
         "_read_pid src/project_code_intelligence/embedding/apple_embed_server.py",
         "read_int src/project_code_intelligence/power.py"
       ],
-      "reason": null,
+      "reason": "PID-file parsing intentionally swallows file and value errors, while sysfs integer reading uses a different path and failure contract.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:38+00:00"
     },
     "redundancy-d5a0a12d1ac0": {
       "members": [
         "alter_index_admin_role_sql src/project_code_intelligence/db.py",
         "alter_role_password_sql src/project_code_intelligence/db.py"
       ],
-      "reason": null,
+      "reason": "The ALTER ROLE statements intentionally differ in privilege attributes; keeping explicit SQL makes security-sensitive changes reviewable.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:38+00:00"
     },
     "redundancy-dc3cbb8957c6": {
       "members": [
         "_section_table src/project_code_intelligence/doctor/output.py",
         "section_grid src/project_code_intelligence/console_ui.py"
       ],
-      "reason": null,
+      "reason": "The doctor table has a status-glyph column and fixed widths, while the generic section grid has a two-column label/detail contract.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:38+00:00"
     },
     "redundancy-dee06dfaef57": {
       "members": [
@@ -554,10 +554,10 @@
         "_add_files_row src/project_code_intelligence/mcp_smoke_render.py",
         "_add_records_row src/project_code_intelligence/mcp_smoke_render.py"
       ],
-      "reason": null,
+      "reason": "Files, records, and edges rows compute different counters, optional details, and percentages; only add-row scaffolding matches.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:38+00:00"
     },
     "redundancy-e1211e8b2ca8": {
       "members": [
@@ -574,10 +574,10 @@
         "resolve_absolute_sarif_source_path src/project_code_intelligence/sarif/paths.py",
         "resolve_relative_sarif_source_path src/project_code_intelligence/sarif/paths.py"
       ],
-      "reason": null,
+      "reason": "Absolute and relative SARIF paths require different resolution, containment, and mapping algorithms.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:38+00:00"
     },
     "redundancy-e46b71456494": {
       "members": [
@@ -594,30 +594,30 @@
         "JsonEmitter.emit src/project_code_intelligence/progress.py",
         "write_response src/project_code_intelligence/mcp/transport.py"
       ],
-      "reason": null,
+      "reason": "JSON progress events go to stderr under a lock while MCP responses go to stdout with JSON-RPC framing; their sinks and concurrency contracts differ.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:38+00:00"
     },
     "redundancy-e812d7c005fb": {
       "members": [
         "grant_project_database_access_privileges src/project_code_intelligence/db.py",
         "grant_project_database_object_privileges src/project_code_intelligence/db.py"
       ],
-      "reason": null,
+      "reason": "Database-level CONNECT grants and schema/object privileges are separate PostgreSQL security phases with different SQL and transaction needs.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:38+00:00"
     },
     "redundancy-f3354fac2773": {
       "members": [
         "_ensure_index_admin_role src/project_code_intelligence/db.py",
         "_ensure_login_role src/project_code_intelligence/db.py"
       ],
-      "reason": null,
+      "reason": "Project login roles and the bootstrap admin role use different password derivation, privilege sets, reuse policy, and connection URLs.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:38+00:00"
     },
     "redundancy-f97b3cabbe4f": {
       "members": [
@@ -625,10 +625,10 @@
         "string_items src/project_code_intelligence/parsers/core.py",
         "string_list src/project_code_intelligence/code_profiles/example.py"
       ],
-      "reason": null,
+      "reason": "The three list helpers live across public profile, parser, and UI boundaries and intentionally differ in coercion and accepted values.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:38+00:00"
     },
     "redundancy-fccd23ea03f4": {
       "members": [
@@ -636,10 +636,10 @@
         "_path_to_repo src/project_code_intelligence/cli.py",
         "configured_database_scope_path src/project_code_intelligence/config.py"
       ],
-      "reason": null,
+      "reason": "Repo naming, current-directory comparison, and configured scope resolution return different values and follow different configuration inputs.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-14T23:58:38+00:00"
     },
     "redundancy-fe07f579f602": {
       "members": [
@@ -656,6 +656,6 @@
     "name": "pci audit",
     "version": "0.1.0"
   },
-  "updated_at": "2026-08-14T23:37:01+00:00",
+  "updated_at": "2026-08-14T23:58:38+00:00",
   "version": 2
 }

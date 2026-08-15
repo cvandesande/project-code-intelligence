@@ -948,14 +948,11 @@ def apply_bootstrap_writer_credentials(
 
 
 def postgres_admin_target_fallback_settings() -> list[config.DatabaseSettings]:
-    settings = config.DatabaseSettings.from_env(admin_scope="postgres")
-    if bool(settings.admin_user) != bool(settings.admin_password):
-        raise db.DatabaseConnectionError(
-            "Set both PCI_POSTGRES_ADMIN_USER and PCI_POSTGRES_ADMIN_PASSWORD, or set neither."
-        )
-    if not settings.admin_user or not settings.admin_password:
-        return []
-    return [db.settings_with_credentials(settings, settings.admin_user, settings.admin_password)]
+    try:
+        settings = db.postgres_admin_settings()
+    except ValueError as exc:
+        raise db.DatabaseConnectionError(str(exc)) from exc
+    return [settings] if settings is not None else []
 
 
 def database_bootstrap_report(bootstrap: db.DatabaseBootstrapResult | None) -> JsonObject:

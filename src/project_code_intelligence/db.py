@@ -84,6 +84,11 @@ def require_row(row: DbRow | None, description: str) -> DbRow:
     return row
 
 
+def table_exists(conn: DbConnection, table: str) -> bool:
+    row = conn.execute("SELECT to_regclass(%s) IS NOT NULL AS exists", [f"public.{table}"]).fetchone()
+    return bool(row and row["exists"])
+
+
 def allow_writes(settings: DatabaseSettings | None = None) -> bool:
     settings = settings or DatabaseSettings.from_env()
     return settings.allow_writes
@@ -152,6 +157,15 @@ def settings_with_credentials(settings: DatabaseSettings, user: str, password: s
     if settings.dsn:
         return replace(settings, dsn_user=user, dsn_password=password)
     return replace(settings, user=user, password=password)
+
+
+def postgres_admin_settings() -> DatabaseSettings | None:
+    settings = DatabaseSettings.from_env(admin_scope="postgres")
+    if bool(settings.admin_user) != bool(settings.admin_password):
+        raise ValueError("Set both PCI_POSTGRES_ADMIN_USER and PCI_POSTGRES_ADMIN_PASSWORD, or set neither.")
+    if not settings.admin_user or not settings.admin_password:
+        return None
+    return settings_with_credentials(settings, settings.admin_user, settings.admin_password)
 
 
 def configured_database_user(settings: DatabaseSettings) -> str | None:
@@ -251,21 +265,22 @@ def _generated_role_password() -> str:
     return secrets.token_urlsafe(32)
 
 
+def _derived_role_password(admin_password: str, scope: str) -> str:
+    digest = hmac.new(admin_password.encode(), f"project-code-intelligence:{scope}".encode(), sha256).digest()
+    return "pci_" + urlsafe_b64encode(digest).decode().rstrip("=")
+
+
 def project_database_role_password(dbname: str, role_name: str, admin_password: str | None) -> str:
     if admin_password is None:
         return _generated_role_password()
     _validate_identifier(dbname, "database name")
     _validate_identifier(role_name, "role name")
-    message = f"project-code-intelligence:v1:{dbname}:{role_name}".encode()
-    digest = hmac.new(admin_password.encode(), message, sha256).digest()
-    return "pci_" + urlsafe_b64encode(digest).decode().rstrip("=")
+    return _derived_role_password(admin_password, f"v1:{dbname}:{role_name}")
 
 
 def postgres_bootstrap_role_password(role_name: str, admin_password: str) -> str:
     _validate_identifier(role_name, "role name")
-    message = f"project-code-intelligence:postgres-role:v1:{role_name}".encode()
-    digest = hmac.new(admin_password.encode(), message, sha256).digest()
-    return "pci_" + urlsafe_b64encode(digest).decode().rstrip("=")
+    return _derived_role_password(admin_password, f"postgres-role:v1:{role_name}")
 
 
 def _bootstrap_connection_settings(settings: DatabaseSettings) -> DatabaseSettings:

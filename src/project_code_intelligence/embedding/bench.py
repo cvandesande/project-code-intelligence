@@ -16,6 +16,7 @@ from rich.console import Group
 from rich.text import Text
 
 from project_code_intelligence import config, console_ui, http_client, power
+from project_code_intelligence.embedding.endpoint import parse_embedding_payload
 from project_code_intelligence.embeddings import (
     http_error_detail,
     resolve_embedding_endpoint_model,
@@ -363,20 +364,11 @@ def embedding_dimensions(value: object) -> int:
 
 
 def parse_embedding_response(raw_response: str, expected_count: int) -> tuple[int, str | None]:
-    value = cast("object", json.loads(raw_response))
-    if not isinstance(value, dict):
-        raise TypeError("embedding API response must be an object")
-    data = cast("JsonObject", value)
+    items, data = parse_embedding_payload(raw_response, expected_count)
     response_model_value = data.get("model")
     response_model = response_model_value if isinstance(response_model_value, str) else None
-    items_value = data.get("data")
-    if not isinstance(items_value, list) or len(items_value) != expected_count:
-        raise ValueError("embedding API response has unexpected data length")
     dimensions: int | None = None
-    for item_value in cast("list[object]", items_value):
-        if not isinstance(item_value, dict):
-            raise TypeError("embedding API response items must be objects")
-        item = cast("JsonObject", item_value)
+    for item in items:
         item_dimensions = embedding_dimensions(item.get("embedding"))
         if dimensions is None:
             dimensions = item_dimensions

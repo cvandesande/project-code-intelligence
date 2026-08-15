@@ -48,9 +48,6 @@ if TYPE_CHECKING:
 
 OutputMode = Literal["pretty", "json"]
 LIVE_REFRESH_PER_SECOND = 8
-SECONDS_AS_MS_THRESHOLD = 1
-MINUTES_BOUNDARY_SECONDS = 60
-HOURS_BOUNDARY_MINUTES = 60
 EMBEDDING_RATE_INTEGER_THRESHOLD = 10
 PHASE_LABELS: dict[str, str] = {
     "scan": "PARSING",
@@ -76,18 +73,6 @@ def detect_progress_mode(*, requested: OutputMode | None = None) -> OutputMode:
 
 def detect_summary_mode(*, requested: OutputMode | None = None) -> OutputMode:
     return _resolve_mode(sys.stdout, requested=requested, env_var="PCI_OUTPUT")
-
-
-def _format_seconds(value: float) -> str:
-    if value < SECONDS_AS_MS_THRESHOLD:
-        return f"{round(value * 1000)} ms"
-    if value < MINUTES_BOUNDARY_SECONDS:
-        return f"{value:.1f} s"
-    minutes, seconds = divmod(int(value), MINUTES_BOUNDARY_SECONDS)
-    if minutes < HOURS_BOUNDARY_MINUTES:
-        return f"{minutes}m {seconds:02d}s"
-    hours, minutes = divmod(minutes, HOURS_BOUNDARY_MINUTES)
-    return f"{hours}h {minutes:02d}m {seconds:02d}s"
 
 
 class ProgressEmitter(Protocol):
@@ -401,7 +386,7 @@ class RichEmitter:
         _add_live_records_row(rows, counts)
         _add_live_edges_row(rows, counts)
         _add_live_workers_row(rows, counts, progress)
-        _add_row(rows, "Elapsed", _format_seconds(time.monotonic() - self.started_at))
+        _add_row(rows, "Elapsed", runtime_state.format_duration(time.monotonic() - self.started_at, precise=True))
         _add_live_eta_row(rows, progress, counts, timing)
         return rows
 
@@ -438,7 +423,7 @@ def _add_live_eta_row(rows: Table, progress: JsonObject, counts: JsonObject, tim
     remaining = estimate_remaining_seconds(progress, counts, timing)
     if remaining is None or remaining <= 0:
         return
-    _add_row(rows, "ETA", f"~ {_format_seconds(remaining)} remaining")
+    _add_row(rows, "ETA", f"~ {runtime_state.format_duration(remaining, precise=True)} remaining")
 
 
 def live_progress_row_text(progress: JsonObject) -> str | None:
@@ -751,7 +736,11 @@ def _embedding_row_text(report: JsonObject, counts: JsonObject, timing: JsonObje
     if not embedded:
         return None
     seconds = timing.get("embedding_seconds")
-    suffix = f" · {_format_seconds(float(seconds))}" if isinstance(seconds, (int, float)) and seconds else ""
+    suffix = (
+        f" · {runtime_state.format_duration(float(seconds), precise=True)}"
+        if isinstance(seconds, (int, float)) and seconds
+        else ""
+    )
     return f"{_format_count(embedded)} records{suffix}"
 
 
@@ -854,7 +843,7 @@ def _add_outcome_rows(rows: Table, report: JsonObject, *, counts: JsonObject, ti
         _add_row(rows, "Static findings", f"{_format_count(static_findings)} in {_format_count(runs)} run(s)")
     duration = _resolve_duration(report, timing)
     if duration is not None:
-        _add_row(rows, "Duration", _format_seconds(duration))
+        _add_row(rows, "Duration", runtime_state.format_duration(duration, precise=True))
 
 
 def render_summary_panel(report: JsonObject, *, console: Console | None = None) -> None:

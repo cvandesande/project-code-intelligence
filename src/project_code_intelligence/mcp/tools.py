@@ -30,7 +30,6 @@ from project_code_intelligence.mcp.formatting import (
     dedup_by_location,
     format_edges,
     format_records,
-    verbose_file,
     verbose_record,
 )
 from project_code_intelligence.mcp.protocol import (
@@ -902,7 +901,7 @@ def tool_list_code_intel_files(args: Json) -> Json:
         ).fetchall()
         if not rows:
             repo_exists = repo_scope_exists(conn, args)
-    files: list[object] = [verbose_file(row) for row in rows] if verbose else [compact_file(row) for row in rows]
+    files: list[object] = [verbose_record(row) for row in rows] if verbose else [compact_file(row) for row in rows]
     response: Json = {**snapshot_scope_response(args), "files": cast("JsonValue", files)}
     warnings = scope_filter_warnings(
         args, rows, repo_exists=repo_exists, missing_snapshot_warning=missing_snapshot_warning

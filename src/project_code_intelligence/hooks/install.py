@@ -22,9 +22,13 @@ import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
+from project_code_intelligence.console_ui import as_list, as_object
 from project_code_intelligence.hooks.opencode_assets import OPENCODE_FILES
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # Claude evidence fires PreToolUse (preventive); reindex is on the git post-commit hook, not here.
 _CLAUDE_EDIT_MATCHER = "Edit|Write"
@@ -76,19 +80,6 @@ def _hook_command() -> list[str]:
     return ["pci", "hook"]
 
 
-def _as_object(value: object) -> dict[str, object]:
-    if not isinstance(value, dict):
-        return {}
-    typed = cast("dict[object, object]", value)
-    return {str(k): v for k, v in typed.items()}
-
-
-def _as_list(value: object) -> list[object]:
-    if not isinstance(value, list):
-        return []
-    return list(cast("list[object]", value))
-
-
 # --- opencode -------------------------------------------------------------------
 
 
@@ -126,12 +117,12 @@ def _is_pci_handler(handler: object) -> bool:
 
 
 def _is_pci_handler_for(handler: object, target: str) -> bool:
-    obj = _as_object(handler)
+    obj = as_object(handler)
     if obj.get("type") != "command":
         return False
     # Current spelling: one command string. Legacy spelling: command + "args"
     # list (Claude Code ignores "args", so those installs were inert).
-    args = [item for item in _as_list(obj.get("args")) if isinstance(item, str)]
+    args = [item for item in as_list(obj.get("args")) or [] if isinstance(item, str)]
     if not args and isinstance(command := obj.get("command"), str):
         try:
             args = shlex.split(command)[1:]
@@ -148,27 +139,24 @@ def _is_pci_handler_for(handler: object, target: str) -> bool:
     return False
 
 
-def _strip_pci_groups(groups: list[object]) -> list[object]:
-    """Drop our handlers from each matcher group, then drop emptied groups."""
+def _strip_groups(groups: list[object], is_managed: Callable[[object], bool]) -> list[object]:
     cleaned: list[object] = []
     for group in groups:
-        obj = _as_object(group)
-        handlers = [h for h in _as_list(obj.get("hooks")) if not _is_pci_handler(h)]
+        obj = as_object(group)
+        handlers = [handler for handler in as_list(obj.get("hooks")) or [] if not is_managed(handler)]
         if handlers:
             obj["hooks"] = handlers
             cleaned.append(obj)
     return cleaned
+
+
+def _strip_pci_groups(groups: list[object]) -> list[object]:
+    """Drop our handlers from each matcher group, then drop emptied groups."""
+    return _strip_groups(groups, _is_pci_handler)
 
 
 def _strip_target_groups(groups: list[object], target: str) -> list[object]:
-    cleaned: list[object] = []
-    for group in groups:
-        obj = _as_object(group)
-        handlers = [h for h in _as_list(obj.get("hooks")) if not _is_pci_handler_for(h, target)]
-        if handlers:
-            obj["hooks"] = handlers
-            cleaned.append(obj)
-    return cleaned
+    return _strip_groups(groups, lambda handler: _is_pci_handler_for(handler, target))
 
 
 def _evidence_group(command: list[str]) -> dict[str, object]:
@@ -198,25 +186,25 @@ def _load_settings(path: Path) -> dict[str, object]:
         loaded = cast("object", json.loads(path.read_text(encoding="utf-8")))
     except json.JSONDecodeError:
         return {}
-    return _as_object(loaded)
+    return as_object(loaded)
 
 
 def install_claude(settings_path: Path, *, uninstall: bool, dry_run: bool) -> InstallOutcome:
     data = _load_settings(settings_path)
-    hooks = _as_object(data.get("hooks"))
+    hooks = as_object(data.get("hooks"))
     existed = any(
         _is_pci_handler(handler)
         for event_groups in hooks.values()
-        for group in _as_list(event_groups)
-        for handler in _as_list(_as_object(group).get("hooks"))
+        for group in as_list(event_groups) or []
+        for handler in as_list(as_object(group).get("hooks")) or []
     )
 
     # Strip our handlers from every event; this also migrates away legacy
     # PostToolUse evidence and Stop reindex handlers from older installs.
-    pre = _strip_pci_groups(_as_list(hooks.get("PreToolUse")))
-    post = _strip_pci_groups(_as_list(hooks.get("PostToolUse")))
-    stop = _strip_pci_groups(_as_list(hooks.get("Stop")))
-    session = _strip_pci_groups(_as_list(hooks.get("SessionStart")))
+    pre = _strip_pci_groups(as_list(hooks.get("PreToolUse")) or [])
+    post = _strip_pci_groups(as_list(hooks.get("PostToolUse")) or [])
+    stop = _strip_pci_groups(as_list(hooks.get("Stop")) or [])
+    session = _strip_pci_groups(as_list(hooks.get("SessionStart")) or [])
 
     if uninstall:
         action = "removed" if existed else "unchanged"
@@ -261,15 +249,15 @@ def _assign_event(hooks: dict[str, object], event: str, groups: list[object]) ->
 
 def install_codex(hooks_path: Path, *, uninstall: bool, dry_run: bool) -> InstallOutcome:
     data = _load_settings(hooks_path)
-    hooks = _as_object(data.get("hooks"))
+    hooks = as_object(data.get("hooks"))
     existed = any(
         _is_pci_handler_for(handler, "codex")
         for event_groups in hooks.values()
-        for group in _as_list(event_groups)
-        for handler in _as_list(_as_object(group).get("hooks"))
+        for group in as_list(event_groups) or []
+        for handler in as_list(as_object(group).get("hooks")) or []
     )
-    pre = _strip_target_groups(_as_list(hooks.get("PreToolUse")), "codex")
-    session = _strip_target_groups(_as_list(hooks.get("SessionStart")), "codex")
+    pre = _strip_target_groups(as_list(hooks.get("PreToolUse")) or [], "codex")
+    session = _strip_target_groups(as_list(hooks.get("SessionStart")) or [], "codex")
 
     if uninstall:
         action = "removed" if existed else "unchanged"

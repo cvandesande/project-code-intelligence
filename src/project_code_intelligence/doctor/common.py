@@ -27,11 +27,6 @@ def row_text(row: db.DbRow, key: str) -> str:
     return "" if value is None else str(value)
 
 
-def row_bool(row: db.DbRow, key: str) -> bool:
-    value = row_object(row, key)
-    return bool(value)
-
-
 def bytes_from_text(text: str | None) -> int | None:
     if not text:
         return None
@@ -62,13 +57,6 @@ def bool_from_env(name: str, *, default: bool, env: config.Env) -> tuple[bool, C
         return config.env_bool(name, default=default, env=env), None
     except ValueError as exc:
         return default, result("configuration", "fail", str(exc))
-
-
-def table_exists(conn: db.DbConnection, table: str) -> bool:
-    row = conn.execute("SELECT to_regclass(%s) IS NOT NULL AS exists", [f"public.{table}"]).fetchone()
-    if row is None:
-        return False
-    return row_bool(row, "exists")
 
 
 def version_tuple(text: str) -> tuple[int, ...]:

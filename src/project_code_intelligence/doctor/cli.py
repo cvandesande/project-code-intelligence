@@ -18,7 +18,6 @@ from project_code_intelligence.doctor.common import (
     result,
     row_text,
     status_for_requirement,
-    table_exists,
     version_at_least,
     version_tuple,
 )
@@ -316,7 +315,7 @@ def _confirm(prompt: str) -> bool:
 
 
 def _database_content_summary(conn: db.DbConnection) -> str:
-    if not table_exists(conn, "project_code_intel_records"):
+    if not db.table_exists(conn, "project_code_intel_records"):
         return "schema not initialized (no data)"
     snapshot_row = conn.execute("SELECT count(*) AS cnt FROM project_code_intel_snapshots").fetchone()
     record_row = conn.execute("SELECT count(*) AS cnt FROM project_code_intel_records").fetchone()

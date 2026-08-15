@@ -109,16 +109,19 @@ def endpoint_is_local(endpoint: str) -> bool:
     return bool(hostname and endpoint_host_is_loopback(hostname))
 
 
-def local_endpoint_health_payload(endpoint: str, *, timeout: float) -> dict[object, object] | None:
-    health_url = endpoint_base_url(endpoint) + "/healthz"
+def local_endpoint_json(endpoint: str, path: str, *, timeout: float) -> dict[object, object] | None:
     try:
-        raw_response = http_client.read_text(health_url, timeout=timeout)
+        raw_response = http_client.read_text(endpoint_base_url(endpoint) + path, timeout=timeout)
         payload_value = cast("object", json.loads(raw_response))
     except (OSError, UnicodeError, ValueError, urllib.error.URLError):
         return None
     if not isinstance(payload_value, dict):
         return None
     return cast("dict[object, object]", payload_value)
+
+
+def local_endpoint_health_payload(endpoint: str, *, timeout: float) -> dict[object, object] | None:
+    return local_endpoint_json(endpoint, "/healthz", timeout=timeout)
 
 
 def _stripped_string(payload: dict[object, object], key: str) -> str | None:
@@ -172,15 +175,9 @@ def unique_model_name(values: object) -> str | None:
 
 
 def local_endpoint_listed_model(endpoint: str, *, timeout: float) -> str | None:
-    models_url = endpoint_base_url(endpoint) + "/v1/models"
-    try:
-        raw_response = http_client.read_text(models_url, timeout=timeout)
-        payload_value = cast("object", json.loads(raw_response))
-    except (OSError, UnicodeError, ValueError, urllib.error.URLError):
+    payload = local_endpoint_json(endpoint, "/v1/models", timeout=timeout)
+    if payload is None:
         return None
-    if not isinstance(payload_value, dict):
-        return None
-    payload = cast("dict[object, object]", payload_value)
     return unique_model_name(payload.get("data")) or unique_model_name(payload.get("models"))
 
 
@@ -266,27 +263,25 @@ def read_embedding_response(endpoint: str, payload: bytes, headers: dict[str, st
         raise EmbeddingEndpointUnavailableError(embedding_endpoint_hint(endpoint, exc)) from exc
 
 
-def parse_embedding_items(endpoint: str, raw_response: str, expected_count: int) -> tuple[list[JsonObject], JsonObject]:
-    try:
-        data_value = cast("object", json.loads(raw_response))
-    except json.JSONDecodeError as exc:
-        raise EmbeddingEndpointUnavailableError(embedding_endpoint_hint(endpoint, exc)) from exc
+def parse_embedding_payload(raw_response: str, expected_count: int) -> tuple[list[JsonObject], JsonObject]:
+    data_value = cast("object", json.loads(raw_response))
     if not isinstance(data_value, dict):
-        raise EmbeddingEndpointUnavailableError(
-            embedding_endpoint_hint(endpoint, ValueError("embedding API response must be an object"))
-        )
+        raise TypeError("embedding API response must be an object")
     data = cast("JsonObject", data_value)
     items_value = data.get("data")
     if not isinstance(items_value, list) or len(items_value) != expected_count:
-        raise EmbeddingEndpointUnavailableError(
-            embedding_endpoint_hint(endpoint, ValueError("unexpected embedding API response"))
-        )
+        raise ValueError("unexpected embedding API response")
     if not all(isinstance(item, dict) for item in items_value):
-        raise EmbeddingEndpointUnavailableError(
-            embedding_endpoint_hint(endpoint, ValueError("embedding API response items must be objects"))
-        )
+        raise TypeError("embedding API response items must be objects")
     items = [cast("JsonObject", item) for item in items_value]
     return items, data
+
+
+def parse_embedding_items(endpoint: str, raw_response: str, expected_count: int) -> tuple[list[JsonObject], JsonObject]:
+    try:
+        return parse_embedding_payload(raw_response, expected_count)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise EmbeddingEndpointUnavailableError(embedding_endpoint_hint(endpoint, exc)) from exc
 
 
 def embedding_index(item: JsonObject) -> int:

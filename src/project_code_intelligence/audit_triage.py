@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import fcntl
-import hashlib
 import json
 import os
 import tempfile
@@ -15,6 +14,7 @@ from operator import itemgetter
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
+from project_code_intelligence.common import sha256_text
 from project_code_intelligence.sarif.parse import json_object
 
 if TYPE_CHECKING:
@@ -63,8 +63,8 @@ def candidate_members(group: MotifGroup, repo: str) -> tuple[str, ...]:
 
 
 def candidate_id(group: MotifGroup, collection: str, repo: str) -> str:
-    identity = (f"{collection}/{repo}\n" + "\n".join(candidate_members(group, repo))).encode()
-    return "redundancy-" + hashlib.sha256(identity).hexdigest()[:12]
+    identity = f"{collection}/{repo}\n" + "\n".join(candidate_members(group, repo))
+    return "redundancy-" + sha256_text(identity)[:12]
 
 
 def load_triage(path: Path) -> dict[str, TriageEntry]:

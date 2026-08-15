@@ -24,8 +24,8 @@ from project_code_intelligence.doctor.types import (
     Status,
 )
 from project_code_intelligence.embedding.bench import request_embeddings
+from project_code_intelligence.embedding.framework import endpoint_is_remote
 from project_code_intelligence.embeddings import (
-    endpoint_host_is_loopback,
     resolve_embedding_endpoint_model,
     validate_embedding_endpoint,
 )
@@ -139,11 +139,6 @@ def check_embedding_options(
         )
     )
     return results
-
-
-def endpoint_is_remote(endpoint: str) -> bool:
-    hostname = urlsplit(endpoint).hostname
-    return bool(hostname and not endpoint_host_is_loopback(hostname))
 
 
 def endpoint_host(endpoint: str) -> str:
