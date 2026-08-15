@@ -31,6 +31,16 @@ class CodexMcpInstallTests(unittest.TestCase):
             self.assertEqual(action, "installed")
             self.assertFalse(path.exists())
 
+    def test_pi_installs_project_extension(self) -> None:
+        with TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            parsed = mcp_install.InstallNamespace(target="pi", project=tmp)
+            action, path = mcp_install._run_install(parsed, project)  # pyright: ignore[reportPrivateUsage]
+            self.assertEqual(action, "installed")
+            text = path.read_text(encoding="utf-8")
+            self.assertIn('spawn(PCI, ["mcp", "--scope", cwd]', text)
+            self.assertNotIn("__PCI_COMMAND__", text)
+
 
 class JsonMcpInstallTests(unittest.TestCase):
     def test_every_project_scoped_json_target_installs_and_uninstalls(self) -> None:

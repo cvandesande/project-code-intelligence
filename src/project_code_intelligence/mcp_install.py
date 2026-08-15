@@ -10,10 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+from project_code_intelligence import pi_support
+
 _BEGIN = "# >>> pci mcp project-code-intelligence (managed) >>>"
 _END = "# <<< pci mcp project-code-intelligence (managed) <<<"
 _SERVER_NAME = "project-code-intelligence"
-_TARGETS = ("codex", "claude", "opencode", "vscode", "copilot", "cline", "zed")
+_TARGETS = ("codex", "claude", "opencode", "vscode", "copilot", "cline", "zed", "pi")
 
 
 def _strip_managed_block(text: str) -> tuple[str, bool]:
@@ -209,6 +211,12 @@ def _run_install(parsed: InstallNamespace, project: Path) -> tuple[str, Path]:
         if config_path is not None:
             raise ValueError("--config-path is not supported for Codex; use --project")
         return install_codex(project, uninstall=parsed.uninstall, dry_run=parsed.dry_run)
+    if parsed.target == "pi":
+        if config_path is not None:
+            raise ValueError("--config-path is not supported for Pi; use --project")
+        return pi_support.install_extension(
+            project, "mcp", pci_command=_pci_command(), uninstall=parsed.uninstall, dry_run=parsed.dry_run
+        )
     return install_json_target(
         parsed.target,
         project,

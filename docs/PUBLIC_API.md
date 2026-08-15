@@ -20,7 +20,7 @@ A single console script, `pci`, is installed. Its subcommands are public:
 | `pci rulepack list` | Lists `.pci/rulepacks/<name>/` directories found under the current directory, with rule counts per tier (1=mechanical, 2=metric-gateable, 3=LLM-judge). |
 | `pci rulepack validate` | Validates discovered rulepacks: unknown tier, duplicate rule IDs, a Tier-3 rule with no matching rubric entry, and a dangling Tier-1/2 producer-config path. Exits 1 on any error; prints file/field/reason for each. Rulepacks are files in the target repo, not indexed state -- this command touches no database. |
 | `pci doctor` | Detects database, embedding endpoint, CPU, GPU, and NPU readiness. Also starts/stops bundled local services with `--start`, `--start-db`, `--start-embedding`, `--stop`, and `--clean`. |
-| `pci mcp` | stdio MCP server entry point. `pci mcp install --target CLIENT` installs configuration for Codex, Claude, OpenCode, VS Code/Copilot, Cline, or Zed; add `--uninstall` to remove only PCI's server entry. |
+| `pci mcp` | stdio MCP server entry point. `pci mcp install --target CLIENT` installs configuration for Codex, Claude, OpenCode, Pi, VS Code/Copilot, Cline, or Zed; add `--uninstall` to remove only PCI's server entry. |
 | `pci smoke` | Basic MCP status and tool smoke check. Requires one or more repo paths, such as `pci smoke .`. |
 | `pci embed fastembed` | Small OpenAI-compatible FastEmbed server for local CPU embeddings. |
 | `pci embed apple` | OpenAI-compatible embedding server backed by Apple MLX (Apple Silicon only). Writes a PID file so `pci doctor --stop` can terminate it. |
@@ -76,7 +76,7 @@ ordinary index runs; every `--mcp-config` target writes the derived read-only
 values to a project-keyed file under the private user config directory (mode
 `0600`) and prints a credential-free config that launches
 `pci mcp --scope PATH`. `pci mcp install --target TARGET` installs or updates
-that config for Codex, Claude Code, OpenCode, VS Code/Copilot, Cline, or Zed;
+that config for Codex, Claude Code, OpenCode, Pi, VS Code/Copilot, Cline, or Zed;
 add `--uninstall` to remove only PCI's server entry. `pci mcp` prefers
 `PCI_MCP_DATABASE_URL`,
 `PCI_MCP_DATABASE_USER`, and

@@ -1,7 +1,7 @@
 """``pci-hook`` command: install the hooks, and serve as the hook runtime.
 
-    pci hook install --target opencode|claude|codex|git [--project DIR | --user]
-    pci hook run     --target opencode|claude|codex|git --behavior evidence|reindex
+    pci hook install --target opencode|claude|codex|pi|git [--project DIR | --user]
+    pci hook run     --target opencode|claude|codex|pi|git --behavior evidence|reindex
     pci hook status  [--project DIR]
 
 ``install`` renders a Rich summary panel in the shared pci style; ``run`` is
@@ -26,7 +26,7 @@ from project_code_intelligence.hooks import runtime
 if TYPE_CHECKING:
     from project_code_intelligence.console_ui import PillKind
 
-_AGENTS = ("opencode", "claude", "codex", "git")
+_AGENTS = ("opencode", "claude", "codex", "pi", "git")
 _BEHAVIORS = ("evidence", "reindex", "reindex-submit", "banner")
 _COLOR_FORCE: dict[str, bool | None] = {"auto": None, "always": True, "never": False}
 
@@ -158,7 +158,8 @@ def _run_install(parsed: HookNamespace) -> int:
         outcomes = _install_git_with_nested(parsed)
     else:
         project = Path(parsed.project or ".").resolve()
-        outcomes = [install_mod.install_opencode(project, uninstall=parsed.uninstall, dry_run=parsed.dry_run)]
+        installer = install_mod.install_pi if parsed.agent == "pi" else install_mod.install_opencode
+        outcomes = [installer(project, uninstall=parsed.uninstall, dry_run=parsed.dry_run)]
     color = console_ui.should_emit_pretty(sys.stdout, force=_COLOR_FORCE[parsed.color])
     for outcome in outcomes:
         _render_outcome(outcome, dry_run=parsed.dry_run, color=color)

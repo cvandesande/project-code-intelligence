@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+from project_code_intelligence import pi_support
 from project_code_intelligence.console_ui import as_list, as_object
 from project_code_intelligence.hooks.opencode_assets import OPENCODE_FILES
 
@@ -292,6 +293,18 @@ def install_codex(hooks_path: Path, *, uninstall: bool, dry_run: bool) -> Instal
         hooks_path.parent.mkdir(parents=True, exist_ok=True)
         _ = hooks_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return InstallOutcome("codex", action, str(hooks_path), rows)
+
+
+# --- Pi -------------------------------------------------------------------------
+
+
+def install_pi(project: Path, *, uninstall: bool, dry_run: bool) -> InstallOutcome:
+    command = _hook_command()[0]
+    action, target = pi_support.install_extension(
+        project, "hooks", pci_command=command, uninstall=uninstall, dry_run=dry_run
+    )
+    rows = [("extension", str(target))]
+    return InstallOutcome("pi", action, str(target.parent), rows)
 
 
 # --- git post-commit ------------------------------------------------------------

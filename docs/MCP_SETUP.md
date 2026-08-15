@@ -166,8 +166,8 @@ repository or harness config.
 
 Install or update a generated config with `pci mcp install --target TARGET`.
 Use `--uninstall` to remove only PCI's server entry while preserving unrelated
-client settings. Supported targets are `codex`, `claude`, `opencode`,
-`vscode`, `copilot`, `cline`, and `zed`; Cline also needs `--config-path` for
+client settings. Supported targets are `codex`, `claude`, `opencode`, `pi`, `vscode`,
+`copilot`, `cline`, and `zed`; Cline also needs `--config-path` for
 its user-scoped settings file.
 
 If those MCP-specific variables are unset, `pci mcp` falls back to the generic
@@ -453,6 +453,21 @@ projects.
   }
 }
 ```
+
+## Pi
+
+Pi has no built-in MCP client, so PCI installs a project-local extension that
+launches the stdio server and registers its discovered tools dynamically:
+
+```sh
+pci mcp install --target pi
+pci hook install --target pi
+```
+
+The commands write separate managed extensions under `.pi/extensions/`.
+Restart Pi and trust the project to load them. Use the corresponding
+`--uninstall` command to remove only PCI's extension. The hook extension adds
+the session banner and runs edit evidence for Pi's `edit` and `write` tools.
 
 ## Other MCP Clients
 
