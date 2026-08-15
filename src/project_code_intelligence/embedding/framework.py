@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
 
-from project_code_intelligence.embedding.endpoint import endpoint_host_is_loopback
+from project_code_intelligence.embedding.endpoint import endpoint_is_local
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -35,10 +34,7 @@ def option_label(name: str) -> str:
 
 
 def endpoint_is_remote(endpoint: str | None) -> bool:
-    if not endpoint:
-        return False
-    hostname = urlsplit(endpoint).hostname
-    return bool(hostname and not endpoint_host_is_loopback(hostname))
+    return bool(endpoint) and not endpoint_is_local(endpoint)
 
 
 def _advertised_profile(framework: str | None) -> EmbeddingRuntimeProfile | None:

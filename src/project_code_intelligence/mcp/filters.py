@@ -162,8 +162,7 @@ def source_path_suffix_pattern(path: str) -> str:
 
 
 def source_path_prefix_suffix_pattern(prefix: str) -> str:
-    normalized = prefix.rstrip("/")
-    return f"%/{escape_like_pattern(normalized)}/%"
+    return f"%/{source_path_prefix_pattern(prefix)}"
 
 
 _WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:/")

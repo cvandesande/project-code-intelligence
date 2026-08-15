@@ -51,6 +51,16 @@
       "status": "dismissed",
       "updated_at": "2026-08-14T23:57:50+00:00"
     },
+    "redundancy-1d387fb2269a": {
+      "members": [
+        "endpoint_is_local src/project_code_intelligence/embedding/endpoint.py",
+        "endpoint_is_remote src/project_code_intelligence/embedding/framework.py"
+      ],
+      "reason": null,
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "open",
+      "updated_at": "2026-08-15T00:01:23+00:00"
+    },
     "redundancy-22014d1cd8d7": {
       "members": [
         "rust_local_closure_binding_names src/project_code_intelligence/parsers/cfamily.py",
@@ -192,17 +202,6 @@
       "status": "dismissed",
       "updated_at": "2026-08-14T23:57:50+00:00"
     },
-    "redundancy-49eba77767de": {
-      "members": [
-        "endpoint_is_local src/project_code_intelligence/embedding/endpoint.py",
-        "endpoint_is_remote src/project_code_intelligence/doctor/embeddings.py",
-        "endpoint_is_remote src/project_code_intelligence/embedding/framework.py"
-      ],
-      "reason": null,
-      "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
-    },
     "redundancy-4c5856821857": {
       "members": [
         "RuntimeMetrics.add_embedding_inputs src/project_code_intelligence/runtime.py",
@@ -222,17 +221,6 @@
       "scope": "project-code-intelligence/project-code-intelligence",
       "status": "dismissed",
       "updated_at": "2026-08-14T23:57:50+00:00"
-    },
-    "redundancy-5d00d962775b": {
-      "members": [
-        "_verbose_edge src/project_code_intelligence/mcp/formatting.py",
-        "verbose_file src/project_code_intelligence/mcp/formatting.py",
-        "verbose_record src/project_code_intelligence/mcp/formatting.py"
-      ],
-      "reason": null,
-      "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
     },
     "redundancy-67ccca4c263b": {
       "members": [
@@ -292,10 +280,10 @@
         "database_url_without_credentials src/project_code_intelligence/config.py",
         "database_url_without_credentials_or_dbname src/project_code_intelligence/config.py"
       ],
-      "reason": null,
+      "reason": "Shared DSN parsing and SplitResult rebuilding are centralized; the remaining named helpers intentionally preserve four distinct compatibility transformations.",
       "scope": "project-code-intelligence/project-code-intelligence",
-      "status": "open",
-      "updated_at": "2026-08-14T23:37:01+00:00"
+      "status": "dismissed",
+      "updated_at": "2026-08-15T00:03:30+00:00"
     },
     "redundancy-8260f9873e48": {
       "members": [
@@ -435,6 +423,16 @@
       "scope": "project-code-intelligence/project-code-intelligence",
       "status": "dismissed",
       "updated_at": "2026-08-14T23:58:20+00:00"
+    },
+    "redundancy-b85c675b1e5b": {
+      "members": [
+        "_verbose_edge src/project_code_intelligence/mcp/formatting.py",
+        "verbose_record src/project_code_intelligence/mcp/formatting.py"
+      ],
+      "reason": "Verbose records and edges share dict copying but derive different public path fields; centralizing that trivial operation would conflate wire contracts.",
+      "scope": "project-code-intelligence/project-code-intelligence",
+      "status": "dismissed",
+      "updated_at": "2026-08-15T00:03:30+00:00"
     },
     "redundancy-b922594609c9": {
       "members": [
@@ -656,6 +654,6 @@
     "name": "pci audit",
     "version": "0.1.0"
   },
-  "updated_at": "2026-08-14T23:58:38+00:00",
+  "updated_at": "2026-08-15T00:03:30+00:00",
   "version": 2
 }
