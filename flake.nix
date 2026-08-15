@@ -109,6 +109,7 @@
       devShells = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
+          package = self.packages.${system}.default;
           python = pkgs.python314.withPackages (ps: [
             ps.coverage
             ps.pip
@@ -129,6 +130,7 @@
         {
           default = pkgs.mkShell {
             packages = [
+              package
               python
               pkgs.basedpyright
               pkgs.bandit
