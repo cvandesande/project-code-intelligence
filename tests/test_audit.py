@@ -156,6 +156,29 @@ class ArgumentValidationTests(unittest.TestCase):
             self.assertFalse((root / ".pci").exists())
 
 
+class TriageUpdateTests(unittest.TestCase):
+    def test_bounded_audit_does_not_reconcile_partial_results(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "triage.json"
+            audit_triage.write_triage(path, {})
+            parsed = audit.AuditNamespace()
+            parsed.triage_file = path
+            with mock.patch.object(audit_triage, "reconcile") as reconcile:
+                self.assertEqual(audit._update_triage(parsed, [_result()]), {})
+            reconcile.assert_not_called()
+
+    def test_full_audit_reconciles_complete_results(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "triage.json"
+            audit_triage.write_triage(path, {})
+            parsed = audit.AuditNamespace()
+            parsed.triage_file = path
+            parsed.full_triage = True
+            with mock.patch.object(audit_triage, "reconcile", return_value={}) as reconcile:
+                self.assertEqual(audit._update_triage(parsed, [_result()]), {})
+            reconcile.assert_called_once()
+
+
 @contextmanager
 def _chdir(path: Path) -> Generator[None]:
     """Basedpyright's configured `pythonVersion = "3.10"` predates `contextlib.chdir` (3.11)."""

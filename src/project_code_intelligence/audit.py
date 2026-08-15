@@ -738,7 +738,7 @@ def _update_triage(parsed: AuditNamespace, results: Sequence[AuditResult]) -> di
         }
         with audit_triage.triage_lock(parsed.triage_file):
             loaded_entries = audit_triage.load_triage(parsed.triage_file)
-            entries = audit_triage.reconcile(current, loaded_entries)
+            entries = audit_triage.reconcile(current, loaded_entries) if parsed.full_triage else loaded_entries
             if parsed.init_triage:
                 for candidate_id_value, candidate in current.items():
                     if candidate_id_value not in entries:

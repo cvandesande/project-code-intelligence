@@ -154,9 +154,6 @@ integration-smoke: ## Bring up pgvector and run integration smoke test
 	$(DOCKER) compose up -d --wait --wait-timeout 60 pgvector
 	PYTHONPATH=$(PYTHONPATH) $(PYTHON) scripts/integration_smoke.py
 
-seed-regression: ## Check source-verified redundancy seeds against the current audit
-	PYTHONPATH=$(PYTHONPATH) $(PYTHON) scripts/seed_regression.py
-
 scan: ## Index this repo into the local DB with pci-index
 	./pci-index .
 
