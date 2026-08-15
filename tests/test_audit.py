@@ -161,21 +161,24 @@ class TriageUpdateTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "triage.json"
             audit_triage.write_triage(path, {})
-            parsed = audit.AuditNamespace()
-            parsed.triage_file = path
-            with mock.patch.object(audit_triage, "reconcile") as reconcile:
-                self.assertEqual(audit._update_triage(parsed, [_result()]), {})
+            with (
+                mock.patch.object(audit, "_load_audit_results", return_value=([_result()], [])),
+                mock.patch.object(audit, "_render_audit_output"),
+                mock.patch.object(audit_triage, "reconcile") as reconcile,
+            ):
+                self.assertEqual(audit.audit_main(["--triage-file", str(path)]), 0)
             reconcile.assert_not_called()
 
     def test_full_audit_reconciles_complete_results(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "triage.json"
             audit_triage.write_triage(path, {})
-            parsed = audit.AuditNamespace()
-            parsed.triage_file = path
-            parsed.full_triage = True
-            with mock.patch.object(audit_triage, "reconcile", return_value={}) as reconcile:
-                self.assertEqual(audit._update_triage(parsed, [_result()]), {})
+            with (
+                mock.patch.object(audit, "_load_audit_results", return_value=([_result()], [])),
+                mock.patch.object(audit, "_render_audit_output"),
+                mock.patch.object(audit_triage, "reconcile", return_value={}) as reconcile,
+            ):
+                self.assertEqual(audit.audit_main(["--triage-file", str(path), "--full-triage"]), 0)
             reconcile.assert_called_once()
 
 
