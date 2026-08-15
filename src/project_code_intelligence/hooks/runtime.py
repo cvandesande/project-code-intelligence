@@ -326,14 +326,16 @@ def run_evidence(agent: Agent, *, stdin: IO[str] | None = None, stdout: IO[str] 
 # as a measured win. Details in the harness results
 # (~/pci-measurement-harness/hook-practice-ab/), not in this repo.
 _BANNER = (
-    "PCI RADAR MODE ACTIVE. You edit with radar: the index has swept every definition in "
-    "this repo, and the evidence hook pings you with nearby prior art on every edit. Do "
-    "not fly blind -- sweep before you build (search_code_intel_semantic), reuse or "
-    "extend what the radar shows, and check blast_radius before you remove. Write the "
-    "smallest change that works: an existing definition, then the standard library, then "
-    "a platform feature, before new code; no abstractions or scaffolding for needs that "
-    "are not in the task. Never cut input validation, error handling, or anything "
-    "explicitly requested. RADAR stays on for the whole session."
+    "PCI INTELLIGENCE MODE ACTIVE. Use this decision ladder before you write code: "
+    "1) reuse or extend an existing definition; 2) use the standard library; 3) use a "
+    "platform feature; 4) write the smallest new implementation that works. Use "
+    "search_code_intel_semantic to find behavior, search_code_intel_text for known names "
+    "or strings, and get_code_intel_record to read the closest indexed result. Use "
+    "find_redundancy before you add a function that might already exist. Use blast_radius "
+    "before you remove, rename, or change a definition. Treat results as evidence and "
+    "verify important details in source. Do not add abstractions, options, or scaffolding "
+    "for needs that are not in the task. Never cut input validation, error handling, or "
+    "anything explicitly requested."
 )
 
 

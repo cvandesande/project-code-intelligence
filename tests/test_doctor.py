@@ -6,9 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import ANY, call, patch
 
-from project_code_intelligence import config
+from project_code_intelligence import config, mcp_install
 from project_code_intelligence.db import DatabaseRole, PostgresBootstrapResult
 from project_code_intelligence.doctor import (
     CheckResult,
@@ -35,6 +35,7 @@ from project_code_intelligence.doctor import cli as doctor_cli
 from project_code_intelligence.doctor.database import check_database
 from project_code_intelligence.doctor.embeddings import default_gpu_model_detail
 from project_code_intelligence.embedding.bench import EmbeddingRequestResult
+from project_code_intelligence.hooks import install as hook_install
 
 
 def successful_requester(
@@ -146,6 +147,40 @@ class DoctorCleanTests(unittest.TestCase):
             run_podman.assert_not_called()
 
 
+class DoctorProjectTests(unittest.TestCase):
+    def test_reports_project_local_mcp_and_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            (project / ".git").mkdir()
+            _ = mcp_install.install_codex(project, uninstall=False, dry_run=False)
+            _ = hook_install.install_codex(project / ".codex" / "hooks.json", uninstall=False, dry_run=False)
+
+            results = {item.name: item for item in doctor_cli.check_project_integrations(project)}
+
+        self.assertEqual(results["project"].status, "ok")
+        self.assertEqual(results["project-mcp"].status, "ok")
+        self.assertIn("codex", results["project-mcp"].message)
+        self.assertEqual(results["project-hooks"].status, "ok")
+        self.assertIn("codex", results["project-hooks"].message)
+
+    def test_warns_when_project_has_no_mcp_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            (project / ".git").mkdir()
+
+            results = {item.name: item for item in doctor_cli.check_project_integrations(project)}
+
+        self.assertEqual(results["project-mcp"].status, "warn")
+        self.assertEqual(results["project-hooks"].status, "skip")
+
+    def test_skips_integration_checks_outside_git_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            results = doctor_cli.check_project_integrations(Path(tmp))
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].status, "skip")
+
+
 class DoctorHelpTests(unittest.TestCase):
     def test_doctor_help_shows_database_and_embedding_examples(self) -> None:
         help_text = doctor_cli.parser().format_help()
@@ -158,6 +193,44 @@ class DoctorHelpTests(unittest.TestCase):
         self.assertIn("PCI_EMBEDDING_ENDPOINT='https://api.openai.com/v1/embeddings'", help_text)
         self.assertIn("PCI_EMBEDDING_ENDPOINT_MODEL='text-embedding-3-small'", help_text)
         self.assertIn("pci doctor --start-db", help_text)
+        self.assertIn("--embedding-backend", help_text)
+        self.assertEqual(
+            doctor_cli.parser().parse_args(["--start", "--embedding-backend", "rocm"]).embedding_backend,
+            "rocm",
+        )
+
+
+class DoctorStartTests(unittest.TestCase):
+    def test_start_embedding_selects_only_requested_quadlet_backend(self) -> None:
+        commands = [
+            ("cpu", "start fastembed"),
+            ("amdgpu", "start rocm"),
+        ]
+        with (
+            patch.object(doctor_cli, "_detect_embedding_options", return_value={}),
+            patch.object(doctor_cli, "local_embedding_startup_commands", return_value=commands),
+            patch(
+                "project_code_intelligence.process.materialize_quadlet_units", return_value=[Path("changed")]
+            ) as materialize,
+            patch("project_code_intelligence.process.run_systemctl_user") as systemctl,
+        ):
+            result = doctor_cli.start_embedding_services("rocm")
+
+        self.assertEqual(result, 0)
+        materialize.assert_called_once_with(selected_files=set(doctor_cli._BACKEND_QUADLET_FILES["amdgpu"]))
+        self.assertIn(call(["start", "pci-llama-rocm.service"]), systemctl.call_args_list)
+        self.assertNotIn(call(["stop", "pci-llama-rocm.service"], ANY), systemctl.call_args_list)
+
+    def test_start_embedding_rejects_unavailable_requested_backend(self) -> None:
+        with (
+            patch.object(doctor_cli, "_detect_embedding_options", return_value={}),
+            patch.object(doctor_cli, "local_embedding_startup_commands", return_value=[("cpu", "start fastembed")]),
+            patch("project_code_intelligence.process.materialize_quadlet_units") as materialize,
+        ):
+            result = doctor_cli.start_embedding_services("cuda")
+
+        self.assertEqual(result, 1)
+        materialize.assert_not_called()
 
 
 class DoctorTests(unittest.TestCase):
@@ -468,6 +541,11 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("System", output)
         self.assertIn("Start CPU embeddings", output)
         self.assertIn("systemctl --user start pci-fastembed.service", output)
+        self.assertIn("Configure OpenAI embeddings", output)
+        self.assertIn("PCI_ALLOW_REMOTE_EMBEDDING=1", output)
+        self.assertIn("PCI_EMBEDDING_ENDPOINT=https://api.openai.com/v1/embeddings", output)
+        self.assertIn("PCI_EMBEDDING_ENDPOINT_MODEL=text-embedding-3-small", output)
+        self.assertIn("OPENAI_API_KEY=...", output)
 
     def test_format_summary_uses_user_facing_issue_labels(self) -> None:
         output = format_summary(

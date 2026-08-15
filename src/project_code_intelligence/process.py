@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 from project_code_intelligence import config
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Collection, Mapping, Sequence
     from typing import TextIO
 
 # Names of container engines we know how to drive. Order matters: docker is
@@ -498,6 +498,7 @@ _SYSTEMCTL_USER_ALLOWED_SUBCOMMANDS = frozenset({
     "start",
     "stop",
     "restart",
+    "reset-failed",
     "daemon-reload",
     "is-active",
     "status",
@@ -663,14 +664,17 @@ def _cuda_substitutions(env: config.Env) -> dict[str, str]:
     }
 
 
-def materialize_quadlet_units(env: config.Env | None = None) -> list[Path]:
-    """Render and write the bundled Quadlet unit templates for the embedding backends.
+def materialize_quadlet_units(
+    env: config.Env | None = None,
+    *,
+    selected_files: Collection[str] | None = None,
+) -> list[Path]:
+    """Render the selected bundled Quadlet unit templates.
 
-    Returns the paths of files that were newly written or changed; the
-    caller should run `systemctl --user daemon-reload` when this is
-    non-empty. Requires bundled quadlet/ package data, which is always
-    present when this code is running from an installed or checked-out
-    copy of the package.
+    By default every template is rendered. When ``selected_files`` is
+    provided, stale unselected unit files are removed. Returns paths that
+    were written, changed, or removed; callers should reload user systemd
+    when the result is non-empty.
     """
     resolved_env = os.environ if env is None else env
     package_dir = _package_dir()
@@ -695,8 +699,22 @@ def materialize_quadlet_units(env: config.Env | None = None) -> list[Path]:
     substitutions.update(_cuda_substitutions(resolved_env))
 
     unit_dir = quadlet_unit_dir()
+    filenames = set(QUADLET_UNIT_FILES if selected_files is None else selected_files)
+    unknown = filenames.difference(QUADLET_UNIT_FILES)
+    if unknown:
+        msg = f"unknown Quadlet unit file(s): {', '.join(sorted(unknown))}"
+        raise ValueError(msg)
+
     changed: list[Path] = []
+    if selected_files is not None:
+        for filename in set(QUADLET_UNIT_FILES).difference(filenames):
+            target = unit_dir / filename
+            if target.exists():
+                target.unlink()
+                changed.append(target)
     for filename in QUADLET_UNIT_FILES:
+        if filename not in filenames:
+            continue
         content = (source_dir / filename).read_text(encoding="utf-8")
         for token, value in substitutions.items():
             content = content.replace(token, value)

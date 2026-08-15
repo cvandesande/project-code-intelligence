@@ -607,7 +607,7 @@ class InstallOpencodeTests(unittest.TestCase):
                 self.assertTrue((project / ".opencode" / rel).is_file())
 
             again = install.install_opencode(project, uninstall=False, dry_run=False)
-            self.assertEqual(again.action, "updated")
+            self.assertEqual(again.action, "unchanged")
 
             removed = install.install_opencode(project, uninstall=True, dry_run=False)
             self.assertEqual(removed.action, "removed")
@@ -633,7 +633,7 @@ class InstallClaudeTests(unittest.TestCase):
             first = install.install_claude(settings, uninstall=False, dry_run=False)
             self.assertEqual(first.action, "installed")
             second = install.install_claude(settings, uninstall=False, dry_run=False)
-            self.assertEqual(second.action, "updated")
+            self.assertEqual(second.action, "unchanged")
 
             data = _read_json_file(settings)
             hooks = cast("dict[str, object]", data["hooks"])
@@ -655,7 +655,7 @@ class InstallClaudeTests(unittest.TestCase):
         payload = cast("dict[str, object]", json.loads(out.getvalue()))
         hook_out = cast("dict[str, object]", payload["hookSpecificOutput"])
         self.assertEqual(hook_out["hookEventName"], "SessionStart")
-        self.assertIn("PCI RADAR MODE ACTIVE", cast("str", hook_out["additionalContext"]))
+        self.assertIn("PCI INTELLIGENCE MODE ACTIVE", cast("str", hook_out["additionalContext"]))
 
     def test_install_preserves_foreign_hooks(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -725,7 +725,7 @@ class InstallClaudeTests(unittest.TestCase):
             self.assertIn("run --target claude --behavior evidence", command)
             # A reinstall recognizes the command-string spelling as ours.
             second = install.install_claude(settings, uninstall=False, dry_run=False)
-            self.assertEqual(second.action, "updated")
+            self.assertEqual(second.action, "unchanged")
             groups2 = cast("list[object]", cast("dict[str, object]", _read_json_file(settings)["hooks"])["PreToolUse"])
             self.assertEqual(len(groups2), 1)
 
@@ -756,7 +756,7 @@ class InstallCodexTests(unittest.TestCase):
             first = install.install_codex(hooks_path, uninstall=False, dry_run=False)
             self.assertEqual(first.action, "installed")
             second = install.install_codex(hooks_path, uninstall=False, dry_run=False)
-            self.assertEqual(second.action, "updated")
+            self.assertEqual(second.action, "unchanged")
             hooks = cast("dict[str, object]", _read_json_file(hooks_path)["hooks"])
             self.assertEqual(len(cast("list[object]", hooks["PreToolUse"])), 1)
             self.assertEqual(len(cast("list[object]", hooks["SessionStart"])), 1)
@@ -787,6 +787,8 @@ class InstallPiTests(unittest.TestCase):
             self.assertEqual(first.action, "installed")
             path = project / ".pi" / "extensions" / "project-code-intelligence-hooks.ts"
             self.assertIn('--target", "pi"', path.read_text(encoding="utf-8"))
+            unchanged = install.install_pi(project, uninstall=False, dry_run=False)
+            self.assertEqual(unchanged.action, "unchanged")
             removed = install.install_pi(project, uninstall=True, dry_run=False)
             self.assertEqual(removed.action, "removed")
             self.assertFalse(path.exists())
@@ -836,7 +838,7 @@ class InstallGitTests(unittest.TestCase):
             repo = Path(tmp)
             _ = install.install_git(repo, uninstall=False, dry_run=False)
             again = install.install_git(repo, uninstall=False, dry_run=False)
-            self.assertEqual(again.action, "updated")
+            self.assertEqual(again.action, "unchanged")
             for hook in (_post_commit_path(repo), _post_merge_path(repo)):
                 text = hook.read_text(encoding="utf-8")
                 self.assertEqual(text.count(">>> pci-hook reindex (managed) >>>"), 1)

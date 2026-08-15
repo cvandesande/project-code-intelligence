@@ -18,6 +18,8 @@ def install_extension(
 
     asset = (Path(__file__).parent / "pi_assets" / f"{name}.ts").read_text(encoding="utf-8")
     content = asset.replace("__PCI_COMMAND__", pci_command.replace("\\", "\\\\").replace('"', '\\"'))
+    if existed and target.read_text(encoding="utf-8") == content:
+        return "unchanged", target
     if not dry_run:
         target.parent.mkdir(parents=True, exist_ok=True)
         _ = target.write_text(content, encoding="utf-8")

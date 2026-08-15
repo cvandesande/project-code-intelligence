@@ -123,7 +123,7 @@ MAX_AUTO_SCAN_WORKERS = 8
 MIN_PARALLEL_PARSE_FILES = 64
 PARSE_CHUNKS_PER_WORKER = 8
 _DB_WRITE_BATCH_SIZE = 500
-MCP_CONFIG_FORMATS = ("env", "codex", "claude", "opencode", "vscode", "copilot", "cline", "zed")
+MCP_CONFIG_FORMATS = ("env", "codex", "claude", "opencode", "vscode", "copilot", "cline", "zed", "pi")
 MCP_STANDALONE_ENV_NAMES = (
     "PCI_MCP_DATABASE_URL",
     "PCI_MCP_DATABASE_USER",
@@ -1173,6 +1173,16 @@ def zed_mcp_config_guidance(context: McpConfigContext, body: str) -> str:
     ))
 
 
+def pi_mcp_config_guidance(context: McpConfigContext) -> str:
+    return "\n".join((
+        "",
+        "Pi project-scoped MCP extension",
+        "Pi has no built-in MCP client; install PCI's project-local extension with:",
+        f"pci mcp install --target pi --project {shlex.quote(context.cwd)}",
+        "Credentials stay in PCI's private user config. Restart Pi and trust the project to load the extension.",
+    ))
+
+
 def mcp_project_config_guidance(
     context: McpConfigContext,
     config_format: str,
@@ -1203,6 +1213,8 @@ def mcp_config_block(context: McpConfigContext | None, config_format: str) -> st
         return None
     if config_format == "env":
         return mcp_ro_export_block(context)
+    if config_format == "pi":
+        return pi_mcp_config_guidance(context)
     if config_format == "codex":
         body = codex_mcp_config_block(context)
     elif config_format == "claude":

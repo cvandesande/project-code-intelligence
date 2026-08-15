@@ -677,6 +677,32 @@ class QuadletMaterializationTests(unittest.TestCase):
                 content = (Path(unit_dir) / filename).read_text(encoding="utf-8")
                 self.assertNotIn("@", content, f"{filename} has an unresolved placeholder token")
 
+    def test_materialize_removes_unselected_backend_units(self) -> None:
+        with tempfile.TemporaryDirectory() as unit_dir:
+            env = {"PCI_QUADLET_UNIT_DIR": unit_dir}
+            with patch.dict(os.environ, env, clear=False):
+                _ = materialize_quadlet_units()
+                selected = {
+                    "pci-llama-rocm.build",
+                    "pci-llamacpp-rocm.volume",
+                    "pci-llama-rocm.container",
+                }
+                changed = materialize_quadlet_units(selected_files=selected)
+
+            self.assertEqual({path.name for path in Path(unit_dir).iterdir()}, selected)
+            self.assertEqual(
+                {path.name for path in changed},
+                set(QUADLET_UNIT_FILES).difference(selected),
+            )
+
+    def test_materialize_rejects_unknown_selected_unit(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as unit_dir,
+            patch.dict(os.environ, {"PCI_QUADLET_UNIT_DIR": unit_dir}, clear=False),
+            self.assertRaisesRegex(ValueError, "unknown Quadlet unit file"),
+        ):
+            _ = materialize_quadlet_units(selected_files={"not-a-unit.container"})
+
     def test_materialize_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as unit_dir:
             env = {"PCI_QUADLET_UNIT_DIR": unit_dir}
