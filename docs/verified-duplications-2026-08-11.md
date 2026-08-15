@@ -3,25 +3,15 @@
 Seventeen duplications in this repository, labeled from source during the
 2026-08-11 measurement cycle (nine under blind protocol). These are verdicts,
 not candidates: each was read in source and judged worth collapsing. The list
-serves two purposes:
-
-1. a one-time seeded cleanup list for `/pci-audit`;
-2. a regression set for `find_redundancy` changes — a change that stops
-   surfacing these groups is a regression, whatever its scores say.
+is the historical record of a one-time seeded cleanup for `/pci-audit` and
+calibration evidence for future `find_redundancy` work.
 
 Line numbers are as of commit `81370a4`; re-locate by symbol. Strike items
-through as they are fixed; do not delete them (the regression role needs the
-history). When you investigate an audit line (seed or not) and decide NOT to
+through as they are fixed; do not delete them so the measurement history stays
+intact. When you investigate an audit line (seed or not) and decide NOT to
 act, record it under "Dismissed after investigation" below with the reason.
 Fixes and dismissals together give the action rate per audit run — the
 number that decides whether a check stays shipped.
-
-The standing regression command is `nix develop -c make seed-regression`, run
-from the repo root. The repository-owned harness checks that every active
-(unstruck) seed still surfaces in
-`pci audit --json --limit 999` and that struck seeds are gone.
-Run it after any `analyze.py`/`find_redundancy` change and after each fix
-batch. Exit 1 = regression.
 
 | # | duplication | where |
 |---|-------------|-------|
