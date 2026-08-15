@@ -233,8 +233,10 @@ pci mcp install --target codex
 pci mcp install --target codex --uninstall
 ```
 
-The install command supports every target above. Cline additionally requires
-`--config-path` because its settings file is user-scoped. See
+The install command supports every target above plus `pi`. Pi installs a
+project-local `.pi/extensions/` MCP bridge; add its evidence hooks with
+`pci hook install --target pi`. Cline additionally requires `--config-path`
+because its settings file is user-scoped. See
 [docs/MCP_SETUP.md](docs/MCP_SETUP.md) for database and scope guidance.
 
 A ready-to-paste system prompt for the connected agent lives at
@@ -257,7 +259,7 @@ they run. Add `--user` for `~/.codex/hooks.json`, or `--uninstall` to remove
 only PCI's handlers while preserving other hooks.
 
 Install MCP server configuration without reindexing (`--target` also supports
-`claude`, `opencode`, `vscode`, `copilot`, `cline`, and `zed`):
+`claude`, `opencode`, `pi`, `vscode`, `copilot`, `cline`, and `zed`):
 
 ```sh
 pci mcp install --target codex

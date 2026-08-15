@@ -92,7 +92,7 @@ _MAX_ADDED = 3
 _TEST_PATH = re.compile(r"(?:^|/)tests?/|(?:^|/)(?:test_[^/]*|[^/]*_test)\.[A-Za-z]+$")
 _TEST_NAME = re.compile(r"^(?:Test|test_)")
 
-Agent = str  # "opencode" | "claude" | "codex"
+Agent = str  # "opencode" | "claude" | "codex" | "pi"
 
 
 # --- input coercion -------------------------------------------------------------
@@ -188,9 +188,26 @@ def _codex_edits(event: dict[str, object]) -> list[tuple[str, str, str]]:
     return edits
 
 
+def _pi_edits(event: dict[str, object]) -> list[tuple[str, str, str]]:
+    tool_input = as_object(event.get("tool_input"))
+    path = _as_str(tool_input.get("path"))
+    content = tool_input.get("content")
+    if isinstance(content, str):
+        return [(path, _disk_text(path), content)]
+    edits: list[tuple[str, str, str]] = []
+    raw_edits = tool_input.get("edits")
+    edits_list = cast("list[object]", raw_edits) if isinstance(raw_edits, list) else []
+    for edit in edits_list:
+        fields = as_object(edit)
+        edits.append((path, _as_str(fields.get("oldText")), _as_str(fields.get("newText"))))
+    return edits
+
+
 def _event_edits(agent: Agent, event: dict[str, object]) -> list[tuple[str, str, str]]:
     if agent == "codex":
         return _codex_edits(event)
+    if agent == "pi":
+        return _pi_edits(event)
     return [_edit_fields(agent, event)]
 
 

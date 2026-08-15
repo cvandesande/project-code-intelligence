@@ -779,6 +779,19 @@ class InstallCodexTests(unittest.TestCase):
             self.assertFalse(hooks_path.exists())
 
 
+class InstallPiTests(unittest.TestCase):
+    def test_install_and_uninstall_extension(self) -> None:
+        with TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            first = install.install_pi(project, uninstall=False, dry_run=False)
+            self.assertEqual(first.action, "installed")
+            path = project / ".pi" / "extensions" / "project-code-intelligence-hooks.ts"
+            self.assertIn('--target", "pi"', path.read_text(encoding="utf-8"))
+            removed = install.install_pi(project, uninstall=True, dry_run=False)
+            self.assertEqual(removed.action, "removed")
+            self.assertFalse(path.exists())
+
+
 class PromptClaudeScopeTests(unittest.TestCase):
     def test_non_project_cwd_defaults_to_user_scope(self) -> None:
         with TemporaryDirectory() as tmp:

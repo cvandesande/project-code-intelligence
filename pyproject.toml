@@ -108,6 +108,8 @@ project_code_intelligence = [
   "quadlet/pci-llama-rocm.container",
   "quadlet/pci-llamacpp-rocm.volume",
   "scripts/select_llamacpp_rocm_bundle.py",
+  "pi_assets/mcp.ts",
+  "pi_assets/hooks.ts",
 ]
 
 [tool.basedpyright]
