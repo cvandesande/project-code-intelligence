@@ -30,12 +30,12 @@ def request(
 ) -> urllib.request.Request:
     validate_http_url(url)
     # URL scheme and host are validated above.
-    return urllib.request.Request(url, data=data, headers=dict(headers or {}), method=method)  # nosec B310
+    return urllib.request.Request(url, data=data, headers=dict(headers or {}), method=method)
 
 
 def read_text(request_or_url: urllib.request.Request | str, *, timeout: float) -> str:
     url = request_or_url.full_url if isinstance(request_or_url, urllib.request.Request) else request_or_url
     validate_http_url(url)
     # URL scheme and host are validated above.
-    with cast("HTTPResponse", urllib.request.urlopen(request_or_url, timeout=timeout)) as response:  # nosec B310
+    with cast("HTTPResponse", urllib.request.urlopen(request_or_url, timeout=timeout)) as response:
         return response.read().decode("utf-8")

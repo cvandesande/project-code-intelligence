@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from project_code_intelligence import profile_context
+from project_code_intelligence.common import log
 from project_code_intelligence.inventory import read_text
 from project_code_intelligence.parsers.cfamily import c_records, go_records, rust_records
 from project_code_intelligence.parsers.core import (
@@ -146,7 +147,8 @@ def parse_file(
         module_recs, module_edges = module_records(intel_file, text, records, max_chars)
         records.extend(module_recs)
         edges.extend(module_edges)
-    except Exception as exc:  # noqa: BLE001  # pragma: no cover - parser boundary
+    except Exception as exc:  # pragma: no cover - parser boundary
+        log.exception(f"unhandled error parsing {intel_file.source_path}")
         failures.append({
             "source_path": intel_file.source_path,
             "language": intel_file.language,

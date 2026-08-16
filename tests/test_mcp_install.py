@@ -1,5 +1,7 @@
+import io
 import json
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -34,9 +36,11 @@ class CodexMcpInstallTests(unittest.TestCase):
     def test_pi_installs_project_extension(self) -> None:
         with TemporaryDirectory() as tmp:
             project = Path(tmp)
-            parsed = mcp_install.InstallNamespace(target="pi", project=tmp)
-            action, path = mcp_install._run_install(parsed, project)  # pyright: ignore[reportPrivateUsage]
-            self.assertEqual(action, "installed")
+            with redirect_stdout(io.StringIO()) as out:
+                status = mcp_install.main(["--target", "pi", "--project", tmp])
+            self.assertEqual(status, 0)
+            self.assertIn("installed pi MCP config", out.getvalue())
+            path = project / ".pi" / "extensions" / "project-code-intelligence-mcp.ts"
             text = path.read_text(encoding="utf-8")
             self.assertIn('spawn(PCI, ["mcp", "--scope", cwd]', text)
             self.assertNotIn("__PCI_COMMAND__", text)

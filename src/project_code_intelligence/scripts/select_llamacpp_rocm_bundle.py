@@ -12,13 +12,10 @@ import urllib.error
 from pathlib import Path
 from typing import NoReturn, TypedDict, cast
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC_DIR = REPO_ROOT / "src"
-if SRC_DIR.is_dir():
-    sys.path.insert(0, str(SRC_DIR))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from project_code_intelligence import http_client, process  # noqa: E402
-from project_code_intelligence.rocm_bundles import (  # noqa: E402
+from project_code_intelligence import http_client, process
+from project_code_intelligence.rocm_bundles import (
     DEFAULT_LLAMACPP_ROCM_REPO,
     RocmBundleError,
     bundle_for_gfx_target,

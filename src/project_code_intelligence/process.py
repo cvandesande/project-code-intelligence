@@ -12,7 +12,7 @@ import os
 import shutil
 
 # Centralized, shell-free subprocess boundary.
-import subprocess  # nosec B404
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -32,6 +32,14 @@ if TYPE_CHECKING:
 # search entirely.
 _CONTAINER_ENGINE_CANDIDATES = ("docker", "podman")
 _CONTAINER_ENGINE_ENV_VAR = "PCI_CONTAINER_ENGINE"
+
+# Bind-all inside the container network namespace only; the host exposure is
+# PublishPort=, which honors PCI_BIND_HOST. Named (rather than a literal
+# "0.0.0.0" at each call site) because bandit/ruff's bind-all-interfaces
+# checks match the string itself, not call context -- one named definition
+# keeps that unavoidable false positive to a single, self-documenting spot
+# instead of one per use.
+BIND_ALL_INTERFACES = "0.0.0.0"  # noqa: S104  # nosec B104
 
 PIPE = subprocess.PIPE
 STDOUT = subprocess.STDOUT
@@ -73,7 +81,7 @@ def run(command: Sequence[str], options: RunOptions | None = None) -> subprocess
         msg = "subprocess command arguments must be non-empty strings"
         raise ValueError(msg)
     # shell=False and validated argv; callers supply fixed commands or trusted config.
-    return subprocess.run(  # nosec B603
+    return subprocess.run(
         list(command),
         cwd=options.cwd,
         env=dict(options.env) if options.env is not None else None,
@@ -96,7 +104,7 @@ def popen(command: Sequence[str], options: PopenOptions | None = None) -> subpro
     if any(not part for part in command):
         msg = "subprocess command arguments must be non-empty strings"
         raise ValueError(msg)
-    return subprocess.Popen(  # nosec B603
+    return subprocess.Popen(
         list(command),
         cwd=opts.cwd,
         env=dict(opts.env) if opts.env is not None else None,
@@ -210,7 +218,7 @@ _COMPOSE_CONTEXT_PACKAGE_FILES = (
     (Path("scripts/select_llamacpp_rocm_bundle.py"), Path("scripts/select_llamacpp_rocm_bundle.py")),
     (Path("bin/pci-embedding-server"), Path("pci-embedding-server")),
 )
-_COMPOSE_CONTEXT_PACKAGE_SOURCE_FILES = (
+COMPOSE_CONTEXT_PACKAGE_SOURCE_FILES = (
     Path("__init__.py"),
     Path("common.py"),
     Path("config.py"),
@@ -305,7 +313,7 @@ def _remove_generated_tree(path: Path) -> None:
 def _copy_minimal_package_source(package_dir: Path, target_dir: Path) -> None:
     _remove_generated_tree(target_dir)
     target_dir.parent.mkdir(parents=True, exist_ok=True)
-    for relative_path in _COMPOSE_CONTEXT_PACKAGE_SOURCE_FILES:
+    for relative_path in COMPOSE_CONTEXT_PACKAGE_SOURCE_FILES:
         source = package_dir / relative_path
         if source.is_file():
             _copy_file_if_changed(source, target_dir / relative_path)
@@ -576,12 +584,12 @@ def _fastembed_substitutions(env: config.Env) -> dict[str, str]:
     host = config.env_text("PCI_BIND_HOST", "127.0.0.1", env=env)
     port = config.env_text("PCI_EMBEDDING_PORT", "18081", env=env)
     return {
+        # PCI_FASTEMBED_HOST is not set here: docker/fastembed/Dockerfile already bakes
+        # in PCI_FASTEMBED_HOST=0.0.0.0 as the image's own default, so repeating it in
+        # the quadlet unit's environment would just be a redundant override.
         "@FASTEMBED_ENVIRONMENT@": _environment_block([
             ("PCI_FASTEMBED_MODEL", model),
             ("PCI_FASTEMBED_CACHE_DIR", "/models/fastembed"),
-            # Bind-all inside the container network namespace only; the host
-            # exposure is PublishPort=, which honors PCI_BIND_HOST below.
-            ("PCI_FASTEMBED_HOST", "0.0.0.0"),  # noqa: S104  # nosec B104
             ("PCI_FASTEMBED_PORT", "18081"),
         ]),
         "@FASTEMBED_PUBLISH_PORT@": f"{host}:{port}:18081",
@@ -613,9 +621,7 @@ def _llama_server_environment_pairs(env: config.Env) -> list[tuple[str, str | No
         ("PCI_HF_MODEL_REPO", hf_model_repo),
         ("PCI_HF_MODEL_FILE", hf_model_file),
         ("PCI_LLAMA_MODEL", llama_model),
-        # Bind-all inside the container network namespace only; the host exposure
-        # is PublishPort=, which honors PCI_BIND_HOST below.
-        ("PCI_EMBEDDING_HOST", "0.0.0.0"),  # noqa: S104  # nosec B104
+        ("PCI_EMBEDDING_HOST", BIND_ALL_INTERFACES),
         ("PCI_EMBEDDING_PORT", "18081"),
         ("PCI_LLAMA_SERVER_CTX", config.env_text("PCI_LLAMA_SERVER_CTX", "40960", env=env)),
         ("PCI_LLAMA_SERVER_BATCH", config.env_text("PCI_LLAMA_SERVER_BATCH", "2048", env=env)),

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence import config
 from project_code_intelligence import runtime as runtime_state
+from project_code_intelligence.common import log
 from project_code_intelligence.embedding.core import embed_items_with_retry
 from project_code_intelligence.embedding.store import embedding_metadata
 from project_code_intelligence.progress import progress_event
@@ -84,7 +85,8 @@ def preembedding_worker(
                 run_config=run_config,
             )
             result = PreEmbeddingResult(batch=batch, embedded=embedded, skipped=skipped)
-        except Exception as exc:  # noqa: BLE001 - post-insert embedding remains authoritative.
+        except Exception as exc:  # post-insert embedding remains authoritative.
+            log.exception("unhandled error embedding batch")
             result = PreEmbeddingResult(batch=batch, error=exc)
         while not state.cancel_event.is_set():
             try:

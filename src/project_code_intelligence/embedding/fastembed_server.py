@@ -21,6 +21,7 @@ else:
 
 
 from project_code_intelligence import config
+from project_code_intelligence.common import log
 from project_code_intelligence.embedding.http_common import (
     json_error,
     normalize_input,
@@ -175,7 +176,8 @@ class FastEmbedHandler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
             write_json(self, 400, json_error(str(exc)))
             return
-        except Exception as exc:  # noqa: BLE001  # pragma: no cover - defensive HTTP boundary
+        except Exception as exc:  # pragma: no cover - defensive HTTP boundary
+            log.exception("unhandled error while serving /v1/embeddings")
             write_json(self, 500, json_error(str(exc)))
             return
         write_json(self, 200, payload)

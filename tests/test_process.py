@@ -107,7 +107,7 @@ class PackageDataTests(unittest.TestCase):
         """A tree containing only the whitelisted files must satisfy the container's imports.
 
         The materialized Compose context copies only
-        `_COMPOSE_CONTEXT_PACKAGE_SOURCE_FILES`; if `fastembed_server`'s
+        `COMPOSE_CONTEXT_PACKAGE_SOURCE_FILES`; if `fastembed_server`'s
         transitive runtime imports outgrow that whitelist, the container
         fails with ModuleNotFoundError at runtime. Catch the drift here.
         """
@@ -115,7 +115,7 @@ class PackageDataTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             target_dir = root / "src" / "project_code_intelligence"
-            for relative_path in process._COMPOSE_CONTEXT_PACKAGE_SOURCE_FILES:  # pyright: ignore[reportPrivateUsage]
+            for relative_path in process.COMPOSE_CONTEXT_PACKAGE_SOURCE_FILES:
                 destination = target_dir / relative_path
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 _ = shutil.copyfile(package_dir / relative_path, destination)
@@ -717,7 +717,7 @@ class QuadletMaterializationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as unit_dir:
             env = {
                 "PCI_QUADLET_UNIT_DIR": unit_dir,
-                "PCI_BIND_HOST": "0.0.0.0",  # noqa: S104  # nosec B104
+                "PCI_BIND_HOST": process.BIND_ALL_INTERFACES,
                 "PCI_EMBEDDING_PORT": "19000",
                 "PCI_FASTEMBED_MODEL": "example/custom-model",
             }

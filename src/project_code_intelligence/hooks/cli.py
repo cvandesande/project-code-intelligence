@@ -116,7 +116,7 @@ def prompt_nested_repos(nested: list[Path], root: Path, *, uninstall: bool) -> b
     return sys.stdin.readline().strip().lower() not in {"n", "no"}
 
 
-def _install_git_with_nested(parsed: HookNamespace) -> list[install_mod.InstallOutcome]:
+def install_git_with_nested(parsed: HookNamespace) -> list[install_mod.InstallOutcome]:
     repo = Path(parsed.project or ".").resolve()
     outcomes = [install_mod.install_git(repo, uninstall=parsed.uninstall, dry_run=parsed.dry_run)]
     nested = install_mod.find_nested_repos(repo)
@@ -155,7 +155,7 @@ def _run_install(parsed: HookNamespace) -> int:
             hooks_path = Path(parsed.project or ".").resolve() / ".codex" / "hooks.json"
         outcomes = [install_mod.install_codex(hooks_path, uninstall=parsed.uninstall, dry_run=parsed.dry_run)]
     elif parsed.agent == "git":
-        outcomes = _install_git_with_nested(parsed)
+        outcomes = install_git_with_nested(parsed)
     else:
         project = Path(parsed.project or ".").resolve()
         installer = install_mod.install_pi if parsed.agent == "pi" else install_mod.install_opencode

@@ -4,10 +4,24 @@ from __future__ import annotations
 
 import hashlib
 import re
+import sys
+import traceback
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+class _StderrLog:
+    """Writes to stderr so an unexpected boundary failure isn't silent."""
+
+    @staticmethod
+    def exception(message: str) -> None:
+        _ = sys.stderr.write(f"{message}\n{traceback.format_exc()}")
+        _ = sys.stderr.flush()
+
+
+log = _StderrLog()
 
 
 def sha256_bytes(data: bytes) -> str:

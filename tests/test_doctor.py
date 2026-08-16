@@ -225,10 +225,10 @@ class DoctorHelpTests(unittest.TestCase):
         self.assertIn("PCI_EMBEDDING_ENDPOINT_MODEL='text-embedding-3-small'", help_text)
         self.assertIn("pci doctor --start-db", help_text)
         self.assertIn("--embedding-backend", help_text)
-        self.assertEqual(
-            doctor_cli.parser().parse_args(["--start", "--embedding-backend", "rocm"]).embedding_backend,
-            "rocm",
+        parsed = doctor_cli.parser().parse_args(
+            ["--start", "--embedding-backend", "rocm"], namespace=doctor_cli.DoctorArgs()
         )
+        self.assertEqual(parsed.embedding_backend, "rocm")
 
 
 class DoctorStartTests(unittest.TestCase):
@@ -248,7 +248,9 @@ class DoctorStartTests(unittest.TestCase):
             result = doctor_cli.start_embedding_services("rocm")
 
         self.assertEqual(result, 0)
-        materialize.assert_called_once_with(selected_files=set(doctor_cli._BACKEND_QUADLET_FILES["amdgpu"]))
+        materialize.assert_called_once_with(
+            selected_files={"pci-llama-rocm.build", "pci-llamacpp-rocm.volume", "pci-llama-rocm.container"}
+        )
         self.assertIn(call(["start", "pci-llama-rocm.service"]), systemctl.call_args_list)
         self.assertNotIn(call(["stop", "pci-llama-rocm.service"], ANY), systemctl.call_args_list)
 
