@@ -27,7 +27,7 @@ from project_code_intelligence.embedding.apple_embed_server import (
 from project_code_intelligence.mcp import db as mcp_db
 from project_code_intelligence.mcp.status import annotate_status_snapshots
 from project_code_intelligence.progress import PHASE_LABELS, estimate_remaining_seconds
-from project_code_intelligence.storage import load_index_runs
+from project_code_intelligence.storage import load_index_runs, load_latest_snapshots
 
 if TYPE_CHECKING:
     from project_code_intelligence.models import JsonObject
@@ -143,15 +143,6 @@ def _snapshot_detail(snapshot: JsonObject) -> str:
     return " · ".join(parts)
 
 
-_LATEST_SNAPSHOTS_SELECT = """
-    SELECT DISTINCT ON (collection, repo, branch)
-           id, collection, repo, repo_role, branch, commit_sha,
-           tree_sha, dirty, metadata, created_at
-    FROM project_code_intel_snapshots
-"""
-_LATEST_SNAPSHOTS_SUFFIX = "ORDER BY collection, repo, branch, created_at DESC, id DESC"
-
-
 def load_status(collection: str | None, limit: int) -> tuple[list[JsonObject], list[JsonObject]]:
     with db.connect() as conn:
         runs: list[JsonObject] = []
@@ -159,12 +150,7 @@ def load_status(collection: str | None, limit: int) -> tuple[list[JsonObject], l
             runs = [cast("JsonObject", dict(row)) for row in load_index_runs(conn, collection=collection, limit=limit)]
         snapshots: list[JsonObject] = []
         if mcp_db.table_regclass_exists(conn, "project_code_intel_snapshots"):
-            clause = "WHERE collection = %s" if collection is not None else ""
-            params: list[object] = [collection] if collection is not None else []
-            rows = conn.execute(
-                "\n".join([_LATEST_SNAPSHOTS_SELECT, clause, _LATEST_SNAPSHOTS_SUFFIX]), params
-            ).fetchall()
-            snapshots = annotate_status_snapshots(rows)
+            snapshots = annotate_status_snapshots(load_latest_snapshots(conn, collection=collection))
     return runs, snapshots
 
 

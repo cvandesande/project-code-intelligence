@@ -32,7 +32,7 @@ from project_code_intelligence.doctor import (
     version_tuple,
 )
 from project_code_intelligence.doctor import cli as doctor_cli
-from project_code_intelligence.doctor.database import check_database
+from project_code_intelligence.doctor.database import check_database, check_index_freshness
 from project_code_intelligence.doctor.embeddings import default_gpu_model_detail
 from project_code_intelligence.embedding.bench import EmbeddingRequestResult
 from project_code_intelligence.hooks import install as hook_install
@@ -758,6 +758,79 @@ class DoctorDatabaseTests(unittest.TestCase):
             )
             output = cast("str", write_stdout.call_args.args[0])
             self.assertIn("Saved pci-index config to", output)
+
+
+class DoctorIndexFreshnessTests(unittest.TestCase):
+    _SETTINGS = config.DatabaseSettings(
+        dsn="postgresql://db.example.invalid/pci_test?sslmode=prefer", dbname="pci_test"
+    )
+
+    def test_ok_when_indexed_snapshot_matches_head(self) -> None:
+        snapshot = {
+            "collection": "demo",
+            "repo": ".",
+            "branch": "main",
+            "commit_sha": "a" * 40,
+            "head_status": "current",
+        }
+        with (
+            patch(
+                "project_code_intelligence.doctor.database.db.inferred_database_role_settings",
+                return_value=self._SETTINGS,
+            ),
+            patch("project_code_intelligence.doctor.database.db.connect", return_value=_FakeMaintenanceConnection()),
+            patch("project_code_intelligence.doctor.database.db.table_exists", return_value=True),
+            patch("project_code_intelligence.doctor.database.load_latest_snapshots", return_value=[snapshot]),
+            patch("project_code_intelligence.doctor.database.annotate_status_snapshots", return_value=[snapshot]),
+        ):
+            results = check_index_freshness()
+
+        self.assertEqual([item.status for item in results], ["ok"])
+
+    def test_warns_when_indexed_snapshot_is_behind_head(self) -> None:
+        stale_snapshot = {
+            "collection": "demo",
+            "repo": ".",
+            "branch": "main",
+            "commit_sha": "a" * 40,
+            "head_commit": "b" * 40,
+            "head_status": "stale",
+        }
+        with (
+            patch(
+                "project_code_intelligence.doctor.database.db.inferred_database_role_settings",
+                return_value=self._SETTINGS,
+            ),
+            patch("project_code_intelligence.doctor.database.db.connect", return_value=_FakeMaintenanceConnection()),
+            patch("project_code_intelligence.doctor.database.db.table_exists", return_value=True),
+            patch("project_code_intelligence.doctor.database.load_latest_snapshots", return_value=[stale_snapshot]),
+            patch(
+                "project_code_intelligence.doctor.database.annotate_status_snapshots",
+                return_value=[stale_snapshot],
+            ),
+        ):
+            results = check_index_freshness()
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].status, "warn")
+        detail = results[0].detail or ""
+        self.assertIn("aaaaaaa", detail)
+        self.assertIn("bbbbbbb", detail)
+        self.assertIn("pci hook status", detail)
+
+    def test_reports_nothing_when_no_snapshot_matches_a_local_repo(self) -> None:
+        with (
+            patch(
+                "project_code_intelligence.doctor.database.db.inferred_database_role_settings",
+                return_value=self._SETTINGS,
+            ),
+            patch("project_code_intelligence.doctor.database.db.connect", return_value=_FakeMaintenanceConnection()),
+            patch("project_code_intelligence.doctor.database.db.table_exists", return_value=True),
+            patch("project_code_intelligence.doctor.database.load_latest_snapshots", return_value=[]),
+        ):
+            results = check_index_freshness()
+
+        self.assertEqual(results, [])
 
 
 class DoctorEndpointTests(unittest.TestCase):
