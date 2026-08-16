@@ -22,7 +22,7 @@ from project_code_intelligence.doctor.common import (
     version_at_least,
     version_tuple,
 )
-from project_code_intelligence.doctor.database import check_database
+from project_code_intelligence.doctor.database import check_database, check_index_freshness
 from project_code_intelligence.doctor.embeddings import (
     check_embedding_endpoint,
     check_embedding_options,
@@ -292,6 +292,7 @@ def check_results(args: DoctorArgs, env: config.Env | None = None) -> list[Check
         results.append(result("database", "skip", "database check skipped"))
     else:
         results.extend(check_database())
+        results.extend(check_index_freshness())
     results.extend(check_embedding_endpoint(env=env, mode=args.embedding, timeout=args.timeout))
     results.extend(check_project_integrations(Path.cwd()))
     return results

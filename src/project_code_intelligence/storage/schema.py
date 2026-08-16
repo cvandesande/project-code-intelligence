@@ -86,6 +86,25 @@ def latest_snapshot_info(
     return cast("JsonObject", dict(row)) if row else None
 
 
+def load_latest_snapshots(conn: db.DbConnection, *, collection: str | None = None) -> list[db.DbRow]:
+    """Newest snapshot row per (collection, repo, branch), optionally scoped to one collection."""
+    clause = "WHERE collection = %s" if collection is not None else ""
+    params: list[object] = [collection] if collection is not None else []
+    return conn.execute(
+        "\n".join([
+            """
+            SELECT DISTINCT ON (collection, repo, branch)
+                   id, collection, repo, repo_role, branch, commit_sha,
+                   tree_sha, dirty, metadata, created_at
+            FROM project_code_intel_snapshots
+            """,
+            clause,
+            "ORDER BY collection, repo, branch, created_at DESC, id DESC",
+        ]),
+        params,
+    ).fetchall()
+
+
 def previous_file_signatures(conn: db.DbConnection, snapshot_id: int) -> dict[str, str]:
     rows = conn.execute(
         """
