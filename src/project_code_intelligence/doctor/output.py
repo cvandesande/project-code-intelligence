@@ -347,6 +347,8 @@ def _project_section(by_name: Mapping[str, CheckResult]) -> Table | None:
         _row(table, mcp.status, "MCP", mcp.message)
     if hooks := by_name.get("project-hooks"):
         _row(table, hooks.status, "Hooks", hooks.message)
+    if freshness := by_name.get("index-freshness"):
+        _row(table, freshness.status, "Index", freshness.message)
     return table
 
 
@@ -402,6 +404,7 @@ def _build_main_panel(by_name: Mapping[str, CheckResult], results: Sequence[Chec
         "embedding-config",
         "embedding",
         "project-mcp",
+        "index-freshness",
     }
     non_service_issues = [item for item in issues if item.name not in service_names]
     if non_service_issues:
