@@ -180,6 +180,37 @@ class DoctorProjectTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].status, "skip")
 
+    def test_summary_shows_a_fresh_index_as_a_project_row(self) -> None:
+        output = format_summary(
+            [
+                CheckResult("project", "ok", "/repo"),
+                CheckResult("project-hooks", "ok", "installed for git"),
+                CheckResult("index-freshness", "ok", "index matches HEAD for 1 repo(s)"),
+            ],
+            color=False,
+        )
+
+        self.assertIn("Index", output)
+        self.assertIn("index matches HEAD for 1 repo(s)", output)
+        self.assertNotIn("Needs attention", output)
+
+    def test_summary_shows_a_stale_index_once_under_the_project_row(self) -> None:
+        output = format_summary(
+            [
+                CheckResult("project", "ok", "/repo"),
+                CheckResult(
+                    "index-freshness",
+                    "warn",
+                    "1 of 1 indexed repo(s) behind HEAD",
+                    "demo/repo@main: indexed abc1234, HEAD is def5678",
+                ),
+            ],
+            color=False,
+        )
+
+        self.assertEqual(output.count("indexed repo(s) behind HEAD"), 1)
+        self.assertNotIn("Needs attention", output)
+
 
 class DoctorHelpTests(unittest.TestCase):
     def test_doctor_help_shows_database_and_embedding_examples(self) -> None:
