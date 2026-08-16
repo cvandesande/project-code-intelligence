@@ -53,34 +53,32 @@ class SchemaConstantsTests(unittest.TestCase):
             self.assertIsInstance(language, str)
 
 
-def _intel_file(**overrides: object) -> IntelFile:
-    base: dict[str, object] = {
-        "collection": "c",
-        "repo": "r",
-        "repo_role": "project",
-        "branch": "main",
-        "commit_sha": "0" * 40,
-        "tree_sha": "1" * 40,
-        "source_path": "src/foo.py",
-        "repo_rel_path": "src/foo.py",
-        "abs_path": Path(tempfile.gettempdir()) / "foo.py",
-        "git_blob_sha": None,
-        "file_sha256": None,
-        "size_bytes": 0,
-        "language": "python",
-        "file_role": "source",
-        "content_class": "source",
-        "is_generated": False,
-        "is_vendor": False,
-        "is_test": False,
-        "is_source": True,
-        "is_build": False,
-        "is_config": False,
-        "is_doc": False,
-        "skipped_reason": None,
-    }
-    base.update(overrides)
-    return IntelFile(**base)  # pyright: ignore[reportArgumentType]
+def _intel_file() -> IntelFile:
+    return IntelFile(
+        collection="c",
+        repo="r",
+        repo_role="project",
+        branch="main",
+        commit_sha="0" * 40,
+        tree_sha="1" * 40,
+        source_path="src/foo.py",
+        repo_rel_path="src/foo.py",
+        abs_path=Path(tempfile.gettempdir()) / "foo.py",
+        git_blob_sha=None,
+        file_sha256=None,
+        size_bytes=0,
+        language="python",
+        file_role="source",
+        content_class="source",
+        is_generated=False,
+        is_vendor=False,
+        is_test=False,
+        is_source=True,
+        is_build=False,
+        is_config=False,
+        is_doc=False,
+        skipped_reason=None,
+    )
 
 
 class IntelFileTests(unittest.TestCase):
@@ -127,8 +125,9 @@ class PreviousFileStateTests(unittest.TestCase):
             is_doc=False,
             skipped_reason=None,
         )
+        field_name = "size_bytes"
         with self.assertRaises(FrozenInstanceError):
-            previous.size_bytes = 1  # pyright: ignore[reportAttributeAccessIssue]
+            setattr(previous, field_name, 1)
 
 
 class IntelRecordTests(unittest.TestCase):
@@ -285,8 +284,9 @@ class StaticFindingTests(unittest.TestCase):
 class SarifPathResolutionTests(unittest.TestCase):
     def test_sarif_path_resolution_is_frozen(self) -> None:
         resolution = SarifPathResolution(source_path="src/a.py", repo="r", path_mapping="absolute")
+        field_name = "path_mapping"
         with self.assertRaises(FrozenInstanceError):
-            resolution.path_mapping = "relative"  # pyright: ignore[reportAttributeAccessIssue]
+            setattr(resolution, field_name, "relative")
 
 
 if __name__ == "__main__":

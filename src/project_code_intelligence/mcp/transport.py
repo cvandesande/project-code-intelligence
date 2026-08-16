@@ -5,17 +5,15 @@ from __future__ import annotations
 import json
 import os
 import sys
-import traceback
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence import config, db, process, progress
-from project_code_intelligence.common import default_collection
+from project_code_intelligence.common import default_collection, log
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError, McpWritePermissionError
 from project_code_intelligence.mcp.protocol import (
     Json,
-    log,
     mcp_debug_errors,
     mcp_max_batch_items,
     mcp_max_request_bytes,
@@ -240,10 +238,7 @@ def main() -> int:
             request_id, response = handle_jsonrpc_value(request_value)
             if response is not None:
                 write_response(response)
-        except Exception as exc:  # noqa: BLE001  # pragma: no cover - defensive server boundary
-            if mcp_debug_errors():
-                log(traceback.format_exc())
-            else:
-                log(f"{type(exc).__name__}: {exc}")
+        except Exception as exc:  # pragma: no cover - defensive server boundary
+            log.exception("unhandled error while processing request")
             write_response(error_response(request_id, -32000, error_message(exc)))
     return 0

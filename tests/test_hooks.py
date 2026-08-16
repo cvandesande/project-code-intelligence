@@ -317,13 +317,19 @@ class _StubReports:
         return self.mapping.get(symbol, [])
 
 
-class EvidenceRuntimeTests(unittest.TestCase):  # noqa: PLR0904 - one shared event-runtime fixture
+class _EvidenceRuntimeCase(unittest.TestCase):
+    """Shared event-runtime fixture for the delete-side and add-side evidence tests below."""
+
     def _run(self, agent: str, event: Mapping[str, object], reports: _StubReports) -> str:
         out = io.StringIO()
         with mock.patch.object(runtime.evidence, "render_symbol_reports", reports):
             code = runtime.run_evidence(agent, stdin=io.StringIO(json.dumps(event)), stdout=out)
         self.assertEqual(code, 0)
         return out.getvalue()
+
+
+class EvidenceDeleteSideTests(_EvidenceRuntimeCase):
+    """Removed-definition (blast-radius) branch of the evidence hook."""
 
     def test_opencode_delete_injects_raw_block(self) -> None:
         reports = _StubReports({"gone": ["gone  function  a.py:1-3\ncallers (0)"]})
@@ -398,6 +404,86 @@ class EvidenceRuntimeTests(unittest.TestCase):  # noqa: PLR0904 - one shared eve
         event = {"filePath": "a.py", "oldString": "def keep():\n return 1\n", "newString": "def keep():\n return 2\n"}
         self.assertEqual(self._run("opencode", event, reports), "")
         self.assertEqual(reports.calls, [])
+
+    def test_removed_test_still_gets_blast_radius(self) -> None:
+        """The exemption is add-only: deleting a test is a coverage loss worth reporting."""
+        reports = _StubReports({"test_thing": ["test_thing  function  tests/test_x.py:1-2\ncallers (0)"]})
+        event = {"filePath": "tests/test_x.py", "oldString": "def test_thing():\n x\n", "newString": ""}
+        self.assertIn("[pci blast-radius", self._run("opencode", event, reports))
+
+    def test_rename_prefers_blast_radius_over_reminder(self) -> None:
+        reports = _StubReports({"old_name": ["old_name  function  a.py:1-3\ncallers (1)"]})
+        event = {"filePath": "a.py", "oldString": "def old_name():\n x\n", "newString": "def new_name():\n x\n"}
+        text = self._run("opencode", event, reports)
+        self.assertIn("[pci blast-radius", text)
+        self.assertNotIn("[pci add-side", text)
+
+    def test_non_source_file_is_silent(self) -> None:
+        reports = _StubReports({"gone": ["x"]})
+        event = {"filePath": "notes.md", "oldString": "def gone(): pass", "newString": ""}
+        self.assertEqual(self._run("opencode", event, reports), "")
+
+    def test_empty_reports_stay_silent(self) -> None:
+        reports = _StubReports({})  # symbol resolves to nothing in the index
+        event = {"filePath": "a.py", "oldString": "def gone():\n x\n", "newString": ""}
+        self.assertEqual(self._run("opencode", event, reports), "")
+
+    def test_unreachable_index_warns_instead_of_silence(self) -> None:
+        """A removal with an unreachable database must warn, not read as 'no callers'."""
+
+        def raising(_symbol: str, **_: object) -> list[str]:
+            raise runtime.DatabaseConnectionError("Could not connect to PostgreSQL/pgvector using PCI_PG_DB=x")
+
+        out = io.StringIO()
+        event = {"filePath": "a.py", "oldString": "def gone():\n x\n", "newString": ""}
+        with mock.patch.object(runtime.evidence, "render_symbol_reports", raising):
+            code = runtime.run_evidence("opencode", stdin=io.StringIO(json.dumps(event)), stdout=out)
+        self.assertEqual(code, 0)
+        text = out.getvalue()
+        self.assertIn("blast-radius unavailable", text)
+        self.assertIn("gone", text)
+        self.assertIn("Could not connect", text)
+
+    def test_claude_write_over_file_reports_removals(self) -> None:
+        """A whole-file Write carries no old_string; the old side comes from disk."""
+        reports = _StubReports({"gone": ["gone  function  a.py:1-3\ncallers (2)"]})
+        with TemporaryDirectory() as tmp:
+            target = Path(tmp) / "a.py"
+            _ = target.write_text("def gone():\n    return 1\n", encoding="utf-8")
+            event = _write_event(target, "# rewritten\n")
+            payload = cast("dict[str, object]", json.loads(self._run("claude", event, reports)))
+        hook_out = cast("dict[str, object]", payload["hookSpecificOutput"])
+        self.assertIn("[pci blast-radius", cast("str", hook_out["additionalContext"]))
+        self.assertEqual(reports.calls, ["gone"])
+
+    def test_claude_write_keeping_definition_is_silent(self) -> None:
+        reports = _StubReports({"gone": ["should not appear"]})
+        with TemporaryDirectory() as tmp:
+            target = Path(tmp) / "a.py"
+            _ = target.write_text("def gone():\n    return 1\n", encoding="utf-8")
+            event = _write_event(target, "def gone():\n    return 2\n")
+            self.assertEqual(self._run("claude", event, reports), "")
+        self.assertEqual(reports.calls, [])
+
+    def test_rename_fires_blast_radius_for_the_old_name(self) -> None:
+        """A rename removes the old name; the evidence hook must report it."""
+        reports = _StubReports({"old_name": ["old_name  function  a.py:1-3\ncallers (1)"]})
+        event = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Edit",
+            "tool_input": {
+                "file_path": "a.py",
+                "old_string": "def old_name():\n    return build()\n",
+                "new_string": "def new_name():\n    return build()\n",
+            },
+        }
+        text = self._run("claude", event, reports)
+        self.assertIn("[pci blast-radius", text)
+        self.assertEqual(reports.calls, ["old_name"])
+
+
+class EvidenceAddSideTests(_EvidenceRuntimeCase):
+    """Added-definition (similarity / prior-art) branch of the evidence hook."""
 
     def _run_add(self, event: Mapping[str, object], nearest: _Nearest) -> str:
         """Add-branch run with the index query stubbed -- these tests must never depend on a
@@ -503,66 +589,6 @@ class EvidenceRuntimeTests(unittest.TestCase):  # noqa: PLR0904 - one shared eve
             event = {"filePath": path, "oldString": "", "newString": f"def {name}():\n pass\n"}
             self.assertEqual(self._run("opencode", event, reports), "", path)
 
-    def test_removed_test_still_gets_blast_radius(self) -> None:
-        """The exemption is add-only: deleting a test is a coverage loss worth reporting."""
-        reports = _StubReports({"test_thing": ["test_thing  function  tests/test_x.py:1-2\ncallers (0)"]})
-        event = {"filePath": "tests/test_x.py", "oldString": "def test_thing():\n x\n", "newString": ""}
-        self.assertIn("[pci blast-radius", self._run("opencode", event, reports))
-
-    def test_rename_prefers_blast_radius_over_reminder(self) -> None:
-        reports = _StubReports({"old_name": ["old_name  function  a.py:1-3\ncallers (1)"]})
-        event = {"filePath": "a.py", "oldString": "def old_name():\n x\n", "newString": "def new_name():\n x\n"}
-        text = self._run("opencode", event, reports)
-        self.assertIn("[pci blast-radius", text)
-        self.assertNotIn("[pci add-side", text)
-
-    def test_non_source_file_is_silent(self) -> None:
-        reports = _StubReports({"gone": ["x"]})
-        event = {"filePath": "notes.md", "oldString": "def gone(): pass", "newString": ""}
-        self.assertEqual(self._run("opencode", event, reports), "")
-
-    def test_empty_reports_stay_silent(self) -> None:
-        reports = _StubReports({})  # symbol resolves to nothing in the index
-        event = {"filePath": "a.py", "oldString": "def gone():\n x\n", "newString": ""}
-        self.assertEqual(self._run("opencode", event, reports), "")
-
-    def test_unreachable_index_warns_instead_of_silence(self) -> None:
-        """A removal with an unreachable database must warn, not read as 'no callers'."""
-
-        def raising(_symbol: str, **_: object) -> list[str]:
-            raise runtime.DatabaseConnectionError("Could not connect to PostgreSQL/pgvector using PCI_PG_DB=x")
-
-        out = io.StringIO()
-        event = {"filePath": "a.py", "oldString": "def gone():\n x\n", "newString": ""}
-        with mock.patch.object(runtime.evidence, "render_symbol_reports", raising):
-            code = runtime.run_evidence("opencode", stdin=io.StringIO(json.dumps(event)), stdout=out)
-        self.assertEqual(code, 0)
-        text = out.getvalue()
-        self.assertIn("blast-radius unavailable", text)
-        self.assertIn("gone", text)
-        self.assertIn("Could not connect", text)
-
-    def test_claude_write_over_file_reports_removals(self) -> None:
-        """A whole-file Write carries no old_string; the old side comes from disk."""
-        reports = _StubReports({"gone": ["gone  function  a.py:1-3\ncallers (2)"]})
-        with TemporaryDirectory() as tmp:
-            target = Path(tmp) / "a.py"
-            _ = target.write_text("def gone():\n    return 1\n", encoding="utf-8")
-            event = _write_event(target, "# rewritten\n")
-            payload = cast("dict[str, object]", json.loads(self._run("claude", event, reports)))
-        hook_out = cast("dict[str, object]", payload["hookSpecificOutput"])
-        self.assertIn("[pci blast-radius", cast("str", hook_out["additionalContext"]))
-        self.assertEqual(reports.calls, ["gone"])
-
-    def test_claude_write_keeping_definition_is_silent(self) -> None:
-        reports = _StubReports({"gone": ["should not appear"]})
-        with TemporaryDirectory() as tmp:
-            target = Path(tmp) / "a.py"
-            _ = target.write_text("def gone():\n    return 1\n", encoding="utf-8")
-            event = _write_event(target, "def gone():\n    return 2\n")
-            self.assertEqual(self._run("claude", event, reports), "")
-        self.assertEqual(reports.calls, [])
-
     def test_claude_write_new_file_takes_the_add_branch(self) -> None:
         """A new file removes nothing, so it takes the add branch, never blast radius.
 
@@ -579,22 +605,6 @@ class EvidenceRuntimeTests(unittest.TestCase):  # noqa: PLR0904 - one shared eve
         self.assertIn("[pci add-side", text)
         self.assertNotIn("[pci blast-radius", text)
         self.assertEqual(reports.calls, [])
-
-    def test_rename_fires_blast_radius_for_the_old_name(self) -> None:
-        """A rename removes the old name; the evidence hook must report it."""
-        reports = _StubReports({"old_name": ["old_name  function  a.py:1-3\ncallers (1)"]})
-        event = {
-            "hook_event_name": "PreToolUse",
-            "tool_name": "Edit",
-            "tool_input": {
-                "file_path": "a.py",
-                "old_string": "def old_name():\n    return build()\n",
-                "new_string": "def new_name():\n    return build()\n",
-            },
-        }
-        text = self._run("claude", event, reports)
-        self.assertIn("[pci blast-radius", text)
-        self.assertEqual(reports.calls, ["old_name"])
 
 
 class InstallOpencodeTests(unittest.TestCase):
@@ -908,7 +918,7 @@ class InstallGitNestedTests(unittest.TestCase):
             root = Path(tmp).resolve()
             nested = self._workspace(root)
             parsed = hooks_cli.HookNamespace(project=str(root))
-            outcomes = hooks_cli._install_git_with_nested(parsed)  # pyright: ignore[reportPrivateUsage]
+            outcomes = hooks_cli.install_git_with_nested(parsed)
             self.assertEqual(len(outcomes), 1)
             self.assertFalse(_post_commit_path(nested).exists())
             self.assertIn(("nested repo", str(nested)), outcomes[0].rows)
@@ -923,7 +933,7 @@ class InstallGitNestedTests(unittest.TestCase):
                 mock.patch.object(sys.stderr, "isatty", return_value=True),
                 mock.patch.object(hooks_cli, "prompt_nested_repos", return_value=True),
             ):
-                outcomes = hooks_cli._install_git_with_nested(parsed)  # pyright: ignore[reportPrivateUsage]
+                outcomes = hooks_cli.install_git_with_nested(parsed)
             self.assertEqual([o.action for o in outcomes], ["installed", "installed"])
             self.assertTrue(_post_commit_path(nested).exists())
 
@@ -933,7 +943,7 @@ class InstallGitNestedTests(unittest.TestCase):
             nested = self._workspace(root)
             _ = install.install_git(root, uninstall=False, dry_run=False)
             parsed = hooks_cli.HookNamespace(project=str(root), uninstall=True)
-            outcomes = hooks_cli._install_git_with_nested(parsed)  # pyright: ignore[reportPrivateUsage]
+            outcomes = hooks_cli.install_git_with_nested(parsed)
             self.assertEqual(len(outcomes), 1)
             self.assertNotIn(("nested repo", str(nested)), outcomes[0].rows)
 

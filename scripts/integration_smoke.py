@@ -12,12 +12,10 @@ import tempfile
 from pathlib import Path
 from typing import NoReturn, cast
 
+from project_code_intelligence import process
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
-if SRC_DIR.is_dir():
-    sys.path.insert(0, str(SRC_DIR))
-
-from project_code_intelligence import process  # noqa: E402
 
 SMOKE_DATABASE_ENV_NAMES = (
     "PCI_PG_DB",

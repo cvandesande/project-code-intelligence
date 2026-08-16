@@ -41,3 +41,43 @@ rules:
     paths:
       exclude:
         - src/project_code_intelligence/db.py
+
+  - id: project.no-inline-lint-suppressions
+    message: >-
+      Fix the underlying issue instead of suppressing it inline. Ruff findings that are
+      genuinely narrow and unfixable go in [tool.ruff.lint.per-file-ignores]
+      (pyproject.toml); bandit findings go in [tool.bandit] skips -- both already carry
+      one-line justification comments there. basedpyright findings have no such
+      structured exception: fix the underlying issue (see recent commits for real fixes --
+      dropping a leading underscore when a test already treats a helper as its tested
+      contract, setattr()/dataclasses-based rewrites for frozen-dataclass and
+      typed-constructor tests, driving a test through the public CLI entry point instead
+      of a private dispatch helper). Two rule-specific notes on things that look
+      irreducible but aren't: (1) a standalone script mutating sys.path before importing
+      the package does NOT need a noqa or an exclusion here -- ruff's E402 explicitly
+      exempts a bare, unconditional `sys.path.insert(...)` call preceding the import (see
+      select_llamacpp_rocm_bundle.py); it only fires if that call is wrapped in a
+      conditional or preceded by other non-import statements, so keep the sys.path
+      mutation as a single unguarded expression with no assignment statements ahead of it.
+      (2) a boundary that catches Exception without re-raising (HTTP handler, background
+      worker, parser plugin loop) does NOT need a BLE001 noqa either if it logs through
+      project_code_intelligence.common.log (registered in [tool.ruff.lint].logger-objects)
+      -- call it as `log.exception("static description")`, never interpolating the
+      caught exception into the message (that trips TRY401, which assumes real
+      logging.exception() semantics: the traceback already carries the exception, so
+      re-embedding it is redundant), and always let it log unconditionally (no
+      debug-flag gating -- that's what TRY400 rules out). See mcp/transport.py,
+      embedding/fastembed_server.py, embedding/preembedding.py, and parsers/registry.py
+      for the pattern. The remaining files below carry a genuinely structurally
+      irreducible exception; that list should only grow with the same scrutiny as any
+      other exception in this file.
+    languages:
+      - generic
+    severity: ERROR
+    patterns:
+      - pattern-regex: '#\s*(pyright:\s*ignore|type:\s*ignore|noqa|nosec)\b'
+    paths:
+      exclude:
+        # process.py: the one BIND_ALL_INTERFACES constant bandit/ruff can't distinguish
+        # from a real bind-all-interfaces call by string content alone.
+        - src/project_code_intelligence/process.py

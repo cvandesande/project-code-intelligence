@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sys
 
 from project_code_intelligence import config
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError, McpWritePermissionError
@@ -17,11 +16,6 @@ DEFAULT_MAX_TEXT_CHARS = 8192
 DEFAULT_MAX_METADATA_BYTES = 256 * 1024
 DEFAULT_MAX_BATCH_ITEMS = 16
 DEFAULT_MAX_RECORD_CONTENT_CHARS = 32 * 1024
-
-
-def log(message: str) -> None:
-    _ = sys.stderr.write(message + "\n")
-    _ = sys.stderr.flush()
 
 
 def result_text(value: object) -> Json:

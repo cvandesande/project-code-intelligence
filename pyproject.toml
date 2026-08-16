@@ -188,6 +188,9 @@ extend-exclude = [
 ]
 
 [tool.ruff.lint]
+# Recognized as a logger for BLE001's "logged, so not a silent swallow" exemption --
+# see project_code_intelligence.common.log.
+logger-objects = ["project_code_intelligence.common.log"]
 select = [
   "A",
   "ANN",

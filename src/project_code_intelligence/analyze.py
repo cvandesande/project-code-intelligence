@@ -21,13 +21,15 @@ import math
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypedDict, cast
 
 from project_code_intelligence.git_utils import run_git
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
+
+    from typing_extensions import NotRequired, Unpack
 
     from project_code_intelligence import db
     from project_code_intelligence.models import JsonObject
@@ -557,16 +559,24 @@ def recommendation(value: float, shared: float, residual: float, *, typed_varian
     return "worth-collapsing"
 
 
-def build_group(  # noqa: PLR0913 -- one more keyword-only evidence field; see AGENTS.md on keyword-with-default additions.
+class BuildGroupKwargs(TypedDict):
+    weights: NotRequired[Mapping[str, float] | None]
+    function_symbols: NotRequired[frozenset[str]]
+    avg_text: NotRequired[float | None]
+    max_text: NotRequired[float | None]
+    typed_variants: NotRequired[bool]
+
+
+def build_group(
     members: Sequence[FunctionNode],
     avg_semantic: float | None,
-    weights: Mapping[str, float] | None = None,
-    function_symbols: frozenset[str] = frozenset(),
-    avg_text: float | None = None,
-    *,
-    max_text: float | None = None,
-    typed_variants: bool = False,
+    **kwargs: Unpack[BuildGroupKwargs],
 ) -> MotifGroup:
+    weights = kwargs.get("weights")
+    function_symbols = kwargs.get("function_symbols", frozenset())
+    avg_text = kwargs.get("avg_text")
+    max_text = kwargs.get("max_text")
+    typed_variants = kwargs.get("typed_variants", False)
     ordered = tuple(sorted(members, key=lambda node: (node.source_path, node.line_start or 0, node.symbol)))
     avg_structural = average_structural_similarity(ordered, weights)
     core = common_roles(ordered, weights)
@@ -888,9 +898,9 @@ def analyze_snapshot(conn: db.DbConnection, snapshot: SnapshotRef, options: Anal
             build_group(
                 members,
                 group_semantic_similarity(conn, snapshot.snapshot_id, member_ids),
-                weights,
-                function_symbols,
-                avg_text,
+                weights=weights,
+                function_symbols=function_symbols,
+                avg_text=avg_text,
                 max_text=max_text,
                 typed_variants=is_typed_variant_group(avg_text, annotations),
             )
