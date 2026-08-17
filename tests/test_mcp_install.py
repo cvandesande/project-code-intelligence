@@ -4,8 +4,9 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 
-from project_code_intelligence import mcp_install
+from project_code_intelligence import common, mcp_install
 
 
 class CodexMcpInstallTests(unittest.TestCase):
@@ -44,6 +45,59 @@ class CodexMcpInstallTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn('spawn(PCI, ["mcp", "--scope", cwd]', text)
             self.assertNotIn("__PCI_COMMAND__", text)
+
+
+def _installed_server(path: Path) -> dict[str, object]:
+    data = cast("dict[str, dict[str, dict[str, object]]]", json.loads(path.read_text(encoding="utf-8")))
+    return data["mcpServers"]["project-code-intelligence"]
+
+
+class NestedRepoMcpInstallTests(unittest.TestCase):
+    @staticmethod
+    def _workspace_with_child(tmp: str) -> tuple[Path, Path]:
+        workspace = Path(tmp) / "big-workspace"
+        child = workspace / "child-repo"
+        for repo in (workspace, child):
+            (repo / ".git").mkdir(parents=True)
+        marker = json.dumps({
+            "cwd": str(workspace),
+            "repo_paths": [str(workspace), str(child)],
+            "collection": "big-workspace",
+        })
+        for repo in (workspace, child):
+            _ = (repo / ".git" / common.REINDEX_MARKER_NAME).write_text(marker, encoding="utf-8")
+        return workspace, child
+
+    def test_json_install_in_nested_repo_points_the_server_at_the_workspace_scope(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace, child = self._workspace_with_child(tmp)
+            action, path = mcp_install.install_json_target(
+                "claude", child, config_path=None, uninstall=False, dry_run=False
+            )
+            self.assertEqual(action, "installed")
+            self.assertEqual(path, child / ".mcp.json")
+            server = _installed_server(path)
+            self.assertEqual(server["args"], ["mcp", "--scope", str(workspace.resolve())])
+            self.assertEqual(server["cwd"], str(workspace.resolve()))
+
+    def test_codex_install_in_nested_repo_points_the_server_at_the_workspace_scope(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace, child = self._workspace_with_child(tmp)
+            action, path = mcp_install.install_codex(child, uninstall=False, dry_run=False)
+            self.assertEqual(action, "installed")
+            self.assertEqual(path, child / ".codex" / "config.toml")
+            text = path.read_text(encoding="utf-8")
+            self.assertIn(f'"--scope", "{workspace.resolve()}"', text)
+
+    def test_install_without_marker_keeps_the_project_scope(self) -> None:
+        with TemporaryDirectory() as tmp:
+            project = Path(tmp) / "plain-repo"
+            (project / ".git").mkdir(parents=True)
+            _, path = mcp_install.install_json_target(
+                "claude", project, config_path=None, uninstall=False, dry_run=False
+            )
+            server = _installed_server(path)
+            self.assertEqual(server["args"], ["mcp", "--scope", str(project)])
 
 
 class JsonMcpInstallTests(unittest.TestCase):

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from project_code_intelligence import pi_support
+from project_code_intelligence import common, pi_support
 
 _BEGIN = "# >>> pci mcp project-code-intelligence (managed) >>>"
 _END = "# <<< pci mcp project-code-intelligence (managed) <<<"
@@ -47,13 +47,28 @@ def _toml_string(value: str) -> str:
     return f'"{escaped}"'
 
 
-def _managed_block(project: Path) -> str:
+def _server_scope(project: Path) -> Path:
+    """Scope path the MCP server should run under: the enclosing workspace invocation.
+
+    MCP credentials are keyed by the database scope path recorded at index time
+    (``mcp_credentials.credential_path``). A repo nested in a multi-repo workspace
+    has no credentials under its own path -- they live under the workspace's scope --
+    so the server args must name that scope even when the client config file is
+    written into the nested repo.
+    """
+    marker = common.workspace_marker_for_path(project)
+    if marker is not None:
+        return common.database_scope_path_for_marker(marker[0], marker[1])
+    return project
+
+
+def _managed_block(scope: Path) -> str:
     return "\n".join((
         _BEGIN,
         f"[mcp_servers.{_SERVER_NAME}]",
         f"command = {_toml_string(_pci_command())}",
-        f'args = ["mcp", "--scope", {_toml_string(str(project))}]',
-        f"cwd = {_toml_string(str(project))}",
+        f'args = ["mcp", "--scope", {_toml_string(str(scope))}]',
+        f"cwd = {_toml_string(str(scope))}",
         "startup_timeout_sec = 20",
         "tool_timeout_sec = 120",
         _END,
@@ -72,7 +87,7 @@ def install_codex(project: Path, *, uninstall: bool, dry_run: bool) -> tuple[str
         if not had_block and table in existing:
             raise ValueError(f"{config_path} already defines {table[1:-1]} outside PCI's managed block")
         action = "updated" if had_block else "installed"
-        updated = (base + "\n\n" if base else "") + _managed_block(project) + "\n"
+        updated = (base + "\n\n" if base else "") + _managed_block(_server_scope(project)) + "\n"
     if not dry_run:
         if uninstall and not updated.strip():
             config_path.unlink(missing_ok=True)
@@ -82,27 +97,27 @@ def install_codex(project: Path, *, uninstall: bool, dry_run: bool) -> tuple[str
     return action, config_path
 
 
-def _json_target(target: str, project: Path) -> tuple[str, dict[str, object], dict[str, object]]:
+def _json_target(target: str, scope: Path) -> tuple[str, dict[str, object], dict[str, object]]:
     command = _pci_command()
-    common: dict[str, object] = {"command": command, "args": ["mcp", "--scope", str(project)]}
+    shared: dict[str, object] = {"command": command, "args": ["mcp", "--scope", str(scope)]}
     if target == "claude":
-        common.update({"type": "stdio", "cwd": str(project)})
-        return "mcpServers", common, {}
+        shared.update({"type": "stdio", "cwd": str(scope)})
+        return "mcpServers", shared, {}
     if target == "opencode":
         server: dict[str, object] = {
             "type": "local",
-            "command": [command, "mcp", "--scope", str(project)],
+            "command": [command, "mcp", "--scope", str(scope)],
             "enabled": True,
-            "cwd": str(project),
+            "cwd": str(scope),
         }
         return "mcp", server, {"$schema": "https://opencode.ai/config.json"}
     if target in {"vscode", "copilot"}:
-        common["type"] = "stdio"
-        return "servers", common, {}
+        shared["type"] = "stdio"
+        return "servers", shared, {}
     if target == "zed":
-        return "context_servers", common, {}
-    common.update({"autoApprove": [], "disabled": False})
-    return "mcpServers", common, {}
+        return "context_servers", shared, {}
+    shared.update({"autoApprove": [], "disabled": False})
+    return "mcpServers", shared, {}
 
 
 def _default_json_path(target: str, project: Path) -> Path:
@@ -122,7 +137,7 @@ def install_json_target(
 ) -> tuple[str, Path]:
     path = config_path or _default_json_path(target, project)
     data = _load_json_object(path)
-    section_name, server, defaults = _json_target(target, project)
+    section_name, server, defaults = _json_target(target, _server_scope(project))
     for key, value in defaults.items():
         _ = data.setdefault(key, value)
     section = _object_section(data, section_name, path)
