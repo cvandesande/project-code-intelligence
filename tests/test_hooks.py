@@ -1049,33 +1049,41 @@ class ReindexMarkerTests(unittest.TestCase):
                 self.assertEqual(runtime.run_reindex(repo), 0)
             run_mock.assert_not_called()
 
-    def test_submit_reindex_records_named_systemd_unit(self) -> None:
+    def test_submit_reindex_detaches_the_worker(self) -> None:
         with TemporaryDirectory() as tmp:
             repo = self._repo(Path(tmp).resolve(), "repo")
+            child = mock.Mock()
+            child.pid = 4242
             with (
                 mock.patch.object(runtime.git_utils, "run_git", return_value="abc123\n"),
-                mock.patch.object(runtime.shutil, "which", return_value="/usr/bin/systemd-run"),
                 mock.patch.object(runtime, "_runtime_command", return_value=["/usr/bin/pci", "hook", "run"]),
-                mock.patch.object(runtime.process, "run", return_value=runtime.process.CompletedProcess([], 0)) as run,
+                mock.patch.object(runtime.process, "popen", return_value=child) as popen,
+                mock.patch.object(runtime, "run_reindex") as inline,
             ):
                 self.assertEqual(runtime.submit_reindex(repo), 0)
-            command = cast("list[str]", run.call_args.args[0])
-            self.assertIn("--property=SyslogIdentifier=pci-reindex", command)
-            self.assertTrue(any(part.startswith("--unit=pci-reindex-") for part in command))
+            inline.assert_not_called()
+            command = cast("list[str]", popen.call_args.args[0])
+            self.assertEqual(command[-4:], ["--behavior", "reindex", "--repo", str(repo)])
+            options = cast("runtime.process.PopenOptions", popen.call_args.args[1])
+            self.assertTrue(options.start_new_session)
             state = runtime.reindex_status(repo)
             self.assertEqual(state["outcome"], "submitted")
             self.assertEqual(state["requested_head"], "abc123")
+            self.assertEqual(state["pid"], 4242)
 
-    def test_submit_reindex_falls_back_when_systemd_is_unavailable(self) -> None:
+    def test_submit_reindex_runs_inline_only_when_the_detached_spawn_fails(self) -> None:
         with TemporaryDirectory() as tmp:
             repo = self._repo(Path(tmp).resolve(), "repo")
             with (
                 mock.patch.object(runtime.git_utils, "run_git", return_value="abc123\n"),
-                mock.patch.object(runtime.shutil, "which", return_value=None),
+                mock.patch.object(runtime, "_runtime_command", return_value=["/usr/bin/pci", "hook", "run"]),
+                mock.patch.object(runtime.process, "popen", side_effect=OSError("no fork")),
                 mock.patch.object(runtime, "run_reindex", return_value=0) as fallback,
             ):
                 self.assertEqual(runtime.submit_reindex(repo), 0)
             fallback.assert_called_once_with(repo)
+            state = runtime.reindex_status(repo)
+            self.assertEqual(state["outcome"], "submission_failed")
 
 
 class HookStatusTests(unittest.TestCase):

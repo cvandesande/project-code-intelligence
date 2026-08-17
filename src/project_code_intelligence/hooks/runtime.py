@@ -19,18 +19,16 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import hashlib
 import json
 import os
 import re
 import shutil
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from project_code_intelligence import evidence, git_utils, inventory, process
+from project_code_intelligence import common, evidence, git_utils, inventory, process
 from project_code_intelligence.console_ui import as_object
 from project_code_intelligence.exceptions import DatabaseConnectionError, McpProtocolError
 from project_code_intelligence.hooks import detect, similar
@@ -406,7 +404,6 @@ def reindex_status(repo: Path) -> dict[str, object]:
     state.update({
         "repo": str(repo),
         "marker_valid": reindex_target(repo) is not None,
-        "systemd_run": shutil.which("systemd-run"),
         "head": (git_utils.run_git(repo, ["rev-parse", "HEAD"]) or "").strip() or None,
     })
     return state
@@ -422,37 +419,33 @@ def _runtime_command() -> list[str]:
 
 
 def submit_reindex(repo: Path) -> int:
+    """Hand the reindex to a detached background worker and return without waiting.
+
+    The git hook runs this in the foreground of every commit/merge, so it must
+    never block on indexing: a multi-minute inline reindex makes `git commit`
+    itself appear hung (observed 2026-08-17 as agent-side git timeouts and a
+    retried, duplicated merge). ``start_new_session`` puts the worker in its own
+    session so the hook returns immediately; the worker takes the reindex lock
+    and coalesces via requested/completed head on its own. Inline execution is
+    the last resort, only when the spawn itself fails.
+    """
     head = (git_utils.run_git(repo, ["rev-parse", "HEAD"]) or "").strip() or None
-    unit = f"pci-reindex-{hashlib.sha256(str(repo).encode()).hexdigest()[:12]}-{os.getpid()}-{time.time_ns()}"
-    _ = _write_reindex_state(repo, outcome="submitting", requested_head=head, unit=unit, error=None)
-    systemd_run = shutil.which("systemd-run")
-    if systemd_run is not None:
-        worker = [*_runtime_command(), "--target", "git", "--behavior", "reindex", "--repo", str(repo)]
-        result = process.run(
-            [
-                systemd_run,
-                "--user",
-                "--quiet",
-                "--collect",
-                f"--unit={unit}",
-                "--property=Type=exec",
-                "--property=SyslogIdentifier=pci-reindex",
-                "--",
-                *worker,
-            ],
-            process.RunOptions(capture_output=True),
+    worker = [*_runtime_command(), "--target", "git", "--behavior", "reindex", "--repo", str(repo)]
+    try:
+        child = process.popen(
+            worker,
+            process.PopenOptions(
+                stdin=process.DEVNULL,
+                stdout=process.DEVNULL,
+                stderr=process.DEVNULL,
+                start_new_session=True,
+            ),
         )
-        if result.returncode == 0:
-            _ = _write_reindex_state(repo, outcome="submitted", requested_head=head, unit=unit)
-            return 0
-        reason = result.stderr.strip() or f"systemd-run exited {result.returncode}"
-        _ = _write_reindex_state(repo, outcome="submission_failed", error=reason)
-    else:
-        _ = _write_reindex_state(repo, outcome="systemd_unavailable", error="systemd-run not found")
-    return run_reindex(repo)
-
-
-_MARKER_NAME = "pci-reindex.json"
+    except OSError as exc:
+        _ = _write_reindex_state(repo, outcome="submission_failed", requested_head=head, error=str(exc))
+        return run_reindex(repo)
+    _ = _write_reindex_state(repo, outcome="submitted", requested_head=head, pid=child.pid, error=None)
+    return 0
 
 
 def write_reindex_markers(repo_paths: list[Path], collection: str | None) -> None:
@@ -464,28 +457,7 @@ def write_reindex_markers(repo_paths: list[Path], collection: str | None) -> Non
         git_dir = repo / ".git"
         if git_dir.is_dir():
             with contextlib.suppress(OSError):
-                _ = (git_dir / _MARKER_NAME).write_text(payload, encoding="utf-8")
-
-
-def _read_marker(git_dir: Path) -> tuple[Path, list[str], str | None] | None:
-    """Validated (cwd, repo_paths, collection) from a marker file in ``git_dir``, or
-    None on any I/O, parse, or shape problem. Shared by the direct and worktree paths
-    through ``reindex_target`` so the validation rules live in exactly one place."""
-    try:
-        data = cast("object", json.loads((git_dir / _MARKER_NAME).read_text(encoding="utf-8")))
-    except (OSError, ValueError):
-        return None
-    marker = as_object(data)
-    cwd = marker.get("cwd")
-    raw = marker.get("repo_paths")
-    if not (isinstance(cwd, str) and Path(cwd).is_dir() and isinstance(raw, list)):
-        return None
-    raw_paths = cast("list[object]", raw)
-    paths = [p for p in raw_paths if isinstance(p, str) and Path(p).is_dir()]
-    if not paths or len(paths) != len(raw_paths):
-        return None
-    collection = marker.get("collection")
-    return Path(cwd), paths, collection if isinstance(collection, str) else None
+                _ = (git_dir / common.REINDEX_MARKER_NAME).write_text(payload, encoding="utf-8")
 
 
 def _worktree_reindex_target(repo: Path) -> tuple[Path, list[str]] | None:
@@ -503,7 +475,7 @@ def _worktree_reindex_target(repo: Path) -> tuple[Path, list[str]] | None:
     main_root = git_utils.worktree_main_root(repo)
     if main_root is None:
         return None
-    marker = _read_marker(main_root / ".git")
+    marker = common.read_reindex_marker(main_root / ".git")
     if marker is None:
         return None
     cwd, paths, collection = marker
@@ -526,7 +498,7 @@ def reindex_target(repo: Path) -> tuple[Path, list[str]] | None:
     git_entry = repo / ".git"
     if not git_entry.is_dir():
         return _worktree_reindex_target(repo)
-    marker = _read_marker(git_entry)
+    marker = common.read_reindex_marker(git_entry)
     if marker is None:
         return None
     cwd, paths, collection = marker
