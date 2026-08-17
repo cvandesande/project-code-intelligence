@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from project_code_intelligence import config, console_ui, db
 from project_code_intelligence.doctor.common import result, row_text
-from project_code_intelligence.mcp.status import annotate_status_snapshots
+from project_code_intelligence.mcp.status import annotate_status_snapshots, snapshot_matches_path
 from project_code_intelligence.storage import load_latest_snapshots
 
 if TYPE_CHECKING:
@@ -90,11 +91,18 @@ def _snapshot_label(snapshot: JsonObject) -> str:
 
 
 def _relevant_snapshots() -> list[JsonObject]:
-    """Latest snapshots with a resolvable local git HEAD, or [] if none apply.
+    """Latest snapshots for the checkout you're standing in, or [] if none apply.
 
     Empty covers: no usable database settings, no connection, no snapshots
     table yet, no snapshot rows, and no snapshot whose repo maps to a local
     git checkout -- ``database`` and ``project`` already report those cases.
+
+    A collection can hold one snapshot per branch/worktree (see
+    ``load_latest_snapshots``); this only keeps the ones describing the current
+    working directory or repos nested under it, so ``pci doctor`` reports on
+    the project you're in (including its nested clones), not every worktree
+    ever indexed in the collection. Use ``pci status``/``pci audit`` for the
+    collection-wide view.
     """
     try:
         settings = db.inferred_database_role_settings(config.DatabaseSettings.from_env(), "rw")
@@ -107,7 +115,12 @@ def _relevant_snapshots() -> list[JsonObject]:
             rows = load_latest_snapshots(conn)
     except db.DatabaseConnectionError:
         return []
-    return [snap for snap in annotate_status_snapshots(rows) if snap.get("head_status") != "unknown"]
+    cwd = Path.cwd()
+    return [
+        snap
+        for snap in annotate_status_snapshots(rows)
+        if snap.get("head_status") != "unknown" and snapshot_matches_path(snap, cwd)
+    ]
 
 
 def check_index_freshness() -> list[CheckResult]:
@@ -122,6 +135,7 @@ def check_index_freshness() -> list[CheckResult]:
         return []
     stale = [snap for snap in snapshots if snap.get("head_status") != "current"]
     if stale:
+        stale_labels = ", ".join(_snapshot_label(snap) for snap in stale)
         detail = "; ".join(
             f"{_snapshot_label(snap)}: indexed {console_ui.short_sha(_sha_text(snap.get('commit_sha')))}, "
             f"HEAD is {console_ui.short_sha(_sha_text(snap.get('head_commit')))}"
@@ -131,7 +145,7 @@ def check_index_freshness() -> list[CheckResult]:
             result(
                 "index-freshness",
                 "warn",
-                f"{len(stale)} of {len(snapshots)} indexed repo(s) behind HEAD",
+                f"{len(stale)} of {len(snapshots)} indexed repo(s) behind HEAD: {stale_labels}",
                 f"{detail} -- check `pci hook status` and `pci status` for the reindex hook/run state.",
             )
         ]

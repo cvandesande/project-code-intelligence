@@ -851,6 +851,85 @@ class DoctorIndexFreshnessTests(unittest.TestCase):
         self.assertIn("bbbbbbb", detail)
         self.assertIn("pci hook status", detail)
 
+    def test_ignores_a_stale_snapshot_from_an_unrelated_worktree(self) -> None:
+        current_snapshot = {
+            "collection": "demo",
+            "repo": "demo-rust",
+            "branch": "map-result-expansion",
+            "commit_sha": "a" * 40,
+            "head_status": "current",
+            "metadata": {"repo_path": str(Path.cwd())},
+        }
+        other_worktree_snapshot = {
+            "collection": "demo",
+            "repo": "demo-rust",
+            "branch": "grpcroute-equivalents",
+            "commit_sha": "c" * 40,
+            "head_commit": "d" * 40,
+            "head_status": "stale",
+            "metadata": {"repo_path": str(Path.cwd().parent / "some-other-worktree-that-does-not-exist")},
+        }
+        with (
+            patch(
+                "project_code_intelligence.doctor.database.db.inferred_database_role_settings",
+                return_value=self._SETTINGS,
+            ),
+            patch("project_code_intelligence.doctor.database.db.connect", return_value=_FakeMaintenanceConnection()),
+            patch("project_code_intelligence.doctor.database.db.table_exists", return_value=True),
+            patch(
+                "project_code_intelligence.doctor.database.load_latest_snapshots",
+                return_value=[current_snapshot, other_worktree_snapshot],
+            ),
+            patch(
+                "project_code_intelligence.doctor.database.annotate_status_snapshots",
+                return_value=[current_snapshot, other_worktree_snapshot],
+            ),
+        ):
+            results = check_index_freshness()
+
+        self.assertEqual([item.status for item in results], ["ok"])
+        self.assertIn("1 repo(s)", results[0].message)
+
+    def test_includes_snapshots_for_repos_nested_under_the_current_directory(self) -> None:
+        root_snapshot = {
+            "collection": "demo",
+            "repo": ".",
+            "branch": "main",
+            "commit_sha": "a" * 40,
+            "head_status": "current",
+            "metadata": {"repo_path": str(Path.cwd())},
+        }
+        nested_snapshot = {
+            "collection": "demo",
+            "repo": "demo-rust",
+            "branch": "main",
+            "commit_sha": "b" * 40,
+            "head_commit": "c" * 40,
+            "head_status": "stale",
+            "metadata": {"repo_path": str(Path.cwd() / "demo-rust")},
+        }
+        with (
+            patch(
+                "project_code_intelligence.doctor.database.db.inferred_database_role_settings",
+                return_value=self._SETTINGS,
+            ),
+            patch("project_code_intelligence.doctor.database.db.connect", return_value=_FakeMaintenanceConnection()),
+            patch("project_code_intelligence.doctor.database.db.table_exists", return_value=True),
+            patch(
+                "project_code_intelligence.doctor.database.load_latest_snapshots",
+                return_value=[root_snapshot, nested_snapshot],
+            ),
+            patch(
+                "project_code_intelligence.doctor.database.annotate_status_snapshots",
+                return_value=[root_snapshot, nested_snapshot],
+            ),
+        ):
+            results = check_index_freshness()
+
+        self.assertEqual([item.status for item in results], ["warn"])
+        self.assertIn("1 of 2 indexed repo(s) behind HEAD", results[0].message)
+        self.assertIn("demo/demo-rust@main", results[0].message)
+
     def test_reports_nothing_when_no_snapshot_matches_a_local_repo(self) -> None:
         with (
             patch(

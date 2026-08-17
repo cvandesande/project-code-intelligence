@@ -160,20 +160,43 @@ def _path_has_repo_suffix(path: Path, repo: str) -> bool:
 
 
 def _snapshot_repo_root_candidates(snapshot: Json) -> list[Path]:
-    cwd = Path.cwd()
-    repo_value = snapshot.get("repo")
-    repo = repo_value if isinstance(repo_value, str) and repo_value else "."
-    candidates: list[Path] = []
+    """Local checkout(s) to check this snapshot's HEAD against.
+
+    A snapshot with a stamped ``metadata.repo_path`` (recorded at index time) is
+    authoritative on its own: it names the exact worktree that was indexed, which
+    matters when several worktrees of the same repo/branch name share this snapshot
+    table. If that path no longer exists (worktree removed after merge), do not fall
+    back to guessing by repo name -- that can silently resolve to an unrelated
+    worktree's HEAD and misreport it as this snapshot's staleness. Only guess by repo
+    name when no repo_path was stamped at all (older snapshots).
+    """
     metadata = snapshot.get("metadata")
     if isinstance(metadata, dict):
         repo_path = cast("dict[object, object]", metadata).get("repo_path")
         if isinstance(repo_path, str) and repo_path:
-            candidates.append(Path(repo_path))
+            return [Path(repo_path)]
+    cwd = Path.cwd()
+    repo_value = snapshot.get("repo")
+    repo = repo_value if isinstance(repo_value, str) and repo_value else "."
+    candidates: list[Path] = []
     if repo == "." or _path_has_repo_suffix(cwd, repo):
         candidates.append(cwd)
     if repo != ".":
         candidates.extend((cwd / repo, cwd.parent / repo))
     return list(dict.fromkeys(candidates))
+
+
+def snapshot_matches_path(snapshot: Json, path: Path) -> bool:
+    """True if this snapshot refers to ``path`` or to a checkout nested under it.
+
+    Reuses the same authoritative-``repo_path``-first resolution as staleness
+    checks, so "does this snapshot describe the checkout I'm standing in" agrees
+    with "which checkout did we compare HEAD against" for that same snapshot.
+    Descendants count because a workspace can index nested clones alongside the
+    root repo; sibling worktrees and unrelated checkouts do not, because their
+    roots are not under ``path``.
+    """
+    return any(candidate.is_relative_to(path) for candidate in _snapshot_repo_root_candidates(snapshot))
 
 
 def _snapshot_head_commit(snapshot: Json) -> str | None:

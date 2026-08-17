@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence import config, db, process, progress
-from project_code_intelligence.common import default_collection, log
+from project_code_intelligence.common import (
+    database_scope_path_for_marker,
+    default_collection,
+    log,
+    workspace_marker_for_path,
+)
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError, McpWritePermissionError
 from project_code_intelligence.mcp.protocol import (
     Json,
@@ -67,10 +72,16 @@ def server_version() -> str:
 
 def set_mcp_environment_defaults() -> None:
     cwd = Path.cwd().resolve()
+    # A checkout nested in a multi-repo workspace carries a reindex marker naming
+    # the workspace invocation; defaulting from it points an MCP server launched
+    # in the child at the parent workspace's database and collection.
+    marker = workspace_marker_for_path(cwd)
+    scope = database_scope_path_for_marker(marker[0], marker[1]) if marker is not None else cwd
     if config.DATABASE_SCOPE_PATH_ENV not in os.environ:
-        os.environ[config.DATABASE_SCOPE_PATH_ENV] = str(cwd)
+        os.environ[config.DATABASE_SCOPE_PATH_ENV] = str(scope)
     if "PCI_COLLECTION" not in os.environ:
-        os.environ["PCI_COLLECTION"] = default_collection(cwd)
+        marker_collection = marker[2] if marker is not None else None
+        os.environ["PCI_COLLECTION"] = marker_collection or default_collection(scope)
         os.environ["PCI_COLLECTION_DEFAULTED"] = "1"
 
 

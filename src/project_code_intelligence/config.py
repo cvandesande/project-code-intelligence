@@ -18,7 +18,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import SplitResult, quote, unquote, urlsplit, urlunsplit
 
-from project_code_intelligence.common import default_database_name
+from project_code_intelligence.common import (
+    database_scope_path_for_marker,
+    default_database_name,
+    workspace_marker_for_path,
+)
 from project_code_intelligence.exceptions import ConfigError
 
 Env = Mapping[str, str]
@@ -370,8 +374,13 @@ def database_url_with_credentials(dsn: str, user: str, password: str | None = No
 
 def configured_database_scope_path(env: Env | None = None) -> Path:
     configured = env_text(DATABASE_SCOPE_PATH_ENV, env=env)
-    path = Path(configured).expanduser() if configured else Path.cwd()
-    return path.resolve(strict=False)
+    if configured:
+        return Path(configured).expanduser().resolve(strict=False)
+    marker = workspace_marker_for_path(Path.cwd())
+    if marker is not None:
+        marker_cwd, repo_paths, _ = marker
+        return database_scope_path_for_marker(marker_cwd, repo_paths)
+    return Path.cwd().resolve(strict=False)
 
 
 def inferred_database_name(env: Env | None = None) -> str:

@@ -17,6 +17,8 @@ from project_code_intelligence.embedding import apple_embed_server as _apple_emb
 class _FrameworkHooks:
     read_only = None
     server_version = None
+    # importlib.metadata calls Distribution.locate_file internally; tests override it.
+    locate_file = None
     model_config = None
     only_skipped = None
     include_snapshots = None
@@ -41,6 +43,7 @@ _WHITELIST = (
     _apple_embed_server._AutoTokenizerClass,
     _FrameworkHooks.read_only,
     _FrameworkHooks.server_version,
+    _FrameworkHooks.locate_file,
     _FrameworkHooks.model_config,
     _FrameworkHooks.only_skipped,
     _FrameworkHooks.include_snapshots,

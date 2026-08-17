@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from typing_extensions import override
 
-from project_code_intelligence import analyze, config, git_utils
+from project_code_intelligence import analyze, common, config, git_utils
 from project_code_intelligence import db as pci_db
 from project_code_intelligence import server as mcp_server
 from project_code_intelligence.embedding.types import EmbeddingEndpointUnavailableError
@@ -1667,6 +1667,29 @@ class McpContractTests(unittest.TestCase):
         self.assertEqual(scope_path, str(workspace.resolve()))
         self.assertEqual(defaulted, "1")
 
+    def test_mcp_defaults_in_nested_repo_follow_the_workspace_marker(self) -> None:
+        old_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "big-workspace"
+            child = workspace / "child-repo"
+            for repo in (workspace, child):
+                (repo / ".git").mkdir(parents=True)
+            marker = json.dumps({
+                "cwd": str(workspace),
+                "repo_paths": [str(workspace), str(child)],
+                "collection": "big-workspace",
+            })
+            for repo in (workspace, child):
+                _ = (repo / ".git" / common.REINDEX_MARKER_NAME).write_text(marker, encoding="utf-8")
+            try:
+                os.chdir(child)
+                collection, scope_path, defaulted = _mcp_defaults_for_empty_env()
+            finally:
+                os.chdir(old_cwd)
+        self.assertEqual(collection, "big-workspace")
+        self.assertEqual(scope_path, str(workspace.resolve()))
+        self.assertEqual(defaulted, "1")
+
     def test_mcp_keeps_explicit_collection_override(self) -> None:
         with patch.dict(os.environ, {"PCI_COLLECTION": "configured"}, clear=True):
             set_mcp_environment_defaults()
@@ -2468,10 +2491,18 @@ class McpStatusRuntimeIdentityTests(unittest.TestCase):
                     return json.dumps({"vcs_info": {"commit_id": "installed123"}})
                 return None
 
+            @override
+            def locate_file(self, path: str | os.PathLike[str]) -> Path:
+                return Path(path)
+
         distribution = DirectUrlDistribution()
         with (
             patch.object(mcp_status, "source_git_root", return_value=None),
             patch.object(mcp_status.importlib.metadata, "distribution", return_value=distribution),
+            # `distribution()` is also the mechanism `importlib.metadata.version()` uses
+            # internally, so without this the fake above (built only to answer
+            # read_text("direct_url.json")) leaks into `_package_version()` too.
+            patch.object(mcp_status, "_package_version", return_value="0.0.0-test"),
         ):
             identity = mcp_status.server_runtime_identity()
         package = cast("dict[str, object]", identity["package"])

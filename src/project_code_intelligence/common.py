@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import sys
 import traceback
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from pathlib import Path
+from typing import cast
 
 
 class _StderrLog:
@@ -48,6 +47,66 @@ def default_database_name(scope_path: Path) -> str:
     max_slug_chars = 63 - len("pci_") - len("_") - len(digest)
     slug = slug[:max_slug_chars].rstrip("_") or "default"
     return f"pci_{slug}_{digest}"
+
+
+REINDEX_MARKER_NAME = "pci-reindex.json"
+
+
+def read_reindex_marker(git_dir: Path) -> tuple[Path, list[str], str | None] | None:
+    """Validated (cwd, repo_paths, collection) from a reindex marker in ``git_dir``,
+    or None on any I/O, parse, or shape problem. Every ``pci index`` run writes this
+    marker into each indexed repo's ``.git`` directory (see
+    ``hooks.runtime.write_reindex_markers``), so it is the durable record of which
+    workspace invocation a checkout belongs to."""
+    try:
+        data = cast("object", json.loads((git_dir / REINDEX_MARKER_NAME).read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    marker = cast("dict[object, object]", data)
+    cwd = marker.get("cwd")
+    raw = marker.get("repo_paths")
+    if not (isinstance(cwd, str) and Path(cwd).is_dir() and isinstance(raw, list)):
+        return None
+    raw_paths = cast("list[object]", raw)
+    paths = [p for p in raw_paths if isinstance(p, str) and Path(p).is_dir()]
+    if not paths or len(paths) != len(raw_paths):
+        return None
+    collection = marker.get("collection")
+    return Path(cwd), paths, collection if isinstance(collection, str) else None
+
+
+def workspace_marker_for_path(path: Path) -> tuple[Path, list[str], str | None] | None:
+    """Reindex marker of the repo enclosing ``path``, or None.
+
+    Walks up to the nearest ``.git`` directory only: a checkout nested inside a
+    multi-repo workspace carries its own marker recording the workspace invocation,
+    which is how a child directory resolves to the parent workspace's database and
+    collection instead of inferring a fresh standalone identity from its own name.
+    A ``.git`` file (linked worktree) stops the walk without a marker -- worktrees
+    are resolved through their main repo by the reindex hook, not here.
+    """
+    resolved = path.expanduser().resolve(strict=False)
+    for candidate in (resolved, *resolved.parents):
+        git_entry = candidate / ".git"
+        if git_entry.is_dir():
+            return read_reindex_marker(git_entry)
+        if git_entry.exists():
+            return None
+    return None
+
+
+def database_scope_path_for_marker(cwd: Path, repo_paths: list[str]) -> Path:
+    """Scope path a marker's invocation would have inferred at index time.
+
+    Mirrors ``database_scope_path_for_root_repos``/CLI inference: a single-repo
+    invocation scopes to that repo's own path; a multi-repo workspace scopes to
+    the invocation directory.
+    """
+    if len(repo_paths) == 1:
+        return Path(repo_paths[0]).expanduser().resolve(strict=False)
+    return cwd.expanduser().resolve(strict=False)
 
 
 def database_scope_path_for_root_repos(root: Path, repos: list[str]) -> Path:
