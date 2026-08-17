@@ -138,6 +138,7 @@ def check_label(name: str) -> str:
         "project-mcp": "MCP configuration",
         "schema": "Schema",
         "schema-version": "Schema version",
+        "workspace-mcp": "Workspace MCP",
     }.get(name, name)
 
 
@@ -347,6 +348,8 @@ def _project_section(by_name: Mapping[str, CheckResult]) -> Table | None:
         _row(table, mcp.status, "MCP", mcp.message)
     if hooks := by_name.get("project-hooks"):
         _row(table, hooks.status, "Hooks", hooks.message)
+    if workspace := by_name.get("workspace-mcp"):
+        _row(table, workspace.status, "Workspace", workspace.message)
     if freshness := by_name.get("index-freshness"):
         _row(table, freshness.status, "Index", freshness.message)
     return table
@@ -404,6 +407,7 @@ def _build_main_panel(by_name: Mapping[str, CheckResult], results: Sequence[Chec
         "embedding-config",
         "embedding",
         "project-mcp",
+        "workspace-mcp",
         "index-freshness",
     }
     non_service_issues = [item for item in issues if item.name not in service_names]
@@ -498,6 +502,17 @@ def _next_steps(
             ("Install MCP for this project", "pci mcp install --target <client>"),
             ("Optionally install agent hooks", "pci hook install --target <client>"),
         ))
+    if "workspace-mcp" in issue_names:
+        workspace = by_name.get("workspace-mcp")
+        missing = (workspace.detail or "").splitlines() if workspace else []
+        steps.extend(
+            (
+                f"Install MCP in nested repo {Path(repo).name}",
+                f"pci mcp install --target <client> --project {repo}",
+            )
+            for repo in missing
+            if repo
+        )
     return steps
 
 

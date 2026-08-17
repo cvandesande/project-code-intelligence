@@ -13,7 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from project_code_intelligence import config, db, mcp_install, process
+from project_code_intelligence import common, config, db, mcp_install, process
 from project_code_intelligence.doctor.common import (
     human_bytes,
     result,
@@ -257,6 +257,47 @@ def _configured_hook_targets(project: Path) -> list[str]:
     return targets
 
 
+def _nested_workspace_repos(project: Path) -> list[Path]:
+    """Repos the workspace invocation indexed strictly inside ``project``.
+
+    Sourced from the reindex marker, so this lists checkouts the workspace
+    deliberately indexed -- not every git directory that happens to be nested.
+    """
+    marker = common.workspace_marker_for_path(project)
+    if marker is None:
+        return []
+    _cwd, repo_paths, _collection = marker
+    resolved = project.resolve()
+    nested: list[Path] = []
+    for raw in repo_paths:
+        candidate = Path(raw).resolve()
+        if candidate != resolved and candidate.is_relative_to(resolved):
+            nested.append(candidate)
+    return nested
+
+
+def _workspace_mcp_result(project: Path) -> CheckResult | None:
+    """MCP coverage across the workspace's nested repos, or None when there are none.
+
+    An agent session opened with a nested repo as its project root only finds MCP
+    config in that repo, so each nested repo needs its own install. The install
+    commands land in the doctor summary's next steps via this result's detail.
+    """
+    nested = _nested_workspace_repos(project)
+    if not nested:
+        return None
+    missing = [repo for repo in nested if not _configured_mcp_targets(repo)]
+    if not missing:
+        return result("workspace-mcp", "ok", f"MCP installed in {len(nested)} nested repo(s)")
+    names = ", ".join(repo.name for repo in missing)
+    return result(
+        "workspace-mcp",
+        "warn",
+        f"{len(missing)} of {len(nested)} nested repo(s) without MCP config: {names}",
+        "\n".join(str(repo) for repo in missing),
+    )
+
+
 def check_project_integrations(project: Path) -> list[CheckResult]:
     """Report project-local PCI integrations under ``project``."""
     project = project.resolve()
@@ -265,7 +306,7 @@ def check_project_integrations(project: Path) -> list[CheckResult]:
 
     mcp_targets = _configured_mcp_targets(project)
     hook_targets = _configured_hook_targets(project)
-    return [
+    results = [
         result("project", "ok", str(project)),
         result(
             "project-mcp",
@@ -278,6 +319,10 @@ def check_project_integrations(project: Path) -> list[CheckResult]:
             f"installed for {', '.join(hook_targets)}" if hook_targets else "not installed (optional)",
         ),
     ]
+    workspace_mcp = _workspace_mcp_result(project)
+    if workspace_mcp is not None:
+        results.append(workspace_mcp)
+    return results
 
 
 def check_results(args: DoctorArgs, env: config.Env | None = None) -> list[CheckResult]:

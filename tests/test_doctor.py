@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import stat
 import tempfile
@@ -8,7 +9,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import ANY, call, patch
 
-from project_code_intelligence import config, mcp_install
+from project_code_intelligence import common, config, mcp_install
 from project_code_intelligence.db import DatabaseRole, PostgresBootstrapResult
 from project_code_intelligence.doctor import (
     CheckResult,
@@ -172,6 +173,78 @@ class DoctorProjectTests(unittest.TestCase):
 
         self.assertEqual(results["project-mcp"].status, "warn")
         self.assertEqual(results["project-hooks"].status, "skip")
+
+    def test_reports_nested_repos_without_mcp_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "big-workspace"
+            configured = workspace / "configured-repo"
+            unconfigured = workspace / "unconfigured-repo"
+            for repo in (workspace, configured, unconfigured):
+                (repo / ".git").mkdir(parents=True)
+            marker = json.dumps({
+                "cwd": str(workspace),
+                "repo_paths": [str(workspace), str(configured), str(unconfigured)],
+                "collection": "big-workspace",
+            })
+            for repo in (workspace, configured, unconfigured):
+                _ = (repo / ".git" / common.REINDEX_MARKER_NAME).write_text(marker, encoding="utf-8")
+            _ = mcp_install.install_json_target("claude", configured, config_path=None, uninstall=False, dry_run=False)
+
+            results = {item.name: item for item in doctor_cli.check_project_integrations(workspace)}
+
+        workspace_mcp = results["workspace-mcp"]
+        self.assertEqual(workspace_mcp.status, "warn")
+        self.assertIn("1 of 2 nested repo(s) without MCP config: unconfigured-repo", workspace_mcp.message)
+        self.assertEqual(workspace_mcp.detail, str(unconfigured.resolve()))
+
+    def test_reports_workspace_mcp_ok_when_all_nested_repos_are_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "big-workspace"
+            child = workspace / "child-repo"
+            for repo in (workspace, child):
+                (repo / ".git").mkdir(parents=True)
+            marker = json.dumps({
+                "cwd": str(workspace),
+                "repo_paths": [str(workspace), str(child)],
+                "collection": "big-workspace",
+            })
+            for repo in (workspace, child):
+                _ = (repo / ".git" / common.REINDEX_MARKER_NAME).write_text(marker, encoding="utf-8")
+            _ = mcp_install.install_json_target("claude", child, config_path=None, uninstall=False, dry_run=False)
+
+            results = {item.name: item for item in doctor_cli.check_project_integrations(workspace)}
+
+        self.assertEqual(results["workspace-mcp"].status, "ok")
+        self.assertIn("1 nested repo(s)", results["workspace-mcp"].message)
+
+    def test_plain_repo_reports_no_workspace_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            (project / ".git").mkdir()
+
+            results = {item.name: item for item in doctor_cli.check_project_integrations(project)}
+
+        self.assertNotIn("workspace-mcp", results)
+
+    def test_summary_suggests_per_repo_install_for_missing_nested_mcp(self) -> None:
+        output = format_summary(
+            [
+                CheckResult("project", "ok", "/workspace"),
+                CheckResult(
+                    "workspace-mcp",
+                    "warn",
+                    "1 of 2 nested repo(s) without MCP config: child-repo",
+                    "/workspace/child-repo",
+                ),
+            ],
+            color=False,
+        )
+
+        self.assertIn("Workspace", output)
+        self.assertIn("nested repo(s) without MCP config", output)
+        self.assertIn("Install MCP in nested repo child-repo", output)
+        self.assertIn("pci mcp install --target <client> --project /workspace/child-repo", output)
+        self.assertNotIn("Needs attention", output)
 
     def test_skips_integration_checks_outside_git_repository(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
