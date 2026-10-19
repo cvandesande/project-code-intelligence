@@ -161,6 +161,14 @@ repo prefix for multi-repo collections); the two coincide when the row's repo is
 Tool schemas are defined in `project_code_intelligence.mcp.tool_catalog`.
 Clients should use `tools/list` instead of assuming schemas from documentation.
 
+The `initialize` result also carries an `instructions` string holding cross-tool
+routing policy: which tool to call first, `blast_radius` before removing or
+re-signaturing a definition, evidence-not-verdict framing, and the
+committed-state caveat. Clients that honour it place it in model context for
+every turn, so its length is capped by a contract test in
+`tests/test_mcp_contracts.py`; per-tool detail belongs in `tools/list`
+descriptions, not here. Clients that ignore the field are unaffected.
+
 ## Python Imports
 
 The Python API is intentionally small. These imports are public:

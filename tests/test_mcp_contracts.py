@@ -43,6 +43,7 @@ from project_code_intelligence.mcp.protocol import (
 )
 from project_code_intelligence.mcp.tool_catalog import TOOL_DEFINITIONS, validate_tool_arguments
 from project_code_intelligence.mcp.tool_inputs import TOOL_INPUT_MODELS
+from project_code_intelligence.mcp.tools import advertised_tools
 from project_code_intelligence.mcp.transport import (
     error_message,
     handle_jsonrpc_value,
@@ -3658,6 +3659,25 @@ class McpServerEntryPointTests(unittest.TestCase):
         server_info = cast("dict[str, object]", result["serverInfo"])
         self.assertEqual(server_info["version"], "9.9.9+abcdef0")
         self.assertEqual(server_info["name"], "project-code-intelligence")
+
+    def test_initialize_response_advertises_instructions_within_context_budget(self) -> None:
+        response = mcp_transport.control_response("initialize", "id-1")
+
+        if response is None:
+            raise AssertionError("expected initialize response")
+        result = cast("dict[str, object]", response["result"])
+        instructions = cast("str", result["instructions"])
+
+        self.assertIn("code_intel_status", instructions)
+        self.assertIn("blast_radius", instructions)
+        self.assertLessEqual(
+            len(instructions),
+            mcp_transport.INSTRUCTIONS_MAX_CHARS,
+            "initialize instructions reach model context on every turn; keep them terse",
+        )
+        advertised = {str(tool["name"]) for tool in advertised_tools()}
+        for tool in ("code_intel_status", "search_code_intel_text", "search_code_intel_semantic", "blast_radius"):
+            self.assertIn(tool, advertised, f"instructions route callers to {tool}, which is not advertised")
 
     def test_server_version_appends_short_commit_when_available(self) -> None:
         with (

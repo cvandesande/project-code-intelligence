@@ -33,6 +33,21 @@ if TYPE_CHECKING:
 
 PROTOCOL_VERSION = "2024-11-05"
 
+INSTRUCTIONS_MAX_CHARS = 700
+
+# Cross-tool routing policy, returned in the MCP initialize result and placed in
+# model context by clients for every turn. Tool-specific detail belongs in the
+# tools/list descriptions instead; repeating it here doubles the per-turn cost.
+SERVER_INSTRUCTIONS = (
+    "Index of Git repositories: semantic and lexical search, a candidate-edge graph, static findings. "
+    "Call code_intel_status first to confirm scope, coverage, and index freshness. "
+    "Use search_code_intel_text for identifiers, paths, and config keys; "
+    "search_code_intel_semantic for behaviour when identifiers are unknown. "
+    "Before deleting, renaming, or re-signaturing a definition, call blast_radius. "
+    "Graph and redundancy output is evidence, not a verdict: verify live callers in source. "
+    "The index reflects committed state; uncommitted code is invisible."
+)
+
 
 def _git_short_commit() -> str | None:
     """Best-effort short commit lookup for editable installs / source checkouts.
@@ -100,6 +115,7 @@ def control_response(method: object, request_id: JsonValue) -> Json | None:
                     "name": "project-code-intelligence",
                     "version": server_version(),
                 },
+                "instructions": SERVER_INSTRUCTIONS,
             },
         )
     if method == "ping":
