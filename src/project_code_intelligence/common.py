@@ -70,11 +70,22 @@ def read_reindex_marker(git_dir: Path) -> tuple[Path, list[str], str | None] | N
     if not (isinstance(cwd, str) and Path(cwd).is_dir() and isinstance(raw, list)):
         return None
     raw_paths = cast("list[object]", raw)
-    paths = [p for p in raw_paths if isinstance(p, str) and Path(p).is_dir()]
+    paths = [p for p in raw_paths if isinstance(p, str)]
     if not paths or len(paths) != len(raw_paths):
+        return None
+    # Deleted member repos stay in the list: the single-vs-multi-repo shape of
+    # the ORIGINAL invocation decides the database scope, so dropping a deleted
+    # path would silently move the surviving repos to a different database.
+    # Callers that touch the checkouts filter with `existing_repo_paths`.
+    if not any(Path(p).is_dir() for p in paths):
         return None
     collection = marker.get("collection")
     return Path(cwd), paths, collection if isinstance(collection, str) else None
+
+
+def existing_repo_paths(paths: list[str]) -> list[str]:
+    """The marker repo paths that still exist on disk (member repos can be deleted)."""
+    return [p for p in paths if Path(p).is_dir()]
 
 
 def workspace_marker_for_path(path: Path) -> tuple[Path, list[str], str | None] | None:

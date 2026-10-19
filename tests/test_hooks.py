@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import sys
 import unittest
 from collections.abc import Callable, Mapping
@@ -11,7 +12,7 @@ from tempfile import TemporaryDirectory
 from typing import cast
 from unittest import mock
 
-from project_code_intelligence import analyze
+from project_code_intelligence import analyze, common
 from project_code_intelligence.exceptions import DatabaseConnectionError
 from project_code_intelligence.hooks import cli as hooks_cli
 from project_code_intelligence.hooks import detect, install, runtime, similar
@@ -983,6 +984,40 @@ class ReindexMarkerTests(unittest.TestCase):
             _ = (repo / ".git" / "pci-reindex.json").write_text("not json", encoding="utf-8")
             self.assertIsNone(runtime.reindex_target(repo))
 
+    def test_deleted_member_repo_is_dropped_from_replay_but_keeps_the_marker(self) -> None:
+        # One deleted checkout must not invalidate the workspace marker (that
+        # would silently rescope surviving repos to standalone databases) and
+        # must not be replayed (that fails with `git rev-parse HEAD failed`).
+        with TemporaryDirectory() as tmp:
+            workspace = Path(tmp).resolve()
+            repo_a = self._repo(workspace, "repo-a")
+            repo_b = self._repo(workspace, "repo-b")
+            with mock.patch.object(Path, "cwd", return_value=workspace):
+                runtime.write_reindex_markers([repo_a, repo_b], "my-workspace")
+            shutil.rmtree(repo_b)
+            target = runtime.reindex_target(repo_a)
+            if target is None:
+                self.fail("expected the marker to survive one deleted member repo")
+            self.assertEqual(target[0], workspace)
+            self.assertEqual(target[1], ["--collection", "my-workspace", str(repo_a)])
+            marker = common.read_reindex_marker(repo_a / ".git")
+            if marker is None:
+                self.fail("expected a valid marker")
+            # The deleted path stays in the marker so the multi-repo database
+            # scope (the workspace directory) is preserved.
+            self.assertEqual(marker[1], [str(repo_a), str(repo_b)])
+
+    def test_marker_with_all_repos_deleted_skips(self) -> None:
+        with TemporaryDirectory() as tmp:
+            repo = self._repo(Path(tmp).resolve(), "repo")
+            payload = json.dumps({
+                "cwd": str(Path(tmp).resolve()),
+                "repo_paths": [str(Path(tmp) / "gone")],
+                "collection": None,
+            })
+            _ = (repo / ".git" / "pci-reindex.json").write_text(payload, encoding="utf-8")
+            self.assertIsNone(runtime.reindex_target(repo))
+
     def test_marker_with_vanished_workspace_skips(self) -> None:
         with TemporaryDirectory() as tmp:
             repo = self._repo(Path(tmp).resolve(), "repo")
@@ -1048,6 +1083,55 @@ class ReindexMarkerTests(unittest.TestCase):
             with mock.patch.object(runtime.process, "run") as run_mock:
                 self.assertEqual(runtime.run_reindex(repo), 0)
             run_mock.assert_not_called()
+
+    def _marked_workspace(self, tmp: str) -> tuple[Path, Path, Path]:
+        """A workspace repo with one nested repo, both carrying the reindex marker."""
+        workspace = Path(tmp).resolve()
+        (workspace / ".git").mkdir(parents=True)
+        child = self._repo(workspace, "child-repo")
+        with mock.patch.object(Path, "cwd", return_value=workspace):
+            runtime.write_reindex_markers([workspace, child], "demo")
+        return workspace, child, workspace / ".git" / "pci-reindex-heads.json"
+
+    @staticmethod
+    def _fake_run_git(heads: dict[str, str]) -> object:
+        def fake(root: Path, args: list[str]) -> str:
+            _ = args
+            return heads[str(root)]
+
+        return fake
+
+    def test_reindex_coalesces_across_workspace_repos(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace, child, heads_path = self._marked_workspace(tmp)
+            heads = {str(workspace): "aaa", str(child): "bbb"}
+            _ = heads_path.write_text(json.dumps(heads, sort_keys=True), encoding="utf-8")
+            with (
+                mock.patch.object(runtime.git_utils, "run_git", side_effect=self._fake_run_git(heads)),
+                mock.patch.object(runtime.process, "run") as run_mock,
+            ):
+                self.assertEqual(runtime.run_reindex(child), 0)
+            run_mock.assert_not_called()
+            self.assertEqual(runtime.reindex_status(child)["outcome"], "already_current")
+
+    def test_reindex_runs_and_records_heads_when_any_repo_moved(self) -> None:
+        with TemporaryDirectory() as tmp:
+            workspace, child, heads_path = self._marked_workspace(tmp)
+            _ = heads_path.write_text(
+                json.dumps({str(workspace): "aaa", str(child): "OLD"}, sort_keys=True), encoding="utf-8"
+            )
+            live = {str(workspace): "aaa", str(child): "bbb"}
+            with (
+                mock.patch.object(runtime.git_utils, "run_git", side_effect=self._fake_run_git(live)),
+                mock.patch.object(runtime, "_index_command", return_value=["/usr/bin/pci", "index"]),
+                mock.patch.object(
+                    runtime.process, "run", return_value=runtime.process.CompletedProcess([], 0)
+                ) as run_mock,
+            ):
+                self.assertEqual(runtime.run_reindex(child), 0)
+            run_mock.assert_called_once()
+            self.assertEqual(json.loads(heads_path.read_text(encoding="utf-8")), live)
+            self.assertEqual(runtime.reindex_status(child)["outcome"], "completed")
 
     def test_submit_reindex_detaches_the_worker(self) -> None:
         with TemporaryDirectory() as tmp:

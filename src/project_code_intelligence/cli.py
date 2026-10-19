@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import cast
 
 from project_code_intelligence import config, console_ui, ingest_code_intel, mcp_smoke_render, process, progress
-from project_code_intelligence.common import database_scope_path_for_root_repos, default_collection, parse_repos
+from project_code_intelligence.common import (
+    database_scope_path_for_marker,
+    database_scope_path_for_root_repos,
+    default_collection,
+    parse_repos,
+    workspace_marker_for_path,
+)
 from project_code_intelligence.embeddings import (
     EmbeddingEndpointUnavailableError,
     preflight_embedding_endpoint,
@@ -259,8 +265,14 @@ def set_index_environment_defaults() -> None:
 
 def set_index_database_scope_default(parsed: IndexNamespace) -> None:
     if parsed.worktree:
+        # The worktree's snapshots belong to the MAIN repo's workspace: scoping to
+        # main_path itself would land them in that repo's standalone database --
+        # invisible to the workspace's status/ledger and with no snapshot baseline,
+        # so every new worktree branch paid a full index (observed 2026-08-18 as an
+        # hour-plus "running - other workspace" run in a multi-repo workspace).
         main_path, _ = parse_worktree_spec(parsed.worktree)
-        scope_path = main_path
+        marker = workspace_marker_for_path(main_path)
+        scope_path = database_scope_path_for_marker(marker[0], marker[1]) if marker is not None else main_path
     elif parsed.repo_paths:
         scope_path = inferred_database_scope_path_for_repo_paths(parsed.repo_paths)
     else:

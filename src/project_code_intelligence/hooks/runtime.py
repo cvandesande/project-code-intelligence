@@ -41,6 +41,9 @@ _MAX_SYMBOLS = 2
 _NEIGHBORS = 0
 _LOCK_NAME = "pci-reindex.lock"
 _STATE_NAME = "pci-reindex-state.json"
+# Heads of every checkout in the workspace invocation at the start of its last
+# completed run; lives beside the lock because both are workspace-scoped.
+_HEADS_NAME = "pci-reindex-heads.json"
 
 # The add side runs a SEMANTIC query, not a call-shape one. Call-shape overlap was the
 # original attempt and was deleted in 052a303: it fired on 11-13% of real duplicates and no
@@ -502,14 +505,55 @@ def reindex_target(repo: Path) -> tuple[Path, list[str]] | None:
     if marker is None:
         return None
     cwd, paths, collection = marker
-    args = ["--collection", collection, *paths] if collection is not None else paths
+    # Replay only checkouts that still exist; a deleted member repo must not
+    # fail the whole reindex (`git rev-parse HEAD failed in <deleted>`).
+    live_paths = common.existing_repo_paths(paths)
+    args = ["--collection", collection, *live_paths] if collection is not None else live_paths
     return cwd, args
 
 
+def _heads_path(workspace: Path) -> Path:
+    git_dir = workspace / ".git"
+    return (git_dir if git_dir.is_dir() else workspace) / _HEADS_NAME
+
+
+def _invocation_heads(repo: Path, workspace: Path) -> dict[str, str] | None:
+    """Live HEAD per checkout this workspace invocation indexes, or None if unknown.
+
+    Keyed on the marker's repo_paths plus the triggering repo (a linked worktree
+    is not in the marker, so its head must be part of the identity or a worktree
+    commit would wrongly coalesce against a main-repo run).
+    """
+    marker = common.read_reindex_marker(workspace / ".git") or common.read_reindex_marker(repo / ".git")
+    if marker is None:
+        return None
+    _cwd, paths, _collection = marker
+    heads: dict[str, str] = {}
+    for path in dict.fromkeys([*common.existing_repo_paths(paths), str(repo.resolve())]):
+        head = (git_utils.run_git(Path(path), ["rev-parse", "HEAD"]) or "").strip()
+        if not head:
+            return None
+        heads[path] = head
+    return heads
+
+
+def _read_completed_heads(workspace: Path) -> object:
+    try:
+        return cast("object", json.loads(_heads_path(workspace).read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return None
+
+
 def _run_locked_reindex(repo: Path, workspace: Path, index_args: list[str]) -> int:
-    state = _read_reindex_state(repo)
-    requested_head = state.get("requested_head")
-    if requested_head and state.get("completed_head") == requested_head:
+    # Coalesce at the workspace level: every worker indexes the whole invocation,
+    # so a run triggered by one repo's commit also covers commits that landed in
+    # the workspace's other repos before the lock was acquired. Heads are captured
+    # BEFORE the index run -- a commit landing mid-run differs from the recorded
+    # heads and still gets its own run. Per-repo state alone cannot see this
+    # (observed 2026-08-18: commits to two repos a minute apart each re-ran the
+    # full multi-repo scan back to back).
+    heads = _invocation_heads(repo, workspace)
+    if heads is not None and heads == _read_completed_heads(workspace):
         _ = _write_reindex_state(repo, outcome="already_current", error=None)
         return 0
     _ = _write_reindex_state(repo, outcome="running", started_at=datetime.now(timezone.utc).isoformat(), error=None)
@@ -535,7 +579,11 @@ def _run_locked_reindex(repo: Path, workspace: Path, index_args: list[str]) -> i
             error=f"pci-index exited {result.returncode}",
         )
         return 0
-    completed_head = (git_utils.run_git(repo, ["rev-parse", "HEAD"]) or "").strip() or requested_head
+    if heads is not None:
+        heads_path = _heads_path(workspace)
+        with contextlib.suppress(OSError):
+            _ = heads_path.write_text(json.dumps(heads, sort_keys=True), encoding="utf-8")
+    completed_head = (git_utils.run_git(repo, ["rev-parse", "HEAD"]) or "").strip() or None
     _ = _write_reindex_state(
         repo,
         outcome="completed",

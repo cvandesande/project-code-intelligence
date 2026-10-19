@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
-from project_code_intelligence import cli, config
+from project_code_intelligence import cli, common, config
 from project_code_intelligence.embeddings import EmbeddingEndpointUnavailableError
 
 
@@ -26,6 +26,41 @@ def mcp_response(payload: dict[str, object]) -> dict[str, object]:
             ]
         },
     }
+
+
+class CliWorktreeScopeTests(unittest.TestCase):
+    def test_pci_index_worktree_scopes_to_the_main_repos_workspace(self) -> None:
+        captured_scope_path: str | None = None
+
+        def fake_ingest_main(args: list[str]) -> int:
+            nonlocal captured_scope_path
+            captured_scope_path = os.environ.get(config.DATABASE_SCOPE_PATH_ENV)
+            _ = args
+            return 0
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory).resolve() / "big-workspace"
+            main_repo = workspace / "child-repo"
+            worktree = workspace / "worktrees" / "feature"
+            for repo in (workspace, main_repo):
+                (repo / ".git").mkdir(parents=True)
+            worktree.mkdir(parents=True)
+            marker = json.dumps({
+                "cwd": str(workspace),
+                "repo_paths": [str(workspace), str(main_repo)],
+                "collection": "big-workspace",
+            })
+            for repo in (workspace, main_repo):
+                _ = (repo / ".git" / common.REINDEX_MARKER_NAME).write_text(marker, encoding="utf-8")
+
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("project_code_intelligence.cli.ingest_code_intel.cli_main", side_effect=fake_ingest_main),
+            ):
+                status = cli.index_main(["--worktree", f"{main_repo}={worktree}", "--no-embed", "--dry-run"])
+
+        self.assertEqual(status, 0)
+        self.assertEqual(captured_scope_path, str(workspace))
 
 
 class CliWrapperTests(unittest.TestCase):
