@@ -18,7 +18,7 @@ JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | Sequence["JsonValue"] | Mapping[str, "JsonValue"]
 JsonObject: TypeAlias = dict[str, JsonValue]
 
-SCHEMA_VERSION = "code-intel-schema-v2"
+SCHEMA_VERSION = "code-intel-schema-v3"
 CHUNKER_VERSION = "code-intel-v1"
 PARSER_VERSION = "stdlib-heuristic-v22"
 SOURCE_TYPE = "code_intel"

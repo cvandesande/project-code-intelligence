@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence.exceptions import McpProtocolError, McpProtocolTypeError
-from project_code_intelligence.mcp.filters import query_with_where, scoped_collection_repo_clauses
+from project_code_intelligence.mcp.filters import query_with_where, scoped_record_clauses
 from project_code_intelligence.mcp.formatting import compact_record, verbose_record
 from project_code_intelligence.mcp.protocol import (
     Json,
@@ -27,8 +27,8 @@ if TYPE_CHECKING:
 
 
 _RECORD_PROJECTION_WITH_CONTENT = """
-            SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role, r.branch,
-                   r.commit_sha, r.tree_sha,
+            SELECT r.id, f.snapshot_id, r.collection, r.repo, f.repo_role, f.branch,
+                   f.commit_sha, f.tree_sha,
                    r.source_path, r.language, r.file_role, r.content_class,
                    r.record_type, r.record_id, r.parent_record_id, r.title, r.summary,
                    left(r.embedding_text, %s) AS embedding_text,
@@ -43,12 +43,16 @@ _RECORD_PROJECTION_WITH_CONTENT = """
                    coalesce(f.is_untracked, false) AS is_untracked,
                    coalesce(f.indexed_dirty, false) AS indexed_dirty
             FROM project_code_intel_records r
-            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
+            LEFT JOIN project_code_intel_files f
+              ON f.collection = r.collection
+             AND f.repo = r.repo
+             AND f.source_path = r.source_path
+             AND r.file_sha256 = coalesce(f.file_sha256, '')
             """
 
 _RECORD_PROJECTION_WITHOUT_CONTENT = """
-            SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role, r.branch,
-                   r.commit_sha, r.tree_sha,
+            SELECT r.id, f.snapshot_id, r.collection, r.repo, f.repo_role, f.branch,
+                   f.commit_sha, f.tree_sha,
                    r.source_path, r.language, r.file_role, r.content_class,
                    r.record_type, r.record_id, r.parent_record_id, r.title, r.summary,
                    NULL::text AS embedding_text,
@@ -63,7 +67,11 @@ _RECORD_PROJECTION_WITHOUT_CONTENT = """
                    coalesce(f.is_untracked, false) AS is_untracked,
                    coalesce(f.indexed_dirty, false) AS indexed_dirty
             FROM project_code_intel_records r
-            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
+            LEFT JOIN project_code_intel_files f
+              ON f.collection = r.collection
+             AND f.repo = r.repo
+             AND f.source_path = r.source_path
+             AND r.file_sha256 = coalesce(f.file_sha256, '')
             """
 
 
@@ -96,7 +104,7 @@ def get_record_ids_arg(args: Json) -> tuple[list[str], bool]:
 
 
 def build_record_lookup(args: Json, ids: list[str], *, batch: bool, include_content: bool) -> tuple[str, QueryParams]:
-    where_clauses, where_params = scoped_collection_repo_clauses(args, "r")
+    where_clauses, where_params = scoped_record_clauses(args, "r", "f")
     select_prefix = record_projection_select(include_content=include_content)
     if batch:
         where_clauses.append("r.record_id = ANY(%s::text[])")

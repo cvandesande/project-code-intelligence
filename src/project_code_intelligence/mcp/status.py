@@ -732,6 +732,11 @@ def load_status_rows(
                 """
             SELECT r.collection, r.repo, count(*) AS records, count(r.embedding) AS embedded_records
             FROM project_code_intel_records r
+            LEFT JOIN project_code_intel_files f
+              ON f.collection = r.collection
+             AND f.repo = r.repo
+             AND f.source_path = r.source_path
+             AND r.file_sha256 = coalesce(f.file_sha256, '')
             """,
                 filters.records.clauses,
                 """
@@ -750,6 +755,11 @@ def load_status_rows(
                    count(*) AS count,
                    count(r.embedding) AS embedded_records
             FROM project_code_intel_records r
+            LEFT JOIN project_code_intel_files f
+              ON f.collection = r.collection
+             AND f.repo = r.repo
+             AND f.source_path = r.source_path
+             AND r.file_sha256 = coalesce(f.file_sha256, '')
             """,
                 filters.records.clauses,
                 """

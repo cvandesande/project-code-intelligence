@@ -1834,7 +1834,7 @@ class McpQueryTests(unittest.TestCase):
 
         self.assertIn("r.collection = %s", sql)
         self.assertIn("r.repo = %s", sql)
-        self.assertIn("r.snapshot_id", sql)
+        self.assertIn("f.snapshot_id", sql)
         self.assertIn("project_code_intel_snapshots latest_snapshot", sql)
         self.assertEqual(params, ["test", "sample-repo"])
         # "latest" is the implicit default — only non-default scopes are echoed.

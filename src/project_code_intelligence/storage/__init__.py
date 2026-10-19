@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from project_code_intelligence.storage.copy import copy_unchanged_parser_failures, copy_unchanged_records_and_edges
+from project_code_intelligence.storage.copy import copy_unchanged_edges, copy_unchanged_parser_failures
 from project_code_intelligence.storage.core import (
     RecordInsertContext,
+    SnapshotScope,
     count_unresolved_edge_targets,
+    delete_orphaned_records,
     insert_edges,
     insert_files,
     insert_parser_failures,
     insert_records,
     insert_snapshot,
+    lock_ingest_branch,
     parser_failure_metadata,
     pre_resolvable_edge_count,
     pre_resolve_edge_targets,
@@ -43,9 +46,11 @@ from project_code_intelligence.storage.static import insert_static_runs
 
 __all__ = [
     "RecordInsertContext",
+    "SnapshotScope",
+    "copy_unchanged_edges",
     "copy_unchanged_parser_failures",
-    "copy_unchanged_records_and_edges",
     "count_unresolved_edge_targets",
+    "delete_orphaned_records",
     "ensure_schema",
     "file_signature",
     "finish_index_run",
@@ -59,6 +64,7 @@ __all__ = [
     "latest_snapshot_info",
     "load_index_runs",
     "load_latest_snapshots",
+    "lock_ingest_branch",
     "parser_failure_metadata",
     "pre_resolvable_edge_count",
     "pre_resolve_edge_targets",

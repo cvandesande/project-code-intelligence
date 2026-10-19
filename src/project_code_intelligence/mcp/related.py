@@ -65,7 +65,11 @@ def related_record_ids(conn: db.DbConnection, args: Json, record_id: str) -> tup
                 """
             SELECT r.parent_record_id
             FROM project_code_intel_records r
-            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
+            LEFT JOIN project_code_intel_files f
+              ON f.collection = r.collection
+             AND f.repo = r.repo
+             AND f.source_path = r.source_path
+             AND r.file_sha256 = coalesce(f.file_sha256, '')
             """,
                 clauses,
                 """

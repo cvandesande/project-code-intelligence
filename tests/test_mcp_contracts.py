@@ -2337,6 +2337,134 @@ class McpStatusWarningTests(unittest.TestCase):
         self.assertEqual(warnings[0]["repo"], "missing-repo")
 
 
+class McpRecordSnapshotMembershipTests(unittest.TestCase):
+    """Records carry no snapshot_id/branch/commit_sha/tree_sha of their own
+    post-migration (content-addressed records, HANDOFF.md); snapshot scope and
+    those response fields are resolved through the joined files row instead."""
+
+    def test_record_fetch_pinned_snapshot_scopes_through_files_join(self) -> None:
+        """A pinned snapshot_id filters the joined files row, not the record."""
+        conn = FakeConnection()
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            _ = mcp_tools.tool_get_code_intel_record({"record_id": "README.md::doc::000001", "snapshot_id": 7})
+
+        query, params = conn.calls[-1]
+        self.assertIn("LEFT JOIN project_code_intel_files f", query)
+        self.assertIn("f.snapshot_id = %s", query)
+        self.assertNotIn("r.snapshot_id", query)
+        self.assertIn(7, params)
+
+    def test_record_fetch_latest_scope_resolves_snapshot_via_files_subquery(self) -> None:
+        """With no snapshot_id/include_historical, scope defaults to "latest": the
+        joined files row must match the newest snapshot for that collection/repo."""
+        conn = FakeConnection()
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            _ = mcp_tools.tool_get_code_intel_record({"record_id": "README.md::doc::000001"})
+
+        query, _params = conn.calls[0]
+        self.assertIn("f.snapshot_id =", query)
+        self.assertIn("FROM project_code_intel_snapshots latest_snapshot", query)
+        self.assertIn("latest_snapshot.collection = f.collection", query)
+        self.assertIn("latest_snapshot.repo = f.repo", query)
+
+    def test_record_fetch_include_historical_omits_snapshot_filter(self) -> None:
+        """include_historical drops the files-side snapshot filter entirely, so a
+        record can surface once per snapshot membership instead of just the latest."""
+        conn = FakeConnection()
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            _ = mcp_tools.tool_get_code_intel_record({
+                "record_id": "README.md::doc::000001",
+                "include_historical": True,
+            })
+
+        query, _params = conn.calls[0]
+        self.assertIn("LEFT JOIN project_code_intel_files f", query)
+        self.assertNotIn("f.snapshot_id =", query)
+        self.assertNotIn("FROM project_code_intel_snapshots latest_snapshot", query)
+
+    def test_record_fetch_response_fields_come_from_the_joined_files_row(self) -> None:
+        """snapshot_id/branch/commit_sha/tree_sha/repo_role in the response must be the
+        files row's values, not read off the record (which no longer has them)."""
+        row: dict[str, object] = {
+            "id": 1,
+            "snapshot_id": 42,
+            "collection": "test",
+            "repo": ".",
+            "repo_role": "project",
+            "branch": "main",
+            "commit_sha": "abc123",
+            "tree_sha": "def456",
+            "source_path": "README.md",
+            "language": "doc",
+            "file_role": "doc",
+            "content_class": "doc",
+            "record_type": "doc",
+            "record_id": "README.md::doc::000001",
+            "parent_record_id": None,
+            "title": "README",
+            "summary": None,
+            "embedding_text": None,
+            "embedding_text_truncated": False,
+            "display_content": "# README",
+            "display_content_truncated": False,
+            "content_omitted": False,
+            "line_start": None,
+            "line_end": None,
+            "symbol": None,
+            "symbol_kind": None,
+            "confidence_kind": None,
+            "confidence": None,
+            "tool": None,
+            "rule_id": None,
+            "severity": None,
+            "analyzer": None,
+            "analyzer_version": None,
+            "parser": None,
+            "parser_version": None,
+            "chunker_version": None,
+            "metadata": {},
+            "created_at": "2026-08-19T00:00:00+00:00",
+            "updated_at": "2026-08-19T00:00:00+00:00",
+            "has_embedding": False,
+            "is_untracked": False,
+            "indexed_dirty": False,
+        }
+        conn = QueuedConnection([FakeCursor(one=row)])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_get_code_intel_record({
+                "record_id": "README.md::doc::000001",
+                "verbose": True,
+            })
+
+        payload = mcp_text_payload(response)
+        result = cast("dict[str, object]", payload["result"])
+        self.assertEqual(result["snapshot_id"], 42)
+        self.assertEqual(result["branch"], "main")
+        self.assertEqual(result["commit_sha"], "abc123")
+        self.assertEqual(result["tree_sha"], "def456")
+        self.assertEqual(result["repo_role"], "project")
+
+
 class McpEnumScopeWarningTests(unittest.TestCase):
     def test_text_search_unknown_language_emits_empty_language_scope(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[]), FakeCursor(one={"exists": 1})])
@@ -2393,93 +2521,6 @@ class McpEnumScopeWarningTests(unittest.TestCase):
         with self.assertRaises(McpProtocolError) as ctx:
             _ = mcp_tools.tool_get_code_intel_record({})
         self.assertIn("record_id or record_ids is required", str(ctx.exception))
-
-
-class McpListFilesRecordBackedTests(unittest.TestCase):
-    def test_list_files_includes_record_backed_paths_when_file_row_is_missing(self) -> None:
-        generated_path = "kubernetes-ingress/pkg/client/applyconfiguration/configuration/v1/accesscontrol.go"
-        conn = QueuedConnection([
-            FakeCursor(one={"exists": 1}),
-            FakeCursor(
-                many=[
-                    {
-                        "id": None,
-                        "snapshot_id": 1,
-                        "collection": "ingress",
-                        "repo": "kubernetes-ingress",
-                        "repo_role": "project",
-                        "branch": "main",
-                        "commit_sha": "abc123",
-                        "tree_sha": "def456",
-                        "source_path": generated_path,
-                        "git_blob_sha": None,
-                        "file_sha256": None,
-                        "size_bytes": None,
-                        "language": "go",
-                        "file_role": "generated",
-                        "content_class": "generated",
-                        "is_generated": True,
-                        "is_vendor": False,
-                        "is_test": False,
-                        "is_source": True,
-                        "is_build": False,
-                        "is_config": False,
-                        "is_doc": False,
-                        "skipped_reason": None,
-                        "is_untracked": False,
-                        "indexed_dirty": False,
-                        "metadata": {"inventory_source": "records"},
-                        "created_at": "2026-05-17T22:09:39+00:00",
-                    }
-                ]
-            ),
-        ])
-
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
-        ):
-            response = mcp_tools.tool_list_code_intel_files({
-                "repo": "kubernetes-ingress",
-                "snapshot_id": 1,
-                "source_path": generated_path,
-                "verbose": True,
-            })
-
-        payload = mcp_text_payload(response)
-        files = cast("list[dict[str, object]]", payload["files"])
-        self.assertEqual(files[0]["source_path"], generated_path)
-        self.assertEqual(files[0]["file_role"], "generated")
-        self.assertNotIn("warnings", payload)
-        query, params = conn.calls[1]
-        self.assertIn("record_backed_files AS", query)
-        self.assertIn("FROM project_code_intel_records r", query)
-        self.assertIn("existing.id IS NULL", query)
-        self.assertIn("FROM file_inventory f", query)
-        self.assertIn(generated_path, params)
-
-    def test_list_files_generated_filter_applies_to_record_backed_inventory(self) -> None:
-        conn = QueuedConnection([FakeCursor(many=[]), FakeCursor(one={"exists": 1})])
-
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
-            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
-        ):
-            _ = mcp_tools.tool_list_code_intel_files({
-                "repo": "kubernetes-ingress",
-                "language": "go",
-                "file_role": "generated",
-                "is_generated": True,
-            })
-
-        query, params = conn.calls[0]
-        self.assertIn("bool_or(r.file_role = 'generated' OR r.content_class = 'generated') AS is_generated", query)
-        self.assertIn("f.file_role = %s", query)
-        self.assertIn("f.is_generated = %s", query)
-        self.assertIn("generated", params)
-        self.assertTrue(any(param is True for param in params))
 
 
 class McpStatusRuntimeIdentityTests(unittest.TestCase):
@@ -2624,7 +2665,7 @@ class McpToolShapeTests(unittest.TestCase):
             _ = mcp_tools.tool_list_code_intel_files({})
 
         query, _ = conn.calls[0]
-        select_clause = query.rsplit("FROM file_inventory f", 1)[0].rsplit("SELECT", 1)[1]
+        select_clause = query.rsplit("FROM project_code_intel_files f", 1)[0].rsplit("SELECT", 1)[1]
         self.assertNotIn("f.snapshot_id", select_clause)
         self.assertNotIn("f.commit_sha", select_clause)
         self.assertNotIn("f.metadata", select_clause)
@@ -2646,7 +2687,7 @@ class McpToolShapeTests(unittest.TestCase):
             _ = mcp_tools.tool_list_code_intel_files({"verbose": True})
 
         query, _ = conn.calls[0]
-        select_clause = query.rsplit("FROM file_inventory f", 1)[0].rsplit("SELECT", 1)[1]
+        select_clause = query.rsplit("FROM project_code_intel_files f", 1)[0].rsplit("SELECT", 1)[1]
         self.assertIn("f.snapshot_id", select_clause)
         self.assertIn("f.commit_sha", select_clause)
         self.assertIn("f.metadata", select_clause)

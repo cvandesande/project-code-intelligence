@@ -115,6 +115,30 @@ def scoped_snapshot_clauses(args: Json, alias: str) -> tuple[list[str], QueryPar
     return _scoped_snapshot_clauses(args, alias, snapshot_table=False)
 
 
+def scoped_record_clauses(args: Json, record_alias: str, files_alias: str) -> tuple[list[str], QueryParams]:
+    """Collection/repo scoping on the records alias, snapshot scoping on the joined files alias.
+
+    Records carry no snapshot_id of their own post-migration; snapshot scope (pinned
+    snapshot_id, latest-per-repo, or none for include_historical) is only meaningful on the
+    files row a record is joined to. Every records query pairs this with the same
+    membership join (literal, not built from a shared constant -- Bandit/ruff S608 flags
+    any runtime string composition of a SQL fragment even when the pieces are fixed
+    literals; see the note above `LIST_CODE_INTEL_FILES_SELECT_SLIM` in files.py for the
+    precedent):
+
+        LEFT JOIN project_code_intel_files f
+          ON f.collection = r.collection
+         AND f.repo = r.repo
+         AND f.source_path = r.source_path
+         AND r.file_sha256 = coalesce(f.file_sha256, '')
+    """
+    clauses, params = _collection_repo_clauses(args, record_alias)
+    snapshot_clauses, snapshot_params = _scoped_snapshot_clauses(args, files_alias, snapshot_table=False)
+    clauses.extend(snapshot_clauses)
+    params.extend(snapshot_params)
+    return clauses, params
+
+
 def _collection_repo_clauses(args: Json, alias: str) -> tuple[list[str], QueryParams]:
     clauses: list[str] = []
     params: QueryParams = []
@@ -296,7 +320,9 @@ def code_intel_clauses(args: Json, alias: str = "") -> tuple[list[str], QueryPar
     meta_clauses, meta_params = _metadata_clauses(args, alias)
     clauses.extend(meta_clauses)
     params.extend(meta_params)
-    snapshot_clauses, snapshot_params = scoped_snapshot_clauses(args, alias)
+    # Records carry no snapshot_id of their own; scope through the joined files row
+    # (RECORDS_FILES_JOIN aliases it "f" at every call site of this function).
+    snapshot_clauses, snapshot_params = _scoped_snapshot_clauses(args, "f", snapshot_table=False)
     clauses.extend(snapshot_clauses)
     params.extend(snapshot_params)
     return clauses, params
@@ -331,7 +357,7 @@ def static_finding_clauses(args: Json) -> tuple[list[str], QueryParams]:
 
 def status_filters(args: Json) -> StatusFilters:
     snapshot_clauses, snapshot_params = scoped_snapshot_table_collection_repo_clauses(args, "s")
-    record_clauses, record_params = scoped_collection_repo_clauses(args, "r")
+    record_clauses, record_params = scoped_record_clauses(args, "r", "f")
     file_clauses, file_params = scoped_collection_repo_clauses(args, "f")
     edge_clauses, edge_params = scoped_collection_repo_clauses(args, "e")
     static_run_clauses, static_run_params = scoped_collection_repo_clauses(args, "r")

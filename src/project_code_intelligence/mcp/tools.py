@@ -113,7 +113,6 @@ from project_code_intelligence.mcp.status import (
     status_snapshot_warnings,
 )
 from project_code_intelligence.mcp.tool_catalog import TOOL_DEFINITIONS, ToolDefinition
-from project_code_intelligence.models import SOURCE_LANGUAGES
 from project_code_intelligence.storage import row_int
 
 if TYPE_CHECKING:
@@ -304,8 +303,8 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
                     """
             SELECT *
             FROM (
-            SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role,
-                   r.branch, r.commit_sha, r.source_path, r.language, r.file_role,
+            SELECT r.id, f.snapshot_id, r.collection, r.repo, f.repo_role,
+                   f.branch, f.commit_sha, r.source_path, r.language, r.file_role,
                    r.content_class, r.record_type, r.record_id, r.parent_record_id,
                    r.title, r.summary, r.line_start, r.line_end, r.symbol,
                    r.symbol_kind, r.confidence_kind, r.confidence, r.tool, r.rule_id,
@@ -352,7 +351,11 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
                    END AS quality_penalty,
                    left(r.display_content, 800) AS snippet_raw
             FROM project_code_intel_records r
-            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
+            LEFT JOIN project_code_intel_files f
+              ON f.collection = r.collection
+             AND f.repo = r.repo
+             AND f.source_path = r.source_path
+             AND r.file_sha256 = coalesce(f.file_sha256, '')
             """,
                     clauses,
                     """
@@ -457,10 +460,22 @@ _RELATED_EDGES_SELECT = """
                    tgt.language AS target_language, tgt.line_start AS target_line_start,
                    tgt.line_end AS target_line_end
             FROM project_code_intel_edges e
+            LEFT JOIN project_code_intel_files src_f
+                ON src_f.collection = e.collection AND src_f.repo = e.repo
+               AND src_f.snapshot_id = e.snapshot_id AND src_f.source_path = e.source_path
             LEFT JOIN project_code_intel_records src
-                ON src.snapshot_id = e.snapshot_id AND src.record_id = e.source_record_id
+                ON src.collection = e.collection AND src.repo = e.repo
+               AND src.source_path = e.source_path
+               AND src.file_sha256 = coalesce(src_f.file_sha256, '')
+               AND src.record_id = e.source_record_id
+            LEFT JOIN project_code_intel_files tgt_f
+                ON tgt_f.collection = e.collection AND tgt_f.repo = e.repo
+               AND tgt_f.snapshot_id = e.snapshot_id AND tgt_f.source_path = e.target_path
             LEFT JOIN project_code_intel_records tgt
-                ON tgt.snapshot_id = e.snapshot_id AND tgt.record_id = e.target_record_id
+                ON tgt.collection = e.collection AND tgt.repo = e.repo
+               AND tgt.source_path = e.target_path
+               AND tgt.file_sha256 = coalesce(tgt_f.file_sha256, '')
+               AND tgt.record_id = e.target_record_id
             """
 
 
@@ -878,7 +893,7 @@ def tool_list_code_intel_files(args: Json) -> Json:
     if optional_bool(args, "only_skipped"):
         clauses.append("f.skipped_reason IS NOT NULL")
     verbose = optional_bool(args, "verbose") or False
-    query_params = [sorted(SOURCE_LANGUAGES), *params, limit]
+    query_params = [*params, limit]
 
     repo_exists: bool | None = None
     missing_snapshot_warning: Json | None = None

@@ -32,7 +32,7 @@ from project_code_intelligence.models import (
 
 class SchemaConstantsTests(unittest.TestCase):
     def test_schema_version_string_pinned(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, "code-intel-schema-v2")
+        self.assertEqual(SCHEMA_VERSION, "code-intel-schema-v3")
 
     def test_chunker_version_string_pinned(self) -> None:
         self.assertEqual(CHUNKER_VERSION, "code-intel-v1")

@@ -181,8 +181,11 @@ def _public_source_symbols(conn: db.DbConnection, snapshot_id: int) -> list[_Sym
         SELECT r.source_path, r.symbol, r.symbol_kind
         FROM project_code_intel_records r
         JOIN project_code_intel_files f
-          ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
-        WHERE r.snapshot_id = %s
+          ON f.collection = r.collection
+         AND f.repo = r.repo
+         AND f.source_path = r.source_path
+         AND r.file_sha256 = coalesce(f.file_sha256, '')
+        WHERE f.snapshot_id = %s
           AND r.record_type = 'symbol_definition'
           AND r.symbol IS NOT NULL
           AND left(r.symbol, 1) <> '_'

@@ -48,19 +48,28 @@ CREATE TABLE IF NOT EXISTS project_code_intel_files (
     UNIQUE (snapshot_id, source_path)
 );
 
+-- Records v2: content-addressed, no snapshot/branch/commit columns. A record
+-- row is identified by its content (collection, repo, source_path,
+-- file_sha256, record_type, record_id, embedding_text_hash), not by which
+-- snapshot produced it. Snapshot scoping happens on read via a join through
+-- project_code_intel_files on (collection, repo, source_path, file_sha256).
+-- On a content conflict (same key, same reparsed file), the insert refreshes
+-- the fields that can drift independently of embedding_text -- summary,
+-- display, metadata, confidence/severity/tool fields, parser/chunker
+-- versions -- rather than freezing them at first write; that keeps the
+-- write bounded to files actually reparsed instead of copying every row.
+--
+-- file_sha256 is NOT NULL with '' as the sentinel for "no hash" (inventory
+-- read failures), not NULL: Postgres unique constraints treat NULLs as
+-- distinct, so a NULL here would never dedupe against itself across
+-- ingests. project_code_intel_files.file_sha256 stays nullable; joins from
+-- records to files compare `r.file_sha256 = coalesce(f.file_sha256, '')`.
 CREATE TABLE IF NOT EXISTS project_code_intel_records (
     id bigserial PRIMARY KEY,
-    snapshot_id bigint NOT NULL REFERENCES project_code_intel_snapshots(id)
-        ON DELETE CASCADE,
-    file_id bigint REFERENCES project_code_intel_files(id) ON DELETE CASCADE,
     collection text NOT NULL DEFAULT 'default',
     repo text NOT NULL,
-    repo_role text NOT NULL,
-    branch text,
-    commit_sha text NOT NULL,
-    tree_sha text NOT NULL,
     source_path text NOT NULL,
-    file_sha256 text,
+    file_sha256 text NOT NULL DEFAULT '',
     language text NOT NULL,
     file_role text NOT NULL,
     content_class text NOT NULL,
@@ -102,7 +111,7 @@ CREATE TABLE IF NOT EXISTS project_code_intel_records (
         setweight(to_tsvector('simple', coalesce(rule_id, '')), 'A') ||
         setweight(to_tsvector('simple', coalesce(record_type, '')), 'B')
     ) STORED,
-    UNIQUE (snapshot_id, record_type, record_id, embedding_text_hash)
+    UNIQUE (collection, repo, source_path, file_sha256, record_type, record_id, embedding_text_hash)
 );
 
 CREATE TABLE IF NOT EXISTS project_code_intel_edges (
@@ -325,8 +334,114 @@ ALTER TABLE project_code_intel_snapshots
 CREATE UNIQUE INDEX IF NOT EXISTS project_code_intel_snapshots_collection_repo_tree_idx
     ON project_code_intel_snapshots (collection, repo, commit_sha, tree_sha);
 
-CREATE INDEX IF NOT EXISTS project_code_intel_files_collection_repo_path_idx
-    ON project_code_intel_files (collection, repo, source_path);
+-- code-intel-schema-v3: records v2 migration. Runs once per database --
+-- guarded on the presence of the old snapshot_id column, which the v2
+-- CREATE TABLE above never creates. Newest-snapshot-wins, non-null
+-- embedding preferred, matches the DISTINCT ON key the new UNIQUE
+-- constraint uses so the copy can never violate it.
+DO $records_v2_migration$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'project_code_intel_records'
+          AND column_name = 'snapshot_id'
+    ) THEN
+        EXECUTE $ddl$
+            CREATE TABLE project_code_intel_records_v2 (
+                id bigserial PRIMARY KEY,
+                collection text NOT NULL DEFAULT 'default',
+                repo text NOT NULL,
+                source_path text NOT NULL,
+                file_sha256 text NOT NULL DEFAULT '',
+                language text NOT NULL,
+                file_role text NOT NULL,
+                content_class text NOT NULL,
+                record_type text NOT NULL,
+                record_id text NOT NULL,
+                parent_record_id text,
+                title text NOT NULL,
+                summary text NOT NULL,
+                embedding_text text NOT NULL,
+                display_content text NOT NULL,
+                embedding_text_hash text NOT NULL,
+                display_hash text NOT NULL,
+                line_start integer,
+                line_end integer,
+                byte_start integer,
+                byte_end integer,
+                symbol text,
+                symbol_kind text,
+                confidence_kind text NOT NULL DEFAULT 'high_confidence_fact',
+                confidence numeric,
+                tool text,
+                rule_id text,
+                severity text,
+                analyzer text,
+                analyzer_version text,
+                parser text,
+                parser_version text,
+                chunker_version text NOT NULL,
+                metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+                embedding vector,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                search_document tsvector GENERATED ALWAYS AS (
+                    setweight(to_tsvector('english', title), 'A') ||
+                    setweight(to_tsvector('english', summary), 'B') ||
+                    setweight(to_tsvector('english', embedding_text), 'C') ||
+                    setweight(to_tsvector('simple', source_path), 'A') ||
+                    setweight(to_tsvector('simple', coalesce(symbol, '')), 'A') ||
+                    setweight(to_tsvector('simple', coalesce(rule_id, '')), 'A') ||
+                    setweight(to_tsvector('simple', coalesce(record_type, '')), 'B')
+                ) STORED,
+                UNIQUE (collection, repo, source_path, file_sha256, record_type, record_id, embedding_text_hash)
+            )
+        $ddl$;
+
+        EXECUTE $ddl$
+            INSERT INTO project_code_intel_records_v2 (
+                collection, repo, source_path, file_sha256, language, file_role,
+                content_class, record_type, record_id, parent_record_id, title,
+                summary, embedding_text, display_content, embedding_text_hash,
+                display_hash, line_start, line_end, byte_start, byte_end, symbol,
+                symbol_kind, confidence_kind, confidence, tool, rule_id, severity,
+                analyzer, analyzer_version, parser, parser_version, chunker_version,
+                metadata, embedding, created_at, updated_at
+            )
+            SELECT DISTINCT ON (
+                r.collection, r.repo, r.source_path, coalesce(r.file_sha256, ''),
+                r.record_type, r.record_id, r.embedding_text_hash
+            )
+                r.collection, r.repo, r.source_path, coalesce(r.file_sha256, ''), r.language, r.file_role,
+                r.content_class, r.record_type, r.record_id, r.parent_record_id, r.title,
+                r.summary, r.embedding_text, r.display_content, r.embedding_text_hash,
+                r.display_hash, r.line_start, r.line_end, r.byte_start, r.byte_end, r.symbol,
+                r.symbol_kind, r.confidence_kind, r.confidence, r.tool, r.rule_id, r.severity,
+                r.analyzer, r.analyzer_version, r.parser, r.parser_version, r.chunker_version,
+                r.metadata, r.embedding, r.created_at, r.updated_at
+            FROM project_code_intel_records r
+            JOIN project_code_intel_snapshots s ON s.id = r.snapshot_id
+            ORDER BY
+                r.collection, r.repo, r.source_path, coalesce(r.file_sha256, ''),
+                r.record_type, r.record_id, r.embedding_text_hash,
+                (r.embedding IS NULL) ASC, s.created_at DESC, r.id DESC
+        $ddl$;
+
+        EXECUTE 'DROP TABLE project_code_intel_records';
+        EXECUTE 'ALTER TABLE project_code_intel_records_v2 RENAME TO project_code_intel_records';
+    END IF;
+END
+$records_v2_migration$;
+
+-- Extends the old (collection, repo, source_path) files index with
+-- file_sha256, so reader joins from records to files (the new membership
+-- join) can use one index. Old name dropped so a stale narrower index
+-- doesn't linger; DROP IF EXISTS is a cheap catalog check once it is gone.
+DROP INDEX IF EXISTS project_code_intel_files_collection_repo_path_idx;
+
+CREATE INDEX IF NOT EXISTS project_code_intel_files_collection_repo_path_hash_idx
+    ON project_code_intel_files (collection, repo, source_path, file_sha256);
 
 ALTER TABLE project_code_intel_files
     ADD COLUMN IF NOT EXISTS is_untracked boolean NOT NULL DEFAULT false;
@@ -346,8 +461,10 @@ CREATE INDEX IF NOT EXISTS project_code_intel_records_search_idx
 CREATE INDEX IF NOT EXISTS project_code_intel_records_collection_type_idx
     ON project_code_intel_records (collection, repo, record_type, source_path);
 
-CREATE INDEX IF NOT EXISTS project_code_intel_records_snapshot_type_idx
-    ON project_code_intel_records (snapshot_id, record_type);
+-- records_snapshot_type_idx (snapshot_id, record_type) dropped in schema v3:
+-- records no longer carry snapshot_id. Snapshot-scoped record_type lookups
+-- go through project_code_intel_records_collection_type_idx joined against
+-- files for the snapshot filter.
 
 CREATE INDEX IF NOT EXISTS project_code_intel_records_rule_idx
     ON project_code_intel_records (rule_id)
@@ -403,10 +520,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS project_code_intel_edges_collection_unique_idx
 CREATE INDEX IF NOT EXISTS project_code_intel_index_runs_collection_idx
     ON project_code_intel_index_runs (collection, started_at DESC);
 
--- Speeds up resolve_edge_targets: lookup symbol_definition records by (snapshot_id, symbol).
-CREATE INDEX IF NOT EXISTS project_code_intel_records_snapshot_symbol_def_idx
-    ON project_code_intel_records (snapshot_id, symbol)
-    WHERE record_type = 'symbol_definition' AND symbol IS NOT NULL;
+-- records_snapshot_symbol_def_idx (snapshot_id, symbol) dropped in schema
+-- v3: resolve_edge_targets now joins symbol_definition records through
+-- files for the snapshot filter, served by
+-- project_code_intel_records_collection_symbol_idx.
 
 -- Speeds up resolve_edge_targets: find unresolved edges by target_symbol within a snapshot.
 CREATE INDEX IF NOT EXISTS project_code_intel_edges_snapshot_unresolved_idx

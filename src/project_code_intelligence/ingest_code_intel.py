@@ -81,8 +81,9 @@ from project_code_intelligence.sarif import (
 )
 from project_code_intelligence.storage import (
     RecordInsertContext,
+    SnapshotScope,
+    copy_unchanged_edges,
     copy_unchanged_parser_failures,
-    copy_unchanged_records_and_edges,
     count_unresolved_edge_targets,
     ensure_schema,
     file_signature,
@@ -95,6 +96,7 @@ from project_code_intelligence.storage import (
     insert_snapshot,
     insert_static_runs,
     latest_snapshot_info,
+    lock_ingest_branch,
     pre_resolvable_edge_count,
     pre_resolve_edge_targets,
     previous_file_state_signature,
@@ -1774,7 +1776,11 @@ def db_upload_total(ingests: list[RepoIngest]) -> int:
 
 
 def copy_unchanged_data(conn: db.DbConnection, ingest: RepoIngest, snapshot_id: int, summary: DbUploadSummary) -> None:
-    copied_record_count, copied_edge_count = copy_unchanged_records_and_edges(
+    # Records are content-addressed (schema v2): unchanged content already
+    # exists under the shared key and `insert_records` skips it via
+    # `ON CONFLICT DO NOTHING`, so there is nothing to copy here. Edges stay
+    # per-snapshot and are still copied forward.
+    copied_edge_count = copy_unchanged_edges(
         conn,
         previous_snapshot_id=ingest.previous_snapshot_id,
         snapshot=ingest.snapshot,
@@ -1788,14 +1794,13 @@ def copy_unchanged_data(conn: db.DbConnection, ingest: RepoIngest, snapshot_id: 
         snapshot_id=snapshot_id,
         unchanged_paths=ingest.unchanged_paths,
     )
-    summary.copied_records += copied_record_count
     summary.copied_edges += copied_edge_count
     summary.copied_parser_failures += copied_parser_failure_count
     for path in copied_parser_failure_paths:
         summary.parser_failure_paths.append(f"{ingest.snapshot.repo}/{path}")
-    runtime_state.active_metrics.add_phase_total(copied_record_count + copied_edge_count + copied_parser_failure_count)
-    runtime_state.active_metrics.add_phase_done(copied_record_count + copied_edge_count + copied_parser_failure_count)
-    runtime_state.active_metrics.add("copied_records", copied_record_count)
+    runtime_state.active_metrics.add_phase_total(copied_edge_count + copied_parser_failure_count)
+    runtime_state.active_metrics.add_phase_done(copied_edge_count + copied_parser_failure_count)
+    runtime_state.active_metrics.add("copied_records", 0)
     runtime_state.active_metrics.add("copied_edges", copied_edge_count)
     runtime_state.active_metrics.add("copied_parser_failures", copied_parser_failure_count)
 
@@ -1854,6 +1859,10 @@ def upload_repo_ingest(
     add_progress = runtime_state.active_metrics.add_phase_done
     if plan.embedding_requested:
         ingest.snapshot.metadata["embed_record_types"] = sorted(plan.embed_types)
+    # Serializes concurrent writers of the same (collection, repo, branch) --
+    # e.g. a manual `pci index` racing a git-hook worker -- for the rest of
+    # this write transaction. Released automatically at commit/rollback.
+    lock_ingest_branch(conn, ingest.snapshot.collection, ingest.snapshot.repo, ingest.snapshot.branch)
     snapshot_id = insert_snapshot(conn, ingest.snapshot)
     summary.snapshot_ids.append(snapshot_id)
     indexes.snapshot_ids_by_repo[ingest.snapshot.repo] = snapshot_id
@@ -1882,7 +1891,12 @@ def upload_repo_ingest(
     summary.inserted_records += inserted_records
     runtime_state.active_metrics.set("db_write_op", "preparing edge targets")
     runtime_state.active_metrics.add_phase_total(pre_resolvable_edge_count(ingest.edges))
-    pre_resolved_edges = pre_resolve_edge_targets(conn, snapshot_id, ingest.edges, progress_fn=add_progress)
+    pre_resolved_edges = pre_resolve_edge_targets(
+        conn,
+        SnapshotScope(ingest.snapshot.collection, ingest.snapshot.repo, snapshot_id),
+        ingest.edges,
+        progress_fn=add_progress,
+    )
     runtime_state.active_metrics.add("pre_resolved_edges", pre_resolved_edges)
     runtime_state.active_metrics.add("resolved_edges", pre_resolved_edges)
     runtime_state.active_metrics.set("db_write_op", "inserting edges")
@@ -1892,7 +1906,11 @@ def upload_repo_ingest(
     runtime_state.active_metrics.set("db_write_op", "resolving remaining edge targets")
     unresolved_edges = count_unresolved_edge_targets(conn, snapshot_id)
     runtime_state.active_metrics.add_phase_total(unresolved_edges)
-    resolved_remaining_edges = resolve_edge_targets(conn, snapshot_id, progress_fn=add_progress)
+    resolved_remaining_edges = resolve_edge_targets(
+        conn,
+        SnapshotScope(ingest.snapshot.collection, ingest.snapshot.repo, snapshot_id),
+        progress_fn=add_progress,
+    )
     resolved_edges = pre_resolved_edges + resolved_remaining_edges
     runtime_state.active_metrics.add("resolved_edges", resolved_remaining_edges)
     runtime_state.active_metrics.set("db_write_op", "inserting failures")
@@ -1963,6 +1981,11 @@ def _upload_ingests(
 ) -> None:
     with db.connect(readonly=False) as conn:
         ensure_schema(conn)
+        # Commit the schema apply on its own. ALTER TABLE ... IF NOT EXISTS
+        # takes AccessExclusiveLock even as a no-op, and those locks live
+        # until the transaction ends; without this commit, every reader
+        # (pci status, MCP tools) blocks for the whole upload phase.
+        conn.commit()
         replace_repos_for_full_ingests(conn, plan, ingests)
         indexes = StaticSnapshotIndexes()
         for ingest in ingests:

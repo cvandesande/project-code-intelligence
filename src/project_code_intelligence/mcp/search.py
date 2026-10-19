@@ -46,8 +46,8 @@ SECURITY_PATTERN_QUERY_TERMS = frozenset({
 })
 
 CODE_INTEL_RECORD_SELECT_LIST = """
-            SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role, r.branch,
-                   r.commit_sha, r.tree_sha, r.source_path, r.language, r.file_role,
+            SELECT r.id, f.snapshot_id, r.collection, r.repo, f.repo_role, f.branch,
+                   f.commit_sha, f.tree_sha, r.source_path, r.language, r.file_role,
                    r.content_class, r.record_type, r.record_id, r.parent_record_id,
                    r.title, r.summary, r.line_start, r.line_end, r.symbol,
                    r.symbol_kind, r.confidence_kind, r.confidence, r.tool,
@@ -59,12 +59,16 @@ CODE_INTEL_RECORD_SELECT_LIST = """
                    coalesce(f.indexed_dirty, false) AS indexed_dirty,
                    left(r.display_content, 12000) AS snippet_raw
             FROM project_code_intel_records r
-            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
+            LEFT JOIN project_code_intel_files f
+              ON f.collection = r.collection
+             AND f.repo = r.repo
+             AND f.source_path = r.source_path
+             AND r.file_sha256 = coalesce(f.file_sha256, '')
             """
 
 CODE_INTEL_RECORD_SELECT_WEBSEARCH = """
-            SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role, r.branch,
-                   r.commit_sha, r.tree_sha, r.source_path, r.language, r.file_role,
+            SELECT r.id, f.snapshot_id, r.collection, r.repo, f.repo_role, f.branch,
+                   f.commit_sha, f.tree_sha, r.source_path, r.language, r.file_role,
                    r.content_class, r.record_type, r.record_id, r.parent_record_id,
                    r.title, r.summary, r.line_start, r.line_end, r.symbol,
                    r.symbol_kind, r.confidence_kind, r.confidence, r.tool,
@@ -106,12 +110,16 @@ CODE_INTEL_RECORD_SELECT_WEBSEARCH = """
                    coalesce(f.indexed_dirty, false) AS indexed_dirty,
                    left(r.display_content, 12000) AS snippet_raw
             FROM project_code_intel_records r
-            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
+            LEFT JOIN project_code_intel_files f
+              ON f.collection = r.collection
+             AND f.repo = r.repo
+             AND f.source_path = r.source_path
+             AND r.file_sha256 = coalesce(f.file_sha256, '')
             """
 
 CODE_INTEL_RECORD_SELECT_TERMS = """
-            SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role, r.branch,
-                   r.commit_sha, r.tree_sha, r.source_path, r.language, r.file_role,
+            SELECT r.id, f.snapshot_id, r.collection, r.repo, f.repo_role, f.branch,
+                   f.commit_sha, f.tree_sha, r.source_path, r.language, r.file_role,
                    r.content_class, r.record_type, r.record_id, r.parent_record_id,
                    r.title, r.summary, r.line_start, r.line_end, r.symbol,
                    r.symbol_kind, r.confidence_kind, r.confidence, r.tool,
@@ -165,12 +173,16 @@ CODE_INTEL_RECORD_SELECT_TERMS = """
                    coalesce(f.indexed_dirty, false) AS indexed_dirty,
                    left(r.display_content, 12000) AS snippet_raw
             FROM project_code_intel_records r
-            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
+            LEFT JOIN project_code_intel_files f
+              ON f.collection = r.collection
+             AND f.repo = r.repo
+             AND f.source_path = r.source_path
+             AND r.file_sha256 = coalesce(f.file_sha256, '')
             """
 
 CODE_INTEL_RECORD_SELECT_MATCHED_LIST = """
-            SELECT r.id, r.snapshot_id, r.collection, r.repo, r.repo_role, r.branch,
-                   r.commit_sha, r.tree_sha, r.source_path, r.language, r.file_role,
+            SELECT r.id, f.snapshot_id, r.collection, r.repo, f.repo_role, f.branch,
+                   f.commit_sha, f.tree_sha, r.source_path, r.language, r.file_role,
                    r.content_class, r.record_type, r.record_id, r.parent_record_id,
                    r.title, r.summary, r.line_start, r.line_end, r.symbol,
                    r.symbol_kind, r.confidence_kind, r.confidence, r.tool,
@@ -212,7 +224,11 @@ CODE_INTEL_RECORD_SELECT_MATCHED_LIST = """
                    coalesce(f.indexed_dirty, false) AS indexed_dirty,
                    left(r.display_content, 12000) AS snippet_raw
             FROM project_code_intel_records r
-            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
+            LEFT JOIN project_code_intel_files f
+              ON f.collection = r.collection
+             AND f.repo = r.repo
+             AND f.source_path = r.source_path
+             AND r.file_sha256 = coalesce(f.file_sha256, '')
             """
 
 ALL_TERMS_SEARCH_CLAUSE = """

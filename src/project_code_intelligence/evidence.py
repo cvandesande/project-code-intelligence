@@ -202,15 +202,20 @@ def resolve_targets(
     path_like = f"%{source_path}" if source_path is not None else None
     rows = conn.execute(
         """
-        SELECT record_id, symbol, symbol_kind, source_path, line_start, line_end
-        FROM project_code_intel_records
-        WHERE snapshot_id = %s
-          AND record_type = 'symbol_definition'
-          AND symbol IS NOT NULL
-          AND (%s::text IS NULL OR symbol = %s OR symbol LIKE %s)
-          AND (%s::text IS NULL OR source_path LIKE %s)
-          AND (%s::int IS NULL OR (line_start <= %s AND line_end >= %s))
-        ORDER BY source_path, line_start
+        SELECT r.record_id, r.symbol, r.symbol_kind, r.source_path, r.line_start, r.line_end
+        FROM project_code_intel_records r
+        JOIN project_code_intel_files f
+          ON f.collection = r.collection
+         AND f.repo = r.repo
+         AND f.source_path = r.source_path
+         AND r.file_sha256 = coalesce(f.file_sha256, '')
+        WHERE f.snapshot_id = %s
+          AND r.record_type = 'symbol_definition'
+          AND r.symbol IS NOT NULL
+          AND (%s::text IS NULL OR r.symbol = %s OR r.symbol LIKE %s)
+          AND (%s::text IS NULL OR r.source_path LIKE %s)
+          AND (%s::int IS NULL OR (r.line_start <= %s AND r.line_end >= %s))
+        ORDER BY r.source_path, r.line_start
         LIMIT 25
         """,
         [snapshot.snapshot_id, symbol, symbol, symbol_like, source_path, path_like, line, line, line],
@@ -242,10 +247,14 @@ def load_callers(conn: db.DbConnection, target: TargetDef) -> list[Caller]:
         SELECT e.source_symbol, e.source_path, r.line_start, r.record_type AS source_record_type,
                coalesce(f.is_test, false) AS is_test
         FROM project_code_intel_edges e
-        LEFT JOIN project_code_intel_records r
-          ON r.snapshot_id = e.snapshot_id AND r.record_id = e.source_record_id
         LEFT JOIN project_code_intel_files f
           ON f.snapshot_id = e.snapshot_id AND f.source_path = e.source_path
+        LEFT JOIN project_code_intel_records r
+          ON r.collection = f.collection
+         AND r.repo = f.repo
+         AND r.source_path = f.source_path
+         AND r.file_sha256 = coalesce(f.file_sha256, '')
+         AND r.record_id = e.source_record_id
         WHERE e.snapshot_id = %s
           AND e.edge_type = 'call_candidate'
           AND e.target_record_id = %s
@@ -324,8 +333,13 @@ def is_service_entrypoint(conn: db.DbConnection, target: TargetDef) -> bool:
     row = conn.execute(
         """
         SELECT 1
-        FROM project_code_intel_records
-        WHERE snapshot_id = %s AND record_type = 'service_entrypoint' AND symbol = %s
+        FROM project_code_intel_records r
+        JOIN project_code_intel_files f
+          ON f.collection = r.collection
+         AND f.repo = r.repo
+         AND f.source_path = r.source_path
+         AND r.file_sha256 = coalesce(f.file_sha256, '')
+        WHERE f.snapshot_id = %s AND r.record_type = 'service_entrypoint' AND r.symbol = %s
         LIMIT 1
         """,
         [target.snapshot.snapshot_id, _last_component(target.symbol)],
@@ -337,18 +351,26 @@ def load_neighbors(conn: db.DbConnection, target: TargetDef, *, limit: int, thre
     rows = conn.execute(
         """
         WITH target AS (
-            SELECT embedding
-            FROM project_code_intel_records
-            WHERE snapshot_id = %s AND record_type = 'code_chunk'
-              AND parent_record_id = %s AND embedding IS NOT NULL
+            SELECT r.embedding
+            FROM project_code_intel_records r
+            JOIN project_code_intel_files f
+              ON f.collection = r.collection
+             AND f.repo = r.repo
+             AND f.source_path = r.source_path
+             AND r.file_sha256 = coalesce(f.file_sha256, '')
+            WHERE f.snapshot_id = %s AND r.record_type = 'code_chunk'
+              AND r.parent_record_id = %s AND r.embedding IS NOT NULL
             LIMIT 1
         )
         SELECT c.symbol, c.source_path, c.line_start, 1 - (c.embedding <=> t.embedding) AS similarity
         FROM project_code_intel_records c
         CROSS JOIN target t
         JOIN project_code_intel_files f
-          ON f.snapshot_id = c.snapshot_id AND f.source_path = c.source_path
-        WHERE c.snapshot_id = %s AND c.record_type = 'code_chunk' AND c.embedding IS NOT NULL
+          ON f.collection = c.collection
+         AND f.repo = c.repo
+         AND f.source_path = c.source_path
+         AND c.file_sha256 = coalesce(f.file_sha256, '')
+        WHERE f.snapshot_id = %s AND c.record_type = 'code_chunk' AND c.embedding IS NOT NULL
           AND c.symbol IS NOT NULL AND c.parent_record_id <> %s
           AND f.is_source AND NOT f.is_test
         ORDER BY c.embedding <=> t.embedding

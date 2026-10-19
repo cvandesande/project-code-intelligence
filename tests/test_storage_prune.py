@@ -44,6 +44,23 @@ class PruneOldSnapshotsTests(unittest.TestCase):
         self.assertIn("WHERE collection = %s AND repo = %s", query)
         self.assertEqual(params, ["ws", "repo-a", 5])
 
+    def test_sweeps_orphaned_records_only_when_a_snapshot_was_deleted(self) -> None:
+        # Snapshot delete cascades files but records carry no snapshot_id
+        # (schema v2), so a real deletion must trigger the orphan sweep --
+        # skipping it would leak content-addressed rows nothing points at.
+        conn = RecordingConnection(rows=[{"id": 1}])
+        _ = prune_old_snapshots(cast("pci_db.DbConnection", conn), "ws", "repo-a", keep=5)
+        self.assertEqual(len(conn.calls), 2)
+        sweep_query, sweep_params = conn.calls[1]
+        self.assertIn("DELETE FROM project_code_intel_records", sweep_query)
+        self.assertIn("NOT EXISTS", sweep_query)
+        self.assertEqual(sweep_params, ["ws", "repo-a"])
+
+    def test_skips_orphan_sweep_when_nothing_was_deleted(self) -> None:
+        conn = RecordingConnection(rows=[])
+        _ = prune_old_snapshots(cast("pci_db.DbConnection", conn), "ws", "repo-a", keep=5)
+        self.assertEqual(len(conn.calls), 1)
+
     def test_protects_newest_snapshot_per_branch_via_ranking(self) -> None:
         conn = RecordingConnection(rows=[])
         _ = prune_old_snapshots(cast("pci_db.DbConnection", conn), "ws", "repo-a", keep=5)
@@ -93,6 +110,19 @@ class PruneDeadBranchSnapshotsTests(unittest.TestCase):
         self.assertEqual(params[1], "repo-a")
         self.assertEqual(params[3], "ws")
         self.assertEqual(params[4], "repo-a")
+
+    def test_sweeps_orphaned_records_only_when_a_snapshot_was_deleted(self) -> None:
+        conn = RecordingConnection(rows=[{"id": 3}])
+        _ = prune_dead_branch_snapshots(cast("pci_db.DbConnection", conn), "ws", "repo-a", {"main"})
+        self.assertEqual(len(conn.calls), 2)
+        sweep_query, sweep_params = conn.calls[1]
+        self.assertIn("DELETE FROM project_code_intel_records", sweep_query)
+        self.assertEqual(sweep_params, ["ws", "repo-a"])
+
+    def test_skips_orphan_sweep_when_nothing_was_deleted(self) -> None:
+        conn = RecordingConnection(rows=[])
+        _ = prune_dead_branch_snapshots(cast("pci_db.DbConnection", conn), "ws", "repo-a", {"main"})
+        self.assertEqual(len(conn.calls), 1)
 
 
 if __name__ == "__main__":

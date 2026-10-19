@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence import db
 from project_code_intelligence.common import sha256_text
-from project_code_intelligence.storage.copy import copy_unchanged_parser_failures, copy_unchanged_records_and_edges
+from project_code_intelligence.storage.copy import copy_unchanged_edges, copy_unchanged_parser_failures
 from project_code_intelligence.storage.schema import (
     ensure_schema,
     file_signature,
@@ -29,9 +29,11 @@ if TYPE_CHECKING:
 
 __all__ = [
     "RecordInsertContext",
+    "SnapshotScope",
+    "copy_unchanged_edges",
     "copy_unchanged_parser_failures",
-    "copy_unchanged_records_and_edges",
     "count_unresolved_edge_targets",
+    "delete_orphaned_records",
     "ensure_schema",
     "file_signature",
     "insert_edges",
@@ -41,6 +43,7 @@ __all__ = [
     "insert_snapshot",
     "insert_static_runs",
     "latest_snapshot_info",
+    "lock_ingest_branch",
     "parser_failure_metadata",
     "pre_resolvable_edge_count",
     "pre_resolve_edge_targets",
@@ -83,6 +86,12 @@ def _strip_nul(value: object) -> object:
 
 @dataclass(frozen=True)
 class RecordInsertContext:
+    """Write-path context for inserting content-addressed records.
+
+    ``snapshot_id`` still identifies the files membership rows for this
+    ingest; it is not written onto records (schema v2 dropped that column).
+    """
+
     conn: db.DbConnection
     snapshot: Snapshot
     snapshot_id: int
@@ -152,12 +161,53 @@ def pre_resolvable_edge_count(edges: list[IntelEdge]) -> int:
     )
 
 
+def lock_ingest_branch(conn: db.DbConnection, collection: str, repo: str, branch: str | None) -> None:
+    """Serialize concurrent ingest writes for one (collection, repo, branch).
+
+    `pg_advisory_xact_lock` releases automatically at commit/rollback of the
+    current transaction, so callers just need to take it once per repo before
+    writing that repo's snapshot/files/records rows in the same write
+    transaction. Without this, a manual `pci index` racing a hook worker on
+    the same branch can interleave membership writes.
+    """
+    key = f"{collection}\x1f{repo}\x1f{branch or ''}"
+    _ = conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", [key])
+
+
+def delete_orphaned_records(conn: db.DbConnection, collection: str, repo: str) -> int:
+    """Delete records with no matching files membership row left in this repo.
+
+    Snapshot delete cascades files, but records carry no snapshot_id or
+    file_id (schema v2 content-addressing), so a snapshot delete can leave
+    records whose (source_path, file_sha256) no longer appears in any files
+    row. Call after any operation that deletes snapshot/files rows for
+    `repo`: prune_old_snapshots, prune_dead_branch_snapshots, replace_repos.
+    """
+    rows = conn.execute(
+        """
+        DELETE FROM project_code_intel_records r
+        WHERE r.collection = %s AND r.repo = %s
+          AND NOT EXISTS (
+              SELECT 1 FROM project_code_intel_files f
+              WHERE f.collection = r.collection
+                AND f.repo = r.repo
+                AND f.source_path = r.source_path
+                AND r.file_sha256 = coalesce(f.file_sha256, '')
+          )
+        RETURNING r.id
+        """,
+        [collection, repo],
+    ).fetchall()
+    return len(rows)
+
+
 def replace_repos(conn: db.DbConnection, collection: str, repos: list[str]) -> None:
     for repo in repos:
         _ = conn.execute(
             "DELETE FROM project_code_intel_snapshots WHERE collection = %s AND repo = %s",
             [collection, repo],
         )
+        _ = delete_orphaned_records(conn, collection, repo)
 
 
 def insert_snapshot(conn: db.DbConnection, snapshot: Snapshot) -> int:
@@ -312,6 +362,22 @@ def insert_records(
     *,
     progress_fn: Callable[[int], None] | None = None,
 ) -> int:
+    """Insert content-addressed records; `files` membership rows carry the snapshot link.
+
+    Records are keyed by content (collection, repo, source_path, file_sha256,
+    record_type, record_id, embedding_text_hash), not by snapshot. A key
+    conflict only fires for a file that was actually reparsed (same content
+    hash, same chunk boundaries), so volume is bounded by the diff -- this is
+    not the old copy-forward storm. On conflict, non-key columns that can
+    drift independently of embedding_text (summary, display_content,
+    metadata, confidence/severity/tool/rule_id/analyzer fields, parser and
+    chunker versions, language/file_role/content_class) are refreshed so a
+    PARSER_VERSION/CHUNKER_VERSION bump or a SARIF re-run actually updates
+    stale rows instead of freezing them at first write. The embedding column
+    is the one exception: it is preserved via `coalesce` unless the new row
+    actually supplies one, so re-parsing text content does not silently drop
+    an existing embedding.
+    """
     if not records:
         return 0
     payload: list[dict[str, object]] = []
@@ -326,16 +392,15 @@ def insert_records(
         display_hash = sha256_text(display_content)
         payload.append({
             "input_order": input_order,
-            "snapshot_id": context.snapshot_id,
-            "file_id": context.file_ids.get(record.source_path),
             "collection": record.collection,
             "repo": context.snapshot.repo,
-            "repo_role": context.snapshot.repo_role,
-            "branch": context.snapshot.branch,
-            "commit_sha": context.snapshot.commit_sha,
-            "tree_sha": context.snapshot.tree_sha,
             "source_path": record.source_path,
-            "file_sha256": context.file_hashes.get(record.source_path),
+            # NOT NULL sentinel: Postgres unique constraints treat NULLs as
+            # distinct, so a bare NULL here would never dedupe against itself
+            # across ingests (inventory.py sets file_sha256=None on read
+            # failures). '' is not a valid sha256, so it never collides with
+            # a real hash.
+            "file_sha256": context.file_hashes.get(record.source_path) or "",
             "language": record.language,
             "file_role": record.file_role,
             "content_class": record.content_class,
@@ -373,14 +438,8 @@ def insert_records(
                 SELECT *
                 FROM jsonb_to_recordset(%s::jsonb) AS r(
                     input_order bigint,
-                    snapshot_id bigint,
-                    file_id bigint,
                     collection text,
                     repo text,
-                    repo_role text,
-                    branch text,
-                    commit_sha text,
-                    tree_sha text,
                     source_path text,
                     file_sha256 text,
                     language text,
@@ -414,13 +473,16 @@ def insert_records(
                 )
             ),
             deduped AS (
-                SELECT DISTINCT ON (snapshot_id, record_type, record_id, embedding_text_hash) *
+                SELECT DISTINCT ON (
+                    collection, repo, source_path, file_sha256, record_type, record_id, embedding_text_hash
+                ) *
                 FROM input_rows
-                ORDER BY snapshot_id, record_type, record_id, embedding_text_hash, input_order DESC
+                ORDER BY
+                    collection, repo, source_path, file_sha256, record_type, record_id, embedding_text_hash,
+                    input_order DESC
             )
             INSERT INTO project_code_intel_records (
-                snapshot_id, file_id, collection, repo, repo_role, branch, commit_sha,
-                tree_sha, source_path, file_sha256, language, file_role,
+                collection, repo, source_path, file_sha256, language, file_role,
                 content_class, record_type, record_id, parent_record_id,
                 title, summary, embedding_text, display_content,
                 embedding_text_hash, display_hash, line_start, line_end,
@@ -429,8 +491,7 @@ def insert_records(
                 parser_version, chunker_version, metadata, embedding
             )
             SELECT
-                snapshot_id, file_id, collection, repo, repo_role, branch, commit_sha,
-                tree_sha, source_path, file_sha256, language, file_role,
+                collection, repo, source_path, file_sha256, language, file_role,
                 content_class, record_type, record_id, parent_record_id,
                 title, summary, embedding_text, display_content,
                 embedding_text_hash, display_hash, line_start, line_end,
@@ -438,13 +499,42 @@ def insert_records(
                 rule_id, severity, analyzer, analyzer_version, parser,
                 parser_version, chunker_version, metadata, embedding::vector
             FROM deduped
-            ON CONFLICT (snapshot_id, record_type, record_id, embedding_text_hash)
-            DO UPDATE SET file_id = EXCLUDED.file_id,
-                          file_sha256 = EXCLUDED.file_sha256,
-                          summary = EXCLUDED.summary,
+            ON CONFLICT (collection, repo, source_path, file_sha256, record_type, record_id, embedding_text_hash)
+            DO UPDATE SET summary = EXCLUDED.summary,
                           display_content = EXCLUDED.display_content,
                           display_hash = EXCLUDED.display_hash,
-                          metadata = EXCLUDED.metadata,
+                          -- When we keep the stored embedding, also keep its
+                          -- contract keys; a re-parsed record carries neither,
+                          -- and dropping them poisons the snapshot contract
+                          -- check on the next embedding run.
+                          metadata = EXCLUDED.metadata ||
+                            CASE
+                              WHEN EXCLUDED.embedding IS NULL
+                               AND project_code_intel_records.embedding IS NOT NULL
+                              THEN jsonb_strip_nulls(jsonb_build_object(
+                                'embedding_backend',
+                                project_code_intel_records.metadata->'embedding_backend',
+                                'embedding_model',
+                                project_code_intel_records.metadata->'embedding_model',
+                                'embedding_dimensions',
+                                project_code_intel_records.metadata->'embedding_dimensions'
+                              ))
+                              ELSE '{}'::jsonb
+                            END,
+                          confidence = EXCLUDED.confidence,
+                          confidence_kind = EXCLUDED.confidence_kind,
+                          severity = EXCLUDED.severity,
+                          tool = EXCLUDED.tool,
+                          rule_id = EXCLUDED.rule_id,
+                          analyzer = EXCLUDED.analyzer,
+                          analyzer_version = EXCLUDED.analyzer_version,
+                          parser = EXCLUDED.parser,
+                          parser_version = EXCLUDED.parser_version,
+                          chunker_version = EXCLUDED.chunker_version,
+                          language = EXCLUDED.language,
+                          file_role = EXCLUDED.file_role,
+                          content_class = EXCLUDED.content_class,
+                          updated_at = now(),
                           embedding = coalesce(EXCLUDED.embedding, project_code_intel_records.embedding)
             """,
             [db.compact_json(batch)],
@@ -519,24 +609,48 @@ def insert_edges(
     return len(edges)
 
 
+@dataclass(frozen=True)
+class SnapshotScope:
+    """Identifies one snapshot's membership for the records-through-files join.
+
+    Records carry no snapshot_id or file_id (schema v2 content-addressing),
+    so "which records are in this snapshot" is always this join:
+    project_code_intel_records r JOIN project_code_intel_files f ON
+    (f.collection, f.repo, f.source_path, f.file_sha256) = (r.collection,
+    r.repo, r.source_path, r.file_sha256) WHERE f.snapshot_id = ....
+    """
+
+    collection: str
+    repo: str
+    snapshot_id: int
+
+
 def _load_symbol_definition_index(
     conn: db.DbConnection,
-    snapshot_id: int,
+    scope: SnapshotScope,
     target_symbols: set[str],
 ) -> dict[str, _SymbolDefinitionChoices]:
+    """Look up symbol_definition records visible in one snapshot."""
     if not target_symbols:
         return {}
     rows = conn.execute(
         """
-        SELECT symbol, record_id, source_path, symbol_kind
-        FROM project_code_intel_records
-        WHERE snapshot_id = %s
-          AND record_type = 'symbol_definition'
-          AND symbol IS NOT NULL
-          AND symbol = ANY(%s::text[])
-        ORDER BY symbol, source_path, record_id
+        SELECT r.symbol, r.record_id, r.source_path, r.symbol_kind
+        FROM project_code_intel_records r
+        JOIN project_code_intel_files f
+          ON f.collection = r.collection
+         AND f.repo = r.repo
+         AND f.source_path = r.source_path
+         AND r.file_sha256 = coalesce(f.file_sha256, '')
+        WHERE f.snapshot_id = %s
+          AND r.collection = %s
+          AND r.repo = %s
+          AND r.record_type = 'symbol_definition'
+          AND r.symbol IS NOT NULL
+          AND r.symbol = ANY(%s::text[])
+        ORDER BY r.symbol, r.source_path, r.record_id
         """,
-        [snapshot_id, sorted(target_symbols)],
+        [scope.snapshot_id, scope.collection, scope.repo, sorted(target_symbols)],
     ).fetchall()
     definitions_by_symbol: dict[str, list[_SymbolDefinitionTarget]] = {}
     for row in rows:
@@ -560,7 +674,7 @@ _EDGE_TARGET_PRE_RESOLVE_BATCH_SIZE = 5_000
 
 def pre_resolve_edge_targets(
     conn: db.DbConnection,
-    snapshot_id: int,
+    scope: SnapshotScope,
     edges: list[IntelEdge],
     *,
     batch_size: int = _EDGE_TARGET_PRE_RESOLVE_BATCH_SIZE,
@@ -578,7 +692,7 @@ def pre_resolve_edge_targets(
     for offset in range(0, len(unresolved_edges), batch_size):
         batch = unresolved_edges[offset : offset + batch_size]
         missing_symbols = {str(edge.target_symbol) for edge in batch if str(edge.target_symbol) not in symbols}
-        loaded_symbols = _load_symbol_definition_index(conn, snapshot_id, missing_symbols)
+        loaded_symbols = _load_symbol_definition_index(conn, scope, missing_symbols)
         for symbol in missing_symbols:
             symbols[symbol] = loaded_symbols.get(symbol)
         for edge in batch:
@@ -614,7 +728,7 @@ _EDGE_TARGET_RESOLVE_BATCH_SIZE = 5_000
 
 def resolve_edge_targets(
     conn: db.DbConnection,
-    snapshot_id: int,
+    scope: SnapshotScope,
     *,
     batch_size: int = _EDGE_TARGET_RESOLVE_BATCH_SIZE,
     progress_fn: Callable[[int], None] | None = None,
@@ -669,7 +783,14 @@ def resolve_edge_targets(
                 CROSS JOIN LATERAL (
                     SELECT r.record_id, r.source_path
                     FROM project_code_intel_records r
-                    WHERE r.snapshot_id = %s
+                    JOIN project_code_intel_files f
+                      ON f.collection = r.collection
+                     AND f.repo = r.repo
+                     AND f.source_path = r.source_path
+                     AND r.file_sha256 = coalesce(f.file_sha256, '')
+                    WHERE f.snapshot_id = %s
+                      AND r.collection = %s
+                      AND r.repo = %s
                       AND r.symbol = c.target_symbol
                       AND r.record_type = 'symbol_definition'
                     ORDER BY
@@ -710,13 +831,15 @@ def resolve_edge_targets(
             FROM candidate_cursor
             """,
             [
-                snapshot_id,
+                scope.snapshot_id,
                 last_target_symbol,
                 last_target_symbol,
                 last_target_symbol,
                 last_edge_id,
                 max(1, batch_size),
-                snapshot_id,
+                scope.snapshot_id,
+                scope.collection,
+                scope.repo,
             ],
         ).fetchone()
         row = db.require_row(row, "resolve edge targets")
@@ -824,7 +947,10 @@ def prune_old_snapshots(conn: db.DbConnection, collection: str, repo: str, keep:
         """,
         [collection, repo, keep],
     ).fetchall()
-    return len(rows)
+    deleted = len(rows)
+    if deleted:
+        _ = delete_orphaned_records(conn, collection, repo)
+    return deleted
 
 
 def prune_dead_branch_snapshots(conn: db.DbConnection, collection: str, repo: str, live_branches: set[str]) -> int:
@@ -851,4 +977,7 @@ def prune_dead_branch_snapshots(conn: db.DbConnection, collection: str, repo: st
         """,
         [collection, repo, list(live_branches), collection, repo],
     ).fetchall()
-    return len(rows)
+    deleted = len(rows)
+    if deleted:
+        _ = delete_orphaned_records(conn, collection, repo)
+    return deleted

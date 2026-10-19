@@ -708,8 +708,11 @@ def load_function_nodes(conn: db.DbConnection, snapshot_id: int) -> list[Functio
         SELECT r.record_id, r.symbol, r.source_path, r.line_start, r.line_end, r.metadata
         FROM project_code_intel_records r
         JOIN project_code_intel_files f
-          ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
-        WHERE r.snapshot_id = %s
+          ON f.collection = r.collection
+         AND f.repo = r.repo
+         AND f.source_path = r.source_path
+         AND r.file_sha256 = coalesce(f.file_sha256, '')
+        WHERE f.snapshot_id = %s
           AND r.record_type = 'symbol_definition'
           AND r.symbol IS NOT NULL
           AND r.symbol_kind IN ('function', 'method', 'shell_function')
@@ -758,7 +761,12 @@ def group_semantic_similarity(conn: db.DbConnection, snapshot_id: int, member_id
         WITH chunks AS (
             SELECT c.parent_record_id AS def_id, c.embedding
             FROM project_code_intel_records c
-            WHERE c.snapshot_id = %s
+            JOIN project_code_intel_files f
+              ON f.collection = c.collection
+             AND f.repo = c.repo
+             AND f.source_path = c.source_path
+             AND c.file_sha256 = coalesce(f.file_sha256, '')
+            WHERE f.snapshot_id = %s
               AND c.record_type = 'code_chunk'
               AND c.parent_record_id = ANY(%s)
               AND c.embedding IS NOT NULL
@@ -788,7 +796,12 @@ def _group_body_texts(conn: db.DbConnection, snapshot_id: int, member_ids: Seque
         """
         SELECT c.parent_record_id AS def_id, c.display_content AS content
         FROM project_code_intel_records c
-        WHERE c.snapshot_id = %s
+        JOIN project_code_intel_files f
+          ON f.collection = c.collection
+         AND f.repo = c.repo
+         AND f.source_path = c.source_path
+         AND c.file_sha256 = coalesce(f.file_sha256, '')
+        WHERE f.snapshot_id = %s
           AND c.record_type = 'code_chunk'
           AND c.parent_record_id = ANY(%s)
         ORDER BY c.parent_record_id, c.line_start

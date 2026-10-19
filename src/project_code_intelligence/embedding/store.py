@@ -20,6 +20,14 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 EMBEDDING_CONTRACT_METADATA_KEY = "embedding_contract"
 
+# Membership-join contract (see HANDOFF.md): records carry no snapshot_id.
+# "Which records are in this snapshot" is always:
+# project_code_intel_records r JOIN project_code_intel_files f ON
+# (f.collection, f.repo, f.source_path) = (r.collection, r.repo,
+# r.source_path) AND r.file_sha256 = coalesce(f.file_sha256, '') WHERE
+# f.snapshot_id = .... r.file_sha256 is never NULL (sentinel-mapped), only
+# f.file_sha256 can be NULL, so only the files side needs coalesce.
+
 
 def database_retries() -> int:
     return config.env_int("PCI_DB_RETRIES", 3, minimum=0)
@@ -133,21 +141,32 @@ def embedding_snapshot_counts(snapshot_id: int, record_types: set[str]) -> db.Db
             row = conn.execute(
                 """
                 SELECT
-                  count(*) FILTER (WHERE record_type = ANY(%s)) AS selected_total,
-                  count(*) FILTER (WHERE record_type = ANY(%s) AND embedding IS NOT NULL) AS selected_embedded,
+                  count(*) FILTER (WHERE r.record_type = ANY(%s)) AS selected_total,
+                  count(*) FILTER (WHERE r.record_type = ANY(%s) AND r.embedding IS NOT NULL) AS selected_embedded,
                   count(*) FILTER (
-                    WHERE record_type = ANY(%s)
-                      AND embedding IS NULL
-                      AND metadata->>'embedding_skipped' IS DISTINCT FROM 'true'
+                    WHERE r.record_type = ANY(%s)
+                      AND r.embedding IS NULL
+                      AND r.metadata->>'embedding_skipped' IS DISTINCT FROM 'true'
                   ) AS selected_pending,
                   count(*) FILTER (
-                    WHERE record_type = ANY(%s)
-                      AND metadata->>'embedding_skipped' = 'true'
+                    WHERE r.record_type = ANY(%s)
+                      AND r.metadata->>'embedding_skipped' = 'true'
                   ) AS selected_skipped
-                FROM project_code_intel_records
-                WHERE snapshot_id = %s
+                FROM project_code_intel_records r
+                JOIN project_code_intel_files f
+                  ON f.collection = r.collection
+                 AND f.repo = r.repo
+                 AND f.source_path = r.source_path
+                 AND r.file_sha256 = coalesce(f.file_sha256, '')
+                WHERE f.snapshot_id = %s
                 """,
-                [sorted(record_types), sorted(record_types), sorted(record_types), sorted(record_types), snapshot_id],
+                [
+                    sorted(record_types),
+                    sorted(record_types),
+                    sorted(record_types),
+                    sorted(record_types),
+                    snapshot_id,
+                ],
             ).fetchone()
             return db.require_row(row, "embedding snapshot counts")
 
@@ -161,13 +180,18 @@ def fetch_embedding_batch(snapshot_id: int, record_types: set[str], batch_size: 
                 "list[EmbeddingRow]",
                 conn.execute(
                     """
-                    SELECT id, source_path, record_id, embedding_text
-                    FROM project_code_intel_records
-                    WHERE snapshot_id = %s
-                      AND record_type = ANY(%s)
-                      AND embedding IS NULL
-                      AND metadata->>'embedding_skipped' IS DISTINCT FROM 'true'
-                    ORDER BY id
+                    SELECT r.id, r.source_path, r.record_id, r.embedding_text
+                    FROM project_code_intel_records r
+                    JOIN project_code_intel_files f
+                      ON f.collection = r.collection
+                     AND f.repo = r.repo
+                     AND f.source_path = r.source_path
+                     AND r.file_sha256 = coalesce(f.file_sha256, '')
+                    WHERE f.snapshot_id = %s
+                      AND r.record_type = ANY(%s)
+                      AND r.embedding IS NULL
+                      AND r.metadata->>'embedding_skipped' IS DISTINCT FROM 'true'
+                    ORDER BY r.id
                     LIMIT %s
                     """,
                     [snapshot_id, sorted(record_types), batch_size],
@@ -196,11 +220,16 @@ def existing_embedding_contract_from_rows(conn: db.DbConnection, snapshot_id: in
             """
             SELECT count(*) AS embedded_total,
                    count(*) FILTER (
-                     WHERE metadata ? 'embedding_model'
-                       AND metadata ? 'embedding_dimensions'
+                     WHERE r.metadata ? 'embedding_model'
+                       AND r.metadata ? 'embedding_dimensions'
                    ) AS embedded_with_metadata
-            FROM project_code_intel_records
-            WHERE snapshot_id = %s AND embedding IS NOT NULL
+            FROM project_code_intel_records r
+            JOIN project_code_intel_files f
+              ON f.collection = r.collection
+             AND f.repo = r.repo
+             AND f.source_path = r.source_path
+             AND r.file_sha256 = coalesce(f.file_sha256, '')
+            WHERE f.snapshot_id = %s AND r.embedding IS NOT NULL
             """,
             [snapshot_id],
         ).fetchone(),
@@ -218,13 +247,18 @@ def existing_embedding_contract_from_rows(conn: db.DbConnection, snapshot_id: in
     rows = conn.execute(
         """
         SELECT DISTINCT
-               metadata->>'embedding_model' AS model,
-               metadata->>'embedding_dimensions' AS dimensions
-        FROM project_code_intel_records
-        WHERE snapshot_id = %s
-          AND embedding IS NOT NULL
-          AND metadata ? 'embedding_model'
-          AND metadata ? 'embedding_dimensions'
+               r.metadata->>'embedding_model' AS model,
+               r.metadata->>'embedding_dimensions' AS dimensions
+        FROM project_code_intel_records r
+        JOIN project_code_intel_files f
+          ON f.collection = r.collection
+         AND f.repo = r.repo
+         AND f.source_path = r.source_path
+         AND r.file_sha256 = coalesce(f.file_sha256, '')
+        WHERE f.snapshot_id = %s
+          AND r.embedding IS NOT NULL
+          AND r.metadata ? 'embedding_model'
+          AND r.metadata ? 'embedding_dimensions'
         """,
         [snapshot_id],
     ).fetchall()
@@ -283,9 +317,14 @@ def validate_embedding_compatibility(
     dimension = next(iter(new_dimensions))
     rows = conn.execute(
         """
-        SELECT DISTINCT vector_dims(embedding) AS dimensions
-        FROM project_code_intel_records
-        WHERE snapshot_id = %s AND embedding IS NOT NULL
+        SELECT DISTINCT vector_dims(r.embedding) AS dimensions
+        FROM project_code_intel_records r
+        JOIN project_code_intel_files f
+          ON f.collection = r.collection
+         AND f.repo = r.repo
+         AND f.source_path = r.source_path
+         AND r.file_sha256 = coalesce(f.file_sha256, '')
+        WHERE f.snapshot_id = %s AND r.embedding IS NOT NULL
         """,
         [snapshot_id],
     ).fetchall()
@@ -299,11 +338,16 @@ def validate_embedding_compatibility(
 
     model_rows = conn.execute(
         """
-        SELECT DISTINCT metadata->>'embedding_model' AS model
-        FROM project_code_intel_records
-        WHERE snapshot_id = %s
-          AND embedding IS NOT NULL
-          AND metadata ? 'embedding_model'
+        SELECT DISTINCT r.metadata->>'embedding_model' AS model
+        FROM project_code_intel_records r
+        JOIN project_code_intel_files f
+          ON f.collection = r.collection
+         AND f.repo = r.repo
+         AND f.source_path = r.source_path
+         AND r.file_sha256 = coalesce(f.file_sha256, '')
+        WHERE f.snapshot_id = %s
+          AND r.embedding IS NOT NULL
+          AND r.metadata ? 'embedding_model'
         """,
         [snapshot_id],
     ).fetchall()
@@ -352,26 +396,29 @@ def _write_embedding_batch(
             embeddings=[embedding for _row, embedding in embedded],
         )
         for row, embedding in embedded:
+            # Records are content-addressed with no snapshot_id: `id` alone
+            # identifies the row (it came from a snapshot-scoped SELECT
+            # above), and the UPDATE benefits every other snapshot that
+            # shares this content row.
             _ = conn.execute(
                 """
                 UPDATE project_code_intel_records
                 SET embedding = %s::vector,
                     metadata = coalesce(metadata, '{}'::jsonb) || %s::jsonb
-                WHERE id = %s AND snapshot_id = %s
+                WHERE id = %s
                 """,
                 [
                     embedding,
                     json.dumps(embedding_metadata(run_config, embedding), sort_keys=True, separators=(",", ":")),
                     row["id"],
-                    snapshot_id,
                 ],
             )
         for item in skipped:
-            _mark_embedding_skipped(conn, item, snapshot_id=snapshot_id)
+            _mark_embedding_skipped(conn, item)
         conn.commit()
 
 
-def _mark_embedding_skipped(conn: db.DbConnection, item: SkippedEmbeddingRow, *, snapshot_id: int) -> None:
+def _mark_embedding_skipped(conn: db.DbConnection, item: SkippedEmbeddingRow) -> None:
     metadata = {
         "embedding_skipped": True,
         "embedding_skip_reason": item.reason[:500],
@@ -381,9 +428,9 @@ def _mark_embedding_skipped(conn: db.DbConnection, item: SkippedEmbeddingRow, *,
         """
         UPDATE project_code_intel_records
         SET metadata = coalesce(metadata, '{}'::jsonb) || %s::jsonb
-        WHERE id = %s AND snapshot_id = %s
+        WHERE id = %s
         """,
-        [json.dumps(metadata, sort_keys=True, separators=(",", ":")), item.row["id"], snapshot_id],
+        [json.dumps(metadata, sort_keys=True, separators=(",", ":")), item.row["id"]],
     )
 
 

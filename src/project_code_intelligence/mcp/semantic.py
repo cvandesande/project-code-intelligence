@@ -362,7 +362,11 @@ def semantic_filter_queryability_warning(conn: db.DbConnection, args: Json) -> J
             SELECT count(*) AS record_count,
                    count(r.embedding) AS embedded_records
             FROM project_code_intel_records r
-            LEFT JOIN project_code_intel_files f ON f.snapshot_id = r.snapshot_id AND f.source_path = r.source_path
+            LEFT JOIN project_code_intel_files f
+              ON f.collection = r.collection
+             AND f.repo = r.repo
+             AND f.source_path = r.source_path
+             AND r.file_sha256 = coalesce(f.file_sha256, '')
             """,
                 clauses,
                 "",
