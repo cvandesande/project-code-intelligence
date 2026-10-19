@@ -327,6 +327,25 @@ class DoctorStartTests(unittest.TestCase):
         self.assertIn(call(["start", "pci-llama-rocm.service"]), systemctl.call_args_list)
         self.assertNotIn(call(["stop", "pci-llama-rocm.service"], ANY), systemctl.call_args_list)
 
+    def test_start_embedding_apple_needs_no_container_engine(self) -> None:
+        # `pci doctor --start-embedding` on Apple Silicon resolves to the apple
+        # profile, which is a native launchd process. It must not touch systemctl:
+        # macOS has no container engine, so those calls raise FileNotFoundError and
+        # used to abort the start before the server was ever launched.
+        with (
+            patch.object(doctor_cli, "_detect_embedding_options", return_value={}),
+            patch.object(doctor_cli, "local_embedding_startup_commands", return_value=[("apple", "pci embed apple")]),
+            patch.object(doctor_cli.apple_embed_server, "main") as apple_main,
+            patch("project_code_intelligence.process.materialize_quadlet_units") as materialize,
+            patch("project_code_intelligence.process.run_systemctl_user", side_effect=FileNotFoundError) as systemctl,
+        ):
+            result = doctor_cli.start_embedding_services()
+
+        self.assertEqual(result, 0)
+        systemctl.assert_not_called()
+        materialize.assert_not_called()
+        apple_main.assert_called_once_with()
+
     def test_start_embedding_rejects_unavailable_requested_backend(self) -> None:
         with (
             patch.object(doctor_cli, "_detect_embedding_options", return_value={}),

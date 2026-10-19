@@ -641,6 +641,15 @@ def start_embedding_services(backend: str = "auto") -> int:
         return 1
     display_command = available[profile]
     write_stdout(f"Starting {profile} embedding: {display_command}")
+    if profile == "apple":
+        # A native launchd process, not a Quadlet unit: `_BACKEND_QUADLET_FILES["apple"]`
+        # is empty, so the block below would only stop other backends' units and
+        # materialize nothing. Those systemctl calls abort with FileNotFoundError on
+        # macOS -- the only platform where this profile is ever available, since
+        # `apple_embed_available` requires darwin -- so reaching them first made
+        # `pci doctor --start-embedding` fail on every Apple Silicon host.
+        apple_embed_server.main()
+        return 0
     selected_files = set(_BACKEND_QUADLET_FILES[profile])
     unselected_units = [
         _quadlet_service_name(filename) for filename in process.QUADLET_UNIT_FILES if filename not in selected_files
@@ -659,9 +668,6 @@ def start_embedding_services(backend: str = "auto") -> int:
     except FileNotFoundError:
         write_stdout("systemctl not found; cannot load embedding service.")
         return 1
-    if profile == "apple":
-        apple_embed_server.main()
-        return 0
     try:
         _ = process.run_systemctl_user(["start", _EMBEDDING_SERVICE_UNITS[profile]])
     except FileNotFoundError:
