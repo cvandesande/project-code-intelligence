@@ -103,12 +103,15 @@ shell-format: ## Auto-format shell scripts with shfmt
 		echo "warning: shfmt not found; skipping shell formatting" >&2; \
 	fi
 
+# PCI_EMBED_AUTOSTART=0 keeps the unit suite from demand-starting the real launchd
+# MLX agent: a test that simulates a down loopback endpoint would otherwise bootstrap
+# it and load the model mid-gate, leaving a ~600 MB server running after `make check`.
 test: ## Run unit tests
-	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m unittest discover -s tests -v
+	PYTHONPATH=$(PYTHONPATH) PCI_EMBED_AUTOSTART=0 $(PYTHON) -m unittest discover -s tests -v
 
 coverage: ## Run tests with coverage report
 	$(COVERAGE) erase
-	PYTHONPATH=$(PYTHONPATH) $(COVERAGE) run -m unittest discover -s tests -v
+	PYTHONPATH=$(PYTHONPATH) PCI_EMBED_AUTOSTART=0 $(COVERAGE) run -m unittest discover -s tests -v
 	$(COVERAGE) report -m --sort=cover
 
 dead-code: ## Find unused code with vulture

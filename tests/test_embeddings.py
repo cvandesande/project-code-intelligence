@@ -674,6 +674,14 @@ class EmbeddingContractTests(unittest.TestCase):
                 side_effect=[EmbeddingEndpointUnavailableError("temporary endpoint failure"), raw_response],
             ) as read_response,
             patch("project_code_intelligence.embedding.endpoint.embedding_request_retries", return_value=1),
+            # The endpoint below is the default loopback port, so an unpatched autostart
+            # hook treats this simulated failure as a cold local server and bootstraps the
+            # real launchd agent -- a unit test must not load a 600 MB model as a side
+            # effect. This case is about the retry loop, not about demand-start.
+            patch(
+                "project_code_intelligence.embedding.endpoint.autostart_local_embedding_server",
+                return_value=False,
+            ),
             patch("time.sleep"),
         ):
             vectors = embed_with_endpoint(
