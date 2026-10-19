@@ -39,7 +39,7 @@ _CONTAINER_ENGINE_ENV_VAR = "PCI_CONTAINER_ENGINE"
 # checks match the string itself, not call context -- one named definition
 # keeps that unavoidable false positive to a single, self-documenting spot
 # instead of one per use.
-BIND_ALL_INTERFACES = "0.0.0.0"  # noqa: S104  # nosec B104
+BIND_ALL_INTERFACES = "0.0.0.0"  # ruff: ignore[hardcoded-bind-all-interfaces]  # nosec B104
 
 PIPE = subprocess.PIPE
 STDOUT = subprocess.STDOUT

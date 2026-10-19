@@ -638,32 +638,40 @@ def _audit_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _query_audit_results(
+    conn: db.DbConnection,
+    parsed: AuditNamespace,
+) -> tuple[list[AuditResult], list[GateResult]] | int:
+    """The audit queries themselves; an int is an early-exit code to return to the CLI."""
+    if not mcp_db.code_intel_tables_exist(conn):
+        _ = sys.stderr.write("pci audit: no code-intelligence tables; run pci-index first\n")
+        return 1
+    all_snapshots = latest_snapshots(conn)
+    branch = resolve_repo_branch(Path.cwd())
+    snapshots, branch_miss = resolve_and_select_snapshots(
+        all_snapshots, collection=parsed.collection, repo=parsed.repo, branch=branch
+    )
+    if branch_miss:
+        _ = sys.stderr.write(f"pci audit: no snapshot on branch {branch!r}; using newest per repo\n")
+    if not snapshots:
+        _ = sys.stderr.write("pci audit: no matching snapshots found\n")
+        return 1
+    options = AnalysisOptions(limit=parsed.limit)
+    results = [audit_snapshot(conn, snapshot, options) for snapshot in snapshots]
+    gate_results = [gate_snapshot(conn, snapshot) for snapshot in snapshots] if parsed.gate else []
+    return results, gate_results
+
+
 def _load_audit_results(
     parsed: AuditNamespace,
 ) -> tuple[list[AuditResult], list[GateResult]] | int:
     """Everything `audit_main` needs from the database, or an exit code on early failure."""
     try:
         with mcp_db.connect() as conn:
-            if not mcp_db.code_intel_tables_exist(conn):
-                _ = sys.stderr.write("pci audit: no code-intelligence tables; run pci-index first\n")
-                return 1
-            all_snapshots = latest_snapshots(conn)
-            branch = resolve_repo_branch(Path.cwd())
-            snapshots, branch_miss = resolve_and_select_snapshots(
-                all_snapshots, collection=parsed.collection, repo=parsed.repo, branch=branch
-            )
-            if branch_miss:
-                _ = sys.stderr.write(f"pci audit: no snapshot on branch {branch!r}; using newest per repo\n")
-            if not snapshots:
-                _ = sys.stderr.write("pci audit: no matching snapshots found\n")
-                return 1
-            options = AnalysisOptions(limit=parsed.limit)
-            results = [audit_snapshot(conn, snapshot, options) for snapshot in snapshots]
-            gate_results = [gate_snapshot(conn, snapshot) for snapshot in snapshots] if parsed.gate else []
+            return _query_audit_results(conn, parsed)
     except DatabaseConnectionError as exc:
         _ = sys.stderr.write(f"pci audit: {exc}\n")
         return 1
-    return results, gate_results
 
 
 def _triage_payload(
@@ -728,38 +736,45 @@ def _render_audit_output(
     _ = sys.stdout.write("\n".join(lines) + "\n")
 
 
+def _apply_triage_update(
+    parsed: AuditNamespace, results: Sequence[AuditResult]
+) -> dict[str, audit_triage.TriageEntry] | int:
+    """Read, mutate, and rewrite the triage file; an int is an exit code for the CLI."""
+    current = {
+        candidate: members
+        for result in results
+        for candidate, members in audit_triage.current_candidates(
+            result.redundancy.groups, result.collection, result.repo
+        ).items()
+    }
+    with audit_triage.triage_lock(parsed.triage_file):
+        loaded_entries = audit_triage.load_triage(parsed.triage_file)
+        entries = audit_triage.reconcile(current, loaded_entries) if parsed.full_triage else loaded_entries
+        if parsed.init_triage:
+            for candidate_id_value, candidate in current.items():
+                if candidate_id_value not in entries:
+                    entries[candidate_id_value] = audit_triage.make_entry(candidate, "open", None)
+        if parsed.candidate is not None and parsed.status is not None:
+            candidate = current.get(parsed.candidate)
+            if candidate is None:
+                _ = sys.stderr.write(f"pci audit: candidate {parsed.candidate!r} is not in the current audit\n")
+                return 2
+            entries[parsed.candidate] = audit_triage.make_entry(
+                candidate, cast("audit_triage.TriageStatus", parsed.status), parsed.reason
+            )
+        if entries != loaded_entries:
+            audit_triage.write_triage(parsed.triage_file, entries)
+    return entries
+
+
 def _update_triage(parsed: AuditNamespace, results: Sequence[AuditResult]) -> dict[str, audit_triage.TriageEntry] | int:
     if not parsed.triage_file.exists() and not parsed.init_triage and parsed.candidate is None:
         return {}
     try:
-        current = {
-            candidate: members
-            for result in results
-            for candidate, members in audit_triage.current_candidates(
-                result.redundancy.groups, result.collection, result.repo
-            ).items()
-        }
-        with audit_triage.triage_lock(parsed.triage_file):
-            loaded_entries = audit_triage.load_triage(parsed.triage_file)
-            entries = audit_triage.reconcile(current, loaded_entries) if parsed.full_triage else loaded_entries
-            if parsed.init_triage:
-                for candidate_id_value, candidate in current.items():
-                    if candidate_id_value not in entries:
-                        entries[candidate_id_value] = audit_triage.make_entry(candidate, "open", None)
-            if parsed.candidate is not None and parsed.status is not None:
-                candidate = current.get(parsed.candidate)
-                if candidate is None:
-                    _ = sys.stderr.write(f"pci audit: candidate {parsed.candidate!r} is not in the current audit\n")
-                    return 2
-                entries[parsed.candidate] = audit_triage.make_entry(
-                    candidate, cast("audit_triage.TriageStatus", parsed.status), parsed.reason
-                )
-            if entries != loaded_entries:
-                audit_triage.write_triage(parsed.triage_file, entries)
+        return _apply_triage_update(parsed, results)
     except (OSError, ValueError) as exc:
         _ = sys.stderr.write(f"pci audit: {exc}\n")
         return 1
-    return entries
 
 
 def _validate_audit_args(parsed: AuditNamespace) -> int | None:

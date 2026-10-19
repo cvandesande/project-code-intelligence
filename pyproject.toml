@@ -225,9 +225,9 @@ ignore = [
   # current code raises direct ValueError/RuntimeError messages at argument,
   # parser, and boundary checks where a custom exception class per message
   # would add noise without improving recovery.
-  "EM101",
-  "EM102",
-  "TRY003",
+  "raw-string-in-exception",
+  "f-string-in-exception",
+  "raise-vanilla-args",
 ]
 
 [tool.ruff.lint.flake8-type-checking]
@@ -241,18 +241,18 @@ runtime-evaluated-base-classes = ["pydantic.BaseModel"]
 [tool.ruff.lint.per-file-ignores]
 # Profile methods are extension hooks. They intentionally keep instance method
 # shape even when default/example implementations do not need instance state.
-"src/project_code_intelligence/code_profiles/*.py" = ["PLR6301"]
-"src/project_code_intelligence/http_client.py" = ["S310"]
-"src/project_code_intelligence/embedding/fastembed_server.py" = ["A002"]
-"src/project_code_intelligence/process.py" = ["S404", "S603"]
+"src/project_code_intelligence/code_profiles/*.py" = ["no-self-use"]
+"src/project_code_intelligence/http_client.py" = ["suspicious-url-open-usage"]
+"src/project_code_intelligence/embedding/fastembed_server.py" = ["builtin-argument-shadowing"]
+"src/project_code_intelligence/process.py" = ["suspicious-subprocess-import", "subprocess-without-shell-equals-true"]
 # SARIF patterns may be absolute or relative and can use **; glob.glob handles
 # that mixed user-input shape more directly than Path.glob/Path.rglob.
-"src/project_code_intelligence/sarif/discovery.py" = ["PTH207"]
+"src/project_code_intelligence/sarif/discovery.py" = ["glob"]
 # Test doubles mimic third-party interfaces and may not need instance state.
-"tests/test_ingest_code_intel.py" = ["PLR6301"]
+"tests/test_ingest_code_intel.py" = ["no-self-use"]
 # Override of BaseHTTPRequestHandler.log_message must keep the name "format".
-"tests/test_apple_embed_server.py" = ["A002"]
-"typings/**/*.pyi" = ["ANN401"]
+"tests/test_apple_embed_server.py" = ["builtin-argument-shadowing"]
+"typings/**/*.pyi" = ["any-type"]
 
 [tool.coverage.run]
 branch = true

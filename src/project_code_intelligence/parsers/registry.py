@@ -111,6 +111,31 @@ def parse_language_records(
     return line_window_records(intel_file, text, max_chars, overlap_lines), []
 
 
+def parse_profile_and_module_records(
+    intel_file: IntelFile, text: str, max_chars: int, overlap_lines: int
+) -> tuple[list[IntelRecord], list[IntelEdge]]:
+    """Records and edges for one file: language parser output plus profile and module layers.
+
+    Kept separate from `parse_file`'s try clause so the parser-boundary handler covers
+    exactly this call and nothing else moved out of it.
+    """
+    records, edges = parse_language_records(intel_file, text, max_chars, overlap_lines)
+    extra_record_specs, extra_edges = profile_context.active_profile.extra_records(
+        intel_file.repo_rel_path,
+        intel_file.source_path,
+        intel_file.language,
+        text,
+    )
+    for spec in extra_record_specs:
+        records.append(make_profile_record(intel_file, spec))
+    edges.extend(extra_edges)
+    records.extend(security_records(intel_file, text))
+    module_recs, module_edges = module_records(intel_file, text, records, max_chars)
+    records.extend(module_recs)
+    edges.extend(module_edges)
+    return records, edges
+
+
 def parse_file(
     intel_file: IntelFile, max_chars: int, overlap_lines: int
 ) -> tuple[list[IntelRecord], list[IntelEdge], list[JsonObject]]:
@@ -133,20 +158,7 @@ def parse_file(
             ],
         )
     try:
-        records, edges = parse_language_records(intel_file, text, max_chars, overlap_lines)
-        extra_record_specs, extra_edges = profile_context.active_profile.extra_records(
-            intel_file.repo_rel_path,
-            intel_file.source_path,
-            intel_file.language,
-            text,
-        )
-        for spec in extra_record_specs:
-            records.append(make_profile_record(intel_file, spec))
-        edges.extend(extra_edges)
-        records.extend(security_records(intel_file, text))
-        module_recs, module_edges = module_records(intel_file, text, records, max_chars)
-        records.extend(module_recs)
-        edges.extend(module_edges)
+        records, edges = parse_profile_and_module_records(intel_file, text, max_chars, overlap_lines)
     except Exception as exc:  # pragma: no cover - parser boundary
         log.exception(f"unhandled error parsing {intel_file.source_path}")
         failures.append({

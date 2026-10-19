@@ -37,6 +37,7 @@ from project_code_intelligence.storage.schema import ensure_schema
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from project_code_intelligence.check_core import BaselineEntry
     from project_code_intelligence.models import StaticFinding, StaticRun
 
 
@@ -132,6 +133,28 @@ def check_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _write_baseline_and_report(identity: CheckIdentity, label: str, current: list[CheckFinding]) -> int:
+    """Write `current` as the branch baseline and return the exit code to report."""
+    os.environ["PCI_ALLOW_WRITES"] = "1"
+    with db.connect(readonly=False) as conn:
+        ensure_schema(conn)
+        count = freeze_baseline(
+            conn,
+            collection=identity.collection,
+            repo=identity.repo,
+            branch=identity.branch,
+            findings=current,
+        )
+        conn.commit()
+    _ = sys.stdout.write(f"pci check: froze baseline for {label}: {count} finding(s)\n")
+    return 0
+
+
+def _read_baseline(identity: CheckIdentity) -> list[BaselineEntry] | None:
+    with db.connect(readonly=True) as conn:
+        return load_baseline(conn, collection=identity.collection, repo=identity.repo, branch=identity.branch)
+
+
 def check_main(argv: list[str] | None = None) -> int:
     parsed = check_parser().parse_args(argv, namespace=CheckNamespace())
     identity = resolve_check_identity(Path.cwd(), collection=parsed.collection, repo=parsed.repo)
@@ -148,22 +171,8 @@ def check_main(argv: list[str] | None = None) -> int:
     label = f"{identity.collection}/{identity.repo}@{branch_label(identity.branch)}"
     try:
         if parsed.baseline:
-            os.environ["PCI_ALLOW_WRITES"] = "1"
-            with db.connect(readonly=False) as conn:
-                ensure_schema(conn)
-                count = freeze_baseline(
-                    conn,
-                    collection=identity.collection,
-                    repo=identity.repo,
-                    branch=identity.branch,
-                    findings=current,
-                )
-                conn.commit()
-            _ = sys.stdout.write(f"pci check: froze baseline for {label}: {count} finding(s)\n")
-            return 0
-
-        with db.connect(readonly=True) as conn:
-            baseline = load_baseline(conn, collection=identity.collection, repo=identity.repo, branch=identity.branch)
+            return _write_baseline_and_report(identity, label, current)
+        baseline = _read_baseline(identity)
     except DatabaseConnectionError as exc:
         _ = sys.stderr.write(f"pci check: {exc}\n")
         return 1

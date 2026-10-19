@@ -75,7 +75,7 @@ rules:
       - generic
     severity: ERROR
     patterns:
-      - pattern-regex: '#\s*(pyright:\s*ignore|type:\s*ignore|noqa|nosec)\b'
+      - pattern-regex: '#\s*(pyright:\s*ignore|type:\s*ignore|noqa|nosec|ruff:\s*ignore)\b'
     paths:
       exclude:
         # process.py: the one BIND_ALL_INTERFACES constant bandit/ruff can't distinguish
