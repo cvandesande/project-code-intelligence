@@ -64,6 +64,11 @@ class RunStateTests(unittest.TestCase):
 class RunDetailTests(unittest.TestCase):
     now = datetime.now(timezone.utc)
 
+    def test_state_can_be_excluded_for_labelled_rows(self) -> None:
+        detail = status_cli.run_detail(_run(), self.now, include_state=False)
+        self.assertNotIn("running", detail.split(" · "))
+        self.assertIn("repo-a", detail)
+
     def test_finished_run_shows_duration_not_started_ago(self) -> None:
         run = _run(
             finished_at=self.now - timedelta(seconds=30),
@@ -89,8 +94,8 @@ class StatusPillTests(unittest.TestCase):
         # Same label the live `pci index` header shows for this phase.
         self.assertEqual(status_cli.status_pill([_run()], [], self.now), ("running", "EMBEDDING"))
 
-    def test_running_run_without_phase_shows_running(self) -> None:
-        self.assertEqual(status_cli.status_pill([_run(phase=None)], [], self.now), ("running", "RUNNING"))
+    def test_running_run_without_phase_shows_indexing(self) -> None:
+        self.assertEqual(status_cli.status_pill([_run(phase=None)], [], self.now), ("running", "INDEXING"))
 
     def test_stalled_run_shows_attention(self) -> None:
         self.assertEqual(
@@ -98,11 +103,41 @@ class StatusPillTests(unittest.TestCase):
             ("warn", "ATTENTION"),
         )
 
-    def test_other_workspace_run_shows_running(self) -> None:
-        self.assertEqual(status_cli.status_pill([], ["demo-workspace"], self.now), ("running", "RUNNING"))
+    def test_other_workspace_run_shows_indexing(self) -> None:
+        self.assertEqual(
+            status_cli.status_pill([], [("demo-workspace", "other workspace")], self.now), ("running", "INDEXING")
+        )
 
     def test_no_runs_is_idle(self) -> None:
         self.assertEqual(status_cli.status_pill([], [], self.now), ("ok", "IDLE"))
+
+
+class SelectRunsTests(unittest.TestCase):
+    now = datetime.now(timezone.utc)
+
+    def test_keeps_attention_states_and_newest_ok_only(self) -> None:
+        runs = [
+            _run(),  # running
+            _run(finished_at=self.now, exit_code=0, id=6),  # newest ok
+            _run(finished_at=self.now, exit_code=1, id=5),  # failed
+            _run(finished_at=self.now, exit_code=0, id=4),  # older ok -> hidden
+            _run(finished_at=self.now, exit_code=0, id=3),  # older ok -> hidden
+        ]
+        shown, hidden = status_cli.select_runs(runs, self.now)
+        self.assertEqual([r["id"] for r in shown], [7, 6, 5])
+        self.assertEqual(hidden, 2)
+
+
+class SelectSnapshotsTests(unittest.TestCase):
+    def test_hides_stale_branches_of_fresh_repos_only(self) -> None:
+        snapshots: list[JsonObject] = [
+            {"repo": "repo-a", "branch": "main", "head_status": "current"},
+            {"repo": "repo-a", "branch": "old", "head_status": "stale"},
+            {"repo": "repo-b", "branch": "main", "head_status": "stale"},
+        ]
+        shown, hidden = status_cli.select_snapshots(snapshots)
+        self.assertEqual([(s["repo"], s["branch"]) for s in shown], [("repo-a", "main"), ("repo-b", "main")])
+        self.assertEqual(hidden, 1)
 
 
 class OtherHostIndexRunsTests(unittest.TestCase):
@@ -120,6 +155,30 @@ class OtherHostIndexRunsTests(unittest.TestCase):
     def test_ps_failure_is_swallowed(self) -> None:
         with patch.object(status_cli.process, "run", side_effect=OSError):
             self.assertEqual(status_cli.other_host_index_runs(), [])
+
+
+class ClassifyOtherRunsTests(unittest.TestCase):
+    def test_active_ledger_collection_is_suppressed(self) -> None:
+        runs: list[JsonObject] = [{"collection": "ws", "state": "running"}]
+        self.assertEqual(status_cli.classify_other_runs(["ws"], runs), [])
+
+    def test_stalled_ledger_collection_is_suppressed(self) -> None:
+        runs: list[JsonObject] = [{"collection": "ws", "state": "stalled"}]
+        self.assertEqual(status_cli.classify_other_runs(["ws"], runs), [])
+
+    def test_known_but_inactive_collection_is_labelled_starting(self) -> None:
+        runs: list[JsonObject] = [{"collection": "ws", "state": "failed"}]
+        self.assertEqual(
+            status_cli.classify_other_runs(["ws"], runs),
+            [("ws", "starting (no ledger row yet)")],
+        )
+
+    def test_unknown_collection_is_labelled_other_workspace(self) -> None:
+        runs: list[JsonObject] = [{"collection": "ws", "state": "failed"}]
+        self.assertEqual(
+            status_cli.classify_other_runs(["elsewhere"], runs),
+            [("elsewhere", "other workspace")],
+        )
 
 
 class EmbeddingLogHintTests(unittest.TestCase):

@@ -12,9 +12,10 @@ import argparse
 import json
 import sys
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 from rich.console import Group
+from rich.table import Table
 from rich.text import Text
 
 from project_code_intelligence import console_ui, db, process
@@ -30,6 +31,8 @@ from project_code_intelligence.progress import PHASE_LABELS, estimate_remaining_
 from project_code_intelligence.storage import load_index_runs, load_latest_snapshots
 
 if TYPE_CHECKING:
+    from rich.console import RenderableType
+
     from project_code_intelligence.models import JsonObject
 
 # A run counts as live while its heartbeat is younger than this many ledger
@@ -42,13 +45,17 @@ class StatusNamespace(argparse.Namespace):
     collection: str | None = None
     limit: int = 10
     json: bool = False
+    all: bool = False
 
 
 def _parse_args(argv: list[str] | None) -> StatusNamespace:
     parser = argparse.ArgumentParser(description=__doc__)
     _ = parser.add_argument("--collection", default=None, help="Only show this collection.")
-    _ = parser.add_argument("--limit", type=int, default=10, help="Maximum run rows to show (default: 10).")
+    _ = parser.add_argument("--limit", type=int, default=10, help="Maximum run rows to load (default: 10).")
     _ = parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    _ = parser.add_argument(
+        "--all", action="store_true", help="Show full run history and every snapshot instead of the summary view."
+    )
     return parser.parse_args(argv, namespace=StatusNamespace())
 
 
@@ -98,33 +105,51 @@ def _progress_detail(run: JsonObject) -> str:
     return " ".join(parts)
 
 
-def run_detail(run: JsonObject, now: datetime) -> str:
-    state = run_state(run, now)
-    parts = [state]
-    progress_part = _progress_detail(run)
-    if progress_part and state in {"running", "stalled"}:
-        parts.append(progress_part)
+def _run_repos(run: JsonObject) -> str:
     repos = run.get("repos")
-    if isinstance(repos, list) and repos:
-        parts.append(",".join(str(r) for r in repos))
+    if not isinstance(repos, list):
+        return ""
+    # "." is the workspace root repo; the literal dot reads as noise.
+    return ", ".join("root" if str(r) == "." else str(r) for r in repos)
+
+
+def _run_mode(run: JsonObject) -> str:
     modes = console_ui.as_object(run.get("repo_modes"))
-    mode_values = {str(v) for v in modes.values()}
-    if mode_values:
-        parts.append("mode " + (",".join(sorted(mode_values))))
+    return ",".join(sorted({str(v) for v in modes.values()}))
+
+
+def _run_timing(run: JsonObject, now: datetime) -> str:
     started_age = _age_seconds(run.get("started_at"), now)
     finished_age = _age_seconds(run.get("finished_at"), now)
     if finished_age is not None and started_age is not None and started_age >= finished_age >= 0:
         # A finished run shows how long it took; "started X ago" alone reads
         # as a run that is still going after X.
-        parts.extend((
-            f"took {runtime_state.format_duration(started_age - finished_age)}",
-            f"finished {runtime_state.format_duration(finished_age)} ago",
-        ))
-    elif started_age is not None and started_age >= 0:
-        parts.append(f"started {runtime_state.format_duration(started_age)} ago")
+        took = runtime_state.format_duration(started_age - finished_age)
+        return f"took {took} · finished {runtime_state.format_duration(finished_age)} ago"
+    if started_age is not None and started_age >= 0:
+        return f"started {runtime_state.format_duration(started_age)} ago"
+    return ""
+
+
+def _run_activity(run: JsonObject, now: datetime) -> str:
+    """Progress (while live), timing, and first error line, dot-joined."""
+    state = run_state(run, now)
+    parts: list[str] = []
+    progress_part = _progress_detail(run)
+    if progress_part and state in {"running", "stalled"}:
+        parts.append(progress_part)
+    timing = _run_timing(run, now)
+    if timing:
+        parts.append(timing)
     error = run.get("error")
     if isinstance(error, str) and error:
         parts.append(error.splitlines()[0][:120])
+    return " · ".join(parts)
+
+
+def run_detail(run: JsonObject, now: datetime, *, include_state: bool = True) -> str:
+    parts = [run_state(run, now)] if include_state else []
+    parts.extend(part for part in (_run_repos(run), _run_mode(run), _run_activity(run, now)) if part)
     return " · ".join(parts)
 
 
@@ -210,16 +235,34 @@ def _write_line(line: str) -> None:
     _ = sys.stdout.write(f"{line}\n")
 
 
+def classify_other_runs(ps_collections: list[str], runs: list[JsonObject]) -> list[tuple[str, str]]:
+    """Label ps-detected `pci index` processes that have no active ledger row.
+
+    A collection this database's ledger knows is not "other workspace"; the
+    process just has not written (or refreshed) its row yet. Only collections
+    the ledger has never seen live in another workspace's database.
+    """
+    active = {str(run.get("collection")) for run in runs if run.get("state") in {"running", "stalled"}}
+    known = {str(run.get("collection")) for run in runs}
+    labelled: list[tuple[str, str]] = []
+    for coll in ps_collections:
+        if coll in active:
+            continue
+        note = "starting (no ledger row yet)" if coll in known else "other workspace"
+        labelled.append((coll, note))
+    return labelled
+
+
 def render_plain(
     runs: list[JsonObject],
     snapshots: list[JsonObject],
     now: datetime,
     log_hint: str | None,
-    other_runs: list[str] | None = None,
+    other_runs: list[tuple[str, str]] | None = None,
 ) -> None:
     _write_line("pci status")
-    for other in other_runs or []:
-        _write_line(f"run {other}: running · other workspace")
+    for coll, note in other_runs or []:
+        _write_line(f"run {coll}: running · {note}")
     if not runs:
         _write_line("runs: none recorded")
     for run in runs:
@@ -236,7 +279,9 @@ def render_plain(
         _write_line(f"embedding log: {log_hint}")
 
 
-def status_pill(runs: list[JsonObject], other_runs: list[str], now: datetime) -> tuple[console_ui.PillKind, str]:
+def status_pill(
+    runs: list[JsonObject], other_runs: list[tuple[str, str]], now: datetime
+) -> tuple[console_ui.PillKind, str]:
     """Header pill from the actual run state, like the live `pci index` pill.
 
     A running run shows its ledger phase through the same PHASE_LABELS map the
@@ -251,40 +296,157 @@ def status_pill(runs: list[JsonObject], other_runs: list[str], now: datetime) ->
         )
         if isinstance(phase, str) and phase:
             return "running", PHASE_LABELS.get(phase, phase.upper())
-        return "running", "RUNNING"
+        return "running", "INDEXING"
     if "stalled" in states or "failed" in states:
         return "warn", "ATTENTION"
     if other_runs:
-        return "running", "RUNNING"
+        return "running", "INDEXING"
     return "ok", "IDLE"
 
 
-def render_pretty(
-    runs: list[JsonObject],
-    snapshots: list[JsonObject],
-    now: datetime,
-    log_hint: str | None,
-    other_runs: list[str] | None = None,
-) -> None:
-    kind, label = status_pill(runs, other_runs or [], now)
-    grid = console_ui.section_grid()
-    for other in other_runs or []:
-        console_ui.add_row(grid, other, "running · other workspace")
-    if not runs:
-        console_ui.add_row(grid, "runs", "none recorded")
-    for run in runs:
-        console_ui.add_row(grid, str(run.get("collection")), run_detail(run, now))
-    if snapshots:
-        console_ui.add_row(grid, "", "")
+# Row-label colour per run/snapshot state, so the eye can scan the first column.
+_STATE_STYLES: dict[str, str] = {
+    "running": "bold cyan",
+    "ok": "green",
+    "failed": "bold red",
+    "stalled": "bold yellow",
+    "interrupted": "yellow",
+    "current": "green",
+    "stale": "yellow",
+}
+
+
+def select_runs(runs: list[JsonObject], now: datetime) -> tuple[list[JsonObject], int]:
+    """Runs worth showing by default, plus the count of hidden ones.
+
+    Keeps every run that needs attention (running, stalled, failed,
+    interrupted) and the newest successful run as proof the background
+    reindex works; older successes are history, not status.
+    """
+    shown: list[JsonObject] = []
+    hidden = 0
+    ok_shown = False
+    for run in runs:  # newest first (load_index_runs orders by started_at DESC)
+        if run_state(run, now) != "ok":
+            shown.append(run)
+        elif not ok_shown:
+            shown.append(run)
+            ok_shown = True
+        else:
+            hidden += 1
+    return shown, hidden
+
+
+def select_snapshots(snapshots: list[JsonObject]) -> tuple[list[JsonObject], int]:
+    """Snapshots worth showing by default, plus the count of hidden ones.
+
+    A repo with a current snapshot is fresh; its stale rows are old branches
+    nobody reindexed since and hide behind a count. A repo with no current
+    snapshot shows all its rows, because one of them needs a reindex.
+    """
+    fresh_repos = {str(snap.get("repo")) for snap in snapshots if snap.get("head_status") == "current"}
+    shown = [s for s in snapshots if s.get("head_status") == "current" or str(s.get("repo")) not in fresh_repos]
+    return shown, len(snapshots) - len(shown)
+
+
+def _section_table(*columns: str) -> Table:
+    table = Table(box=None, pad_edge=False, show_header=True, header_style="dim", padding=(0, 2, 0, 0))
+    for name in columns:
+        table.add_column(name, overflow="fold")
+    return table
+
+
+def _snapshots_table(snapshots: list[JsonObject]) -> Table:
+    table = _section_table("indexed", "commit", "freshness", "last ingest")
     for snapshot in snapshots:
         branch = snapshot.get("branch")
-        repo_label = f"{snapshot.get('repo')}@{branch}" if branch else str(snapshot.get("repo"))
-        console_ui.add_row(grid, repo_label, _snapshot_detail(snapshot))
+        repo = str(snapshot.get("repo"))
+        if repo == ".":
+            repo = "root"
+        repo_label = f"{repo}@{branch}" if branch else repo
+        metadata = console_ui.as_object(snapshot.get("metadata"))
+        commit_sha = snapshot.get("commit_sha")
+        freshness = str(snapshot.get("head_status") or "unknown")
+        ingest = ""
+        mode = metadata.get("ingest_mode")
+        if isinstance(mode, str):
+            changed = console_ui.coerce_int(metadata.get("changed_files"))
+            unchanged = console_ui.coerce_int(metadata.get("unchanged_files"))
+            ingest = f"{mode} · {changed} changed / {unchanged} unchanged"
+        table.add_row(
+            Text(repo_label, style="bold"),
+            Text(console_ui.short_sha(commit_sha if isinstance(commit_sha, str) else None)),
+            Text(freshness, style=_STATE_STYLES.get(freshness, "")),
+            Text(ingest),
+        )
+    return table
+
+
+class StatusView(NamedTuple):
+    """What the pretty renderer shows: pre-selected rows plus hidden counts."""
+
+    runs: list[JsonObject]
+    hidden_runs: int
+    snapshots: list[JsonObject]
+    hidden_snapshots: int
+    other_runs: list[tuple[str, str]]
+
+    @classmethod
+    def build(
+        cls,
+        runs: list[JsonObject],
+        snapshots: list[JsonObject],
+        other_runs: list[tuple[str, str]],
+        now: datetime,
+        *,
+        show_all: bool,
+    ) -> StatusView:
+        shown_runs, hidden_runs = (runs, 0) if show_all else select_runs(runs, now)
+        shown_snapshots, hidden_snapshots = (snapshots, 0) if show_all else select_snapshots(snapshots)
+        return cls(shown_runs, hidden_runs, shown_snapshots, hidden_snapshots, other_runs)
+
+
+def render_pretty(view: StatusView, all_runs: list[JsonObject], now: datetime, log_hint: str | None) -> None:
+    # The pill reflects every loaded run, not just the ones shown.
+    other_runs = view.other_runs
+    kind, label = status_pill(all_runs, other_runs, now)
+    collections = sorted({str(run.get("collection")) for run in all_runs})
+    title = "pci status" + (f" · {collections[0]}" if len(collections) == 1 else "")
+    body: list[RenderableType] = []
+
+    if view.snapshots:
+        body.append(_snapshots_table(view.snapshots))
+        if view.hidden_snapshots:
+            noun = "branch" if view.hidden_snapshots == 1 else "branches"
+            body.append(
+                Text(f"+ {view.hidden_snapshots} stale {noun} not checked out here · pci status --all", style="dim")
+            )
+        body.append(Text())
+
+    shown_runs, hidden_runs = view.runs, view.hidden_runs
+    runs_table = _section_table("index runs", "repos", "mode", "activity")
+    for coll, note in other_runs or []:
+        runs_table.add_row(Text("running", style=_STATE_STYLES["running"]), Text(coll), Text(""), Text(note))
+    for run in shown_runs:
+        state = run_state(run, now)
+        repos = _run_repos(run)
+        if len(collections) > 1:
+            repos = f"{run.get('collection')} · {repos}"
+        runs_table.add_row(
+            Text(state, style=_STATE_STYLES.get(state, "bold")),
+            Text(repos),
+            Text(_run_mode(run)),
+            Text(_run_activity(run, now)),
+        )
+    body.append(runs_table if shown_runs or other_runs else Text("no index runs recorded", style="dim"))
+    if hidden_runs:
+        body.append(Text(f"+ {hidden_runs} older successful runs · pci status --all", style="dim"))
+
     if log_hint is not None:
-        console_ui.add_row(grid, "", "")
-        console_ui.add_row(grid, "embedding log", log_hint)
-    header = console_ui.header_row("pci status · index runs", kind, label)
-    console_ui.build_console().print(console_ui.main_panel(Group(header, Text(), grid)))
+        body.extend((Text(), Text.assemble(("embedding log  ", "dim"), log_hint)))
+
+    header = console_ui.header_row(title, kind, label)
+    console_ui.build_console().print(console_ui.main_panel(Group(header, Text(), *body)))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -301,20 +463,20 @@ def main(argv: list[str] | None = None) -> int:
     for run in runs:
         run["state"] = run_state(run, now)
     log_hint = embedding_log_hint()
-    local = {str(run.get("collection")) for run in runs if run.get("state") in {"running", "stalled"}}
-    other_runs = [c for c in other_host_index_runs() if c not in local]
+    other_runs = classify_other_runs(other_host_index_runs(), runs)
     if parsed.json:
         payload = {
             "ok": True,
             "runs": runs,
             "snapshots": snapshots,
             "embedding_log": log_hint,
-            "other_host_index_runs": other_runs,
+            "other_host_index_runs": [coll for coll, _ in other_runs],
         }
         _write_line(json.dumps(payload, default=str, indent=2))
         return 0
     if console_ui.should_emit_pretty(sys.stdout):
-        render_pretty(runs, snapshots, now, log_hint, other_runs)
+        view = StatusView.build(runs, snapshots, other_runs, now, show_all=parsed.all)
+        render_pretty(view, runs, now, log_hint)
     else:
         render_plain(runs, snapshots, now, log_hint, other_runs)
     return 0

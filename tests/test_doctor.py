@@ -963,6 +963,107 @@ class DoctorIndexFreshnessTests(unittest.TestCase):
         self.assertEqual([item.status for item in results], ["ok"])
         self.assertIn("1 repo(s)", results[0].message)
 
+    def test_ignores_stale_rows_of_old_branches_when_the_checkout_has_a_current_row(self) -> None:
+        # One checkout, three branch rows: the branch checked out now is
+        # current; the two others were indexed there earlier and can never
+        # catch up. Only the checkout's present state counts.
+        repo_path = str(Path.cwd())
+        current_snapshot = {
+            "id": 30,
+            "collection": "demo",
+            "repo": "demo-rust",
+            "branch": "main",
+            "commit_sha": "a" * 40,
+            "head_status": "current",
+            "metadata": {"repo_path": repo_path},
+        }
+        old_branch_snapshot = {
+            "id": 20,
+            "collection": "demo",
+            "repo": "demo-rust",
+            "branch": "map-result-expansion",
+            "commit_sha": "c" * 40,
+            "head_commit": "a" * 40,
+            "head_status": "stale",
+            "metadata": {"repo_path": repo_path},
+        }
+        branchless_snapshot = {
+            "id": 10,
+            "collection": "demo",
+            "repo": "demo-rust",
+            "commit_sha": "e" * 40,
+            "head_commit": "a" * 40,
+            "head_status": "stale",
+            "metadata": {"repo_path": repo_path},
+        }
+        with (
+            patch(
+                "project_code_intelligence.doctor.database.db.inferred_database_role_settings",
+                return_value=self._SETTINGS,
+            ),
+            patch("project_code_intelligence.doctor.database.db.connect", return_value=_FakeMaintenanceConnection()),
+            patch("project_code_intelligence.doctor.database.db.table_exists", return_value=True),
+            patch(
+                "project_code_intelligence.doctor.database.load_latest_snapshots",
+                return_value=[current_snapshot, old_branch_snapshot, branchless_snapshot],
+            ),
+            patch(
+                "project_code_intelligence.doctor.database.annotate_status_snapshots",
+                return_value=[current_snapshot, old_branch_snapshot, branchless_snapshot],
+            ),
+        ):
+            results = check_index_freshness()
+
+        self.assertEqual([item.status for item in results], ["ok"])
+        self.assertIn("1 repo(s)", results[0].message)
+
+    def test_warns_once_per_checkout_when_no_row_is_current(self) -> None:
+        # No current row: the checkout really is behind. Warn with the newest
+        # row only, not once per historical branch.
+        repo_path = str(Path.cwd())
+        newest_stale = {
+            "id": 40,
+            "collection": "demo",
+            "repo": "demo-rust",
+            "branch": "main",
+            "commit_sha": "a" * 40,
+            "head_commit": "b" * 40,
+            "head_status": "stale",
+            "metadata": {"repo_path": repo_path},
+        }
+        older_stale = {
+            "id": 15,
+            "collection": "demo",
+            "repo": "demo-rust",
+            "branch": "map-result-expansion",
+            "commit_sha": "c" * 40,
+            "head_commit": "b" * 40,
+            "head_status": "stale",
+            "metadata": {"repo_path": repo_path},
+        }
+        with (
+            patch(
+                "project_code_intelligence.doctor.database.db.inferred_database_role_settings",
+                return_value=self._SETTINGS,
+            ),
+            patch("project_code_intelligence.doctor.database.db.connect", return_value=_FakeMaintenanceConnection()),
+            patch("project_code_intelligence.doctor.database.db.table_exists", return_value=True),
+            patch(
+                "project_code_intelligence.doctor.database.load_latest_snapshots",
+                return_value=[newest_stale, older_stale],
+            ),
+            patch(
+                "project_code_intelligence.doctor.database.annotate_status_snapshots",
+                return_value=[newest_stale, older_stale],
+            ),
+        ):
+            results = check_index_freshness()
+
+        self.assertEqual([item.status for item in results], ["warn"])
+        self.assertIn("1 of 1 indexed repo(s) behind HEAD", results[0].message)
+        self.assertIn("demo/demo-rust@main", results[0].message)
+        self.assertNotIn("map-result-expansion", results[0].message)
+
     def test_includes_snapshots_for_repos_nested_under_the_current_directory(self) -> None:
         root_snapshot = {
             "collection": "demo",

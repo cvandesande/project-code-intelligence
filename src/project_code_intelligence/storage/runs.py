@@ -127,12 +127,30 @@ _LOAD_RUNS_SELECT = """
            finished_at IS NULL AS running
     FROM project_code_intel_index_runs
 """
-_LOAD_RUNS_SUFFIX = "ORDER BY started_at DESC, id DESC LIMIT %s"
 
 
 def load_index_runs(conn: db.DbConnection, *, collection: str | None = None, limit: int = 20) -> list[db.DbRow]:
-    """Newest run rows, optionally scoped to one collection. Read side; raises on DB errors."""
+    """Newest run rows plus every unfinished run, optionally scoped to one collection.
+
+    Unfinished runs with a heartbeat in the last hour bypass the limit window:
+    a burst of newer finished runs (for example failed hook retries) must not
+    push a long-running run out of the status view. Abandoned unfinished rows
+    (killed processes that never got finish-stamped) keep an old heartbeat, so
+    they stay inside the normal window and age out. Read side; raises on DB
+    errors.
+    """
     clause = "WHERE collection = %s" if collection is not None else ""
     params: list[object] = [collection] if collection is not None else []
     params.append(limit)
-    return conn.execute("\n".join([_LOAD_RUNS_SELECT, clause, _LOAD_RUNS_SUFFIX]), params).fetchall()
+    sql = "\n".join([
+        "WITH scoped AS (",
+        _LOAD_RUNS_SELECT,
+        clause,
+        "),",
+        "newest AS (SELECT * FROM scoped ORDER BY started_at DESC, id DESC LIMIT %s)",
+        "SELECT * FROM newest",
+        "UNION",
+        "SELECT * FROM scoped WHERE running AND heartbeat_at > now() - interval '1 hour'",
+        "ORDER BY started_at DESC, id DESC",
+    ])
+    return conn.execute(sql, params).fetchall()

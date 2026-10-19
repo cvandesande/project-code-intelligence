@@ -8,7 +8,11 @@ from urllib.parse import urlsplit
 
 from project_code_intelligence import config, console_ui, db
 from project_code_intelligence.doctor.common import result, row_text
-from project_code_intelligence.mcp.status import annotate_status_snapshots, snapshot_matches_path
+from project_code_intelligence.mcp.status import (
+    annotate_status_snapshots,
+    snapshot_checkout_root,
+    snapshot_matches_path,
+)
 from project_code_intelligence.storage import load_latest_snapshots
 
 if TYPE_CHECKING:
@@ -116,11 +120,35 @@ def _relevant_snapshots() -> list[JsonObject]:
     except db.DatabaseConnectionError:
         return []
     cwd = Path.cwd()
-    return [
+    matching = [
         snap
         for snap in annotate_status_snapshots(rows)
         if snap.get("head_status") != "unknown" and snapshot_matches_path(snap, cwd)
     ]
+    return _best_per_checkout(matching)
+
+
+def _best_per_checkout(snapshots: list[JsonObject]) -> list[JsonObject]:
+    """Collapse to one snapshot per resolved checkout path.
+
+    A checkout accumulates one snapshot row per branch ever indexed there;
+    after a branch switch the old rows compare against the new HEAD and stay
+    stale forever, which is history, not a freshness problem. Keep the
+    current row(s) for a checkout when any exist; otherwise keep the newest
+    row, which is the one the reindex hook updates.
+    """
+    grouped: dict[str, list[JsonObject]] = {}
+    best: list[JsonObject] = []
+    for snap in snapshots:
+        root = snapshot_checkout_root(snap)
+        if root is None:
+            best.append(snap)
+        else:
+            grouped.setdefault(str(root), []).append(snap)
+    for rows_for_checkout in grouped.values():
+        current = [s for s in rows_for_checkout if s.get("head_status") == "current"]
+        best.extend(current or [max(rows_for_checkout, key=lambda s: console_ui.coerce_int(s.get("id")))])
+    return best
 
 
 def check_index_freshness() -> list[CheckResult]:

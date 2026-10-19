@@ -139,6 +139,15 @@ class LoadIndexRunsTests(unittest.TestCase):
         self.assertNotIn("WHERE collection", query)
         self.assertEqual(params, [20])
 
+    def test_unfinished_runs_bypass_the_limit_window(self) -> None:
+        # A burst of newer finished runs (failed hook retries) must not push
+        # a long-running run out of the status view.
+        conn = QueuedConnection([FakeCursor(many=[])])
+        _ = storage_runs.load_index_runs(cast("pci_db.DbConnection", conn))
+        query, _params = conn.calls[0]
+        self.assertIn("UNION", query)
+        self.assertIn("SELECT * FROM scoped WHERE running AND heartbeat_at > now() - interval '1 hour'", query)
+
 
 class ActiveRunHolderTests(unittest.TestCase):
     def test_roundtrip_and_reset(self) -> None:

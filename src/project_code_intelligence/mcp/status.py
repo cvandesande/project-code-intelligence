@@ -186,6 +186,19 @@ def _snapshot_repo_root_candidates(snapshot: Json) -> list[Path]:
     return list(dict.fromkeys(candidates))
 
 
+def snapshot_checkout_root(snapshot: Json) -> Path | None:
+    """First existing local checkout this snapshot resolves to, or None.
+
+    Several snapshot rows (one per branch ever indexed there) can resolve to
+    the same checkout; this key lets callers group them and reason about the
+    checkout's present state instead of each historical branch row.
+    """
+    for candidate in _snapshot_repo_root_candidates(snapshot):
+        if candidate.exists():
+            return candidate.resolve()
+    return None
+
+
 def snapshot_matches_path(snapshot: Json, path: Path) -> bool:
     """True if this snapshot refers to ``path`` or to a checkout nested under it.
 
@@ -212,9 +225,9 @@ def _upstream_lag(snapshot: Json) -> int | None:
 
     Reads only refs git already has (no ``fetch``, no network call): a checkout that
     matches its own indexed commit can still be an ancestor of a long-abandoned branch,
-    which is exactly what a same-repo comparison to HEAD can't catch (see the 2026-08-13
-    demo-rust incident: index and local HEAD agreed while local HEAD sat 134 commits
-    behind origin/main -- "current" was true and still misleading).
+    which is exactly what a same-repo comparison to HEAD can't catch (observed 2026-08-13:
+    index and local HEAD agreed while local HEAD sat 134 commits behind origin/main --
+    "current" was true and still misleading).
     """
     for candidate in _snapshot_repo_root_candidates(snapshot):
         lag = git_utils.run_git(candidate, ["rev-list", "--count", "HEAD..@{upstream}"])
