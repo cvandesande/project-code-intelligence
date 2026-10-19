@@ -612,6 +612,64 @@ class StorageContractTests(unittest.TestCase):
         self.assertEqual(same_dir.target_path, "src/main.py")
         self.assertIsNone(missing.target_record_id)
 
+    def test_pre_resolve_edge_targets_binds_bare_name_to_unambiguous_qualified_definition(self) -> None:
+        """A call site records `start`; the definition is stored `Configurator.start`."""
+        fake = FakeRowsConnection([
+            cast(
+                "list[db.DbRow]",
+                [
+                    {
+                        "symbol": "Configurator.start",
+                        "record_id": "src/configurator.py::function::Configurator.start::000001",
+                        "source_path": "src/configurator.py",
+                    },
+                ],
+            )
+        ])
+        edge = IntelEdge(
+            source_record_id="src/main.py::function::caller::000010",
+            edge_type="call_candidate",
+            target_symbol="start",
+            source_path="src/main.py",
+        )
+
+        resolved = pre_resolve_edge_targets(cast("db.DbConnection", fake), SnapshotScope("test", ".", 7), [edge])
+
+        self.assertEqual(resolved, 1)
+        self.assertEqual(edge.target_record_id, "src/configurator.py::function::Configurator.start::000001")
+        self.assertEqual(edge.target_path, "src/configurator.py")
+
+    def test_pre_resolve_edge_targets_leaves_ambiguous_qualified_suffix_unresolved(self) -> None:
+        """Two qualified names end in the bare callee name: binding either one is a guess."""
+        fake = FakeRowsConnection([
+            cast(
+                "list[db.DbRow]",
+                [
+                    {
+                        "symbol": "Bar.start",
+                        "record_id": "src/bar.py::function::Bar.start::000001",
+                        "source_path": "src/bar.py",
+                    },
+                    {
+                        "symbol": "Foo.start",
+                        "record_id": "src/foo.py::function::Foo.start::000001",
+                        "source_path": "src/foo.py",
+                    },
+                ],
+            )
+        ])
+        edge = IntelEdge(
+            source_record_id="src/main.py::function::caller::000010",
+            edge_type="call_candidate",
+            target_symbol="start",
+            source_path="src/main.py",
+        )
+
+        resolved = pre_resolve_edge_targets(cast("db.DbConnection", fake), SnapshotScope("test", ".", 7), [edge])
+
+        self.assertEqual(resolved, 0)
+        self.assertIsNone(edge.target_record_id)
+
     def test_pre_resolve_edge_targets_batches_and_reports_progress(self) -> None:
         fake = FakeRowsConnection([
             cast(
@@ -657,8 +715,8 @@ class StorageContractTests(unittest.TestCase):
         self.assertEqual(resolved, 3)
         self.assertEqual(pre_resolvable_edge_count(edges), 0)
         self.assertEqual(progress, [2, 1])
-        self.assertEqual(fake.params[0], [7, "test", ".", ["alpha", "beta"]])
-        self.assertEqual(fake.params[1], [7, "test", ".", ["gamma"]])
+        self.assertEqual(fake.params[0], [7, "test", ".", ["alpha", "beta"], ["alpha", "beta"]])
+        self.assertEqual(fake.params[1], [7, "test", ".", ["gamma"], ["gamma"]])
 
     def test_pre_resolve_edge_targets_skips_non_resolvable_member_calls(self) -> None:
         fake = FakeRowsConnection([
@@ -739,14 +797,77 @@ class StorageContractTests(unittest.TestCase):
 
         self.assertEqual(resolved, 2)
         self.assertEqual(progress, [3])
-        self.assertEqual(fake.params[0], [7, None, None, None, 0, 3, 7, "test", "."])
-        self.assertEqual(fake.params[1], [7, "target", "target", "target", 42, 3, 7, "test", "."])
+        self.assertEqual(fake.params[0], [7, None, None, None, 0, 3, 7, "test", ".", 7, "test", "."])
+        self.assertEqual(fake.params[1], [7, "target", "target", "target", 42, 3, 7, "test", ".", 7, "test", "."])
         self.assertIn("candidate_edges AS MATERIALIZED", fake.sql[0])
         self.assertIn("IS NOT DISTINCT FROM", fake.sql[0])
         self.assertIn("metadata->>'target_resolvable'", fake.sql[0])
+        self.assertIn("suffix_choices AS MATERIALIZED", fake.sql[0])
+        self.assertIn("HAVING count(DISTINCT r.symbol) = 1", fake.sql[0])
         self.assertIn(
             "r.symbol_kind IN ('function', 'method', 'constant', 'class', 'enum', 'shell_function')", fake.sql[0]
         )
+
+
+class QualifiedCallSiteResolutionTests(unittest.TestCase):
+    """Call sites that name their receiver bind exactly; a module-qualified one falls back."""
+
+    def test_binds_qualified_call_site_despite_ambiguous_member(self) -> None:
+        """`DatabaseSettings.from_env` names its receiver, so a second `from_env` is not a guess."""
+        fake = FakeRowsConnection([
+            cast(
+                "list[db.DbRow]",
+                [
+                    {
+                        "symbol": "DatabaseSettings.from_env",
+                        "record_id": "src/db.py::function::DatabaseSettings.from_env::000001",
+                        "source_path": "src/db.py",
+                    },
+                    {
+                        "symbol": "OtherSettings.from_env",
+                        "record_id": "src/other.py::function::OtherSettings.from_env::000001",
+                        "source_path": "src/other.py",
+                    },
+                ],
+            )
+        ])
+        edge = IntelEdge(
+            source_record_id="src/main.py::function::build::000010",
+            edge_type="call_candidate",
+            target_symbol="DatabaseSettings.from_env",
+            source_path="src/main.py",
+        )
+
+        resolved = pre_resolve_edge_targets(cast("db.DbConnection", fake), SnapshotScope("test", ".", 7), [edge])
+
+        self.assertEqual(resolved, 1)
+        self.assertEqual(edge.target_record_id, "src/db.py::function::DatabaseSettings.from_env::000001")
+
+    def test_falls_back_to_member_when_receiver_is_a_module(self) -> None:
+        """`evidence.collect_evidence` is a module call: no such qualified definition, so the member binds."""
+        fake = FakeRowsConnection([
+            cast(
+                "list[db.DbRow]",
+                [
+                    {
+                        "symbol": "collect_evidence",
+                        "record_id": "src/evidence.py::function::collect_evidence::000001",
+                        "source_path": "src/evidence.py",
+                    },
+                ],
+            )
+        ])
+        edge = IntelEdge(
+            source_record_id="src/mcp/tools.py::function::search::000010",
+            edge_type="call_candidate",
+            target_symbol="evidence.collect_evidence",
+            source_path="src/mcp/tools.py",
+        )
+
+        resolved = pre_resolve_edge_targets(cast("db.DbConnection", fake), SnapshotScope("test", ".", 7), [edge])
+
+        self.assertEqual(resolved, 1)
+        self.assertEqual(edge.target_record_id, "src/evidence.py::function::collect_evidence::000001")
 
 
 class LockIngestBranchTests(unittest.TestCase):

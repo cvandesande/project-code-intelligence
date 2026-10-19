@@ -153,6 +153,13 @@ class ExtractReferencedSymbolsTests(unittest.TestCase):
         symbols = extract_referenced_symbols("a() a() a()")
         self.assertEqual(symbols, ["a"])
 
+    def test_extract_referenced_symbols_skips_language_keywords(self) -> None:
+        text = "with (open(path) as handle): pass"
+
+        self.assertEqual(extract_referenced_symbols(text, language="python"), ["open"])
+        # Per-language on purpose: `with(...)` is a call wherever `with` is not reserved.
+        self.assertEqual(extract_referenced_symbols(text), ["open", "with"])
+
     def test_extract_referenced_symbols_caps_at_160_entries(self) -> None:
         text = " ".join(f"sym{i}()" for i in range(200))
         symbols = extract_referenced_symbols(text)
@@ -473,6 +480,19 @@ class MakeCodeRecordTests(unittest.TestCase):
         intel_file = _make_intel_file()
         record = make_code_record(intel_file, [(1, "a()")], ordinal=1, reason="parser block")
         self.assertEqual(record.confidence_kind, "high_confidence_fact")
+
+    def test_make_code_record_drops_the_file_language_keywords(self) -> None:
+        text = "with (open(path) as handle): pass"
+
+        python_record = make_code_record(
+            _make_intel_file(language="python"), [(1, text)], ordinal=1, reason="parser block"
+        )
+        c_record = make_code_record(
+            _make_intel_file(source_path="src/foo.c", language="c"), [(1, text)], ordinal=1, reason="parser block"
+        )
+
+        self.assertEqual(cast("list[JsonValue]", python_record.metadata.get("symbols_referenced") or []), ["open"])
+        self.assertEqual(cast("list[JsonValue]", c_record.metadata.get("symbols_referenced") or []), ["open", "with"])
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import keyword
 import re
 from bisect import bisect_right
 from dataclasses import dataclass
@@ -190,7 +191,7 @@ def make_code_record(intel_file: IntelFile, lines: list[tuple[int, str]], ordina
     line_end = lines[-1][0]
     body = "\n".join(line for _lineno, line in lines)
     extracts = common_extracts(body)
-    symbols = extract_referenced_symbols(body)
+    symbols = extract_referenced_symbols(body, language=intel_file.language)
     metadata: JsonObject = {
         **extracts,
         "symbols_referenced": symbols[:120],
@@ -215,41 +216,55 @@ def make_code_record(intel_file: IntelFile, lines: list[tuple[int, str]], ordina
     )
 
 
-def extract_referenced_symbols(text: str) -> list[str]:
+NON_CALL_KEYWORDS = frozenset({
+    # C/C++
+    "if",
+    "for",
+    "while",
+    "switch",
+    "return",
+    "sizeof",
+    "defined",
+    "do",
+    "else",
+    "case",
+    "catch",
+    # Go anonymous function literals: `func() { ... }`
+    "func",
+    # JS/TS: `function() { ... }`, typeof(x), new Foo(), delete(x), void(0), throw(e), await(p)
+    "function",
+    "typeof",
+    "instanceof",
+    "new",
+    "delete",
+    "void",
+    "throw",
+    "yield",
+    "await",
+    # Rust
+    "fn",
+    "match",
+    "loop",
+    # Python
+    "lambda",
+})
+
+# A language's reserved words can never name a callable, yet syntax that puts a parenthesis
+# right after one makes a name-before-paren scan report it as a call: `with (open(f) as h):`,
+# `except (OSError, ValueError):`, `assert (a == b)`. Hard keywords only, so soft keywords stay
+# callable (`match(x)` and `type(x)` are real calls).
+_LANGUAGE_NON_CALL_KEYWORDS: dict[str, frozenset[str]] = {"python": frozenset(keyword.kwlist)}
+
+
+def non_call_keywords(language: str) -> frozenset[str]:
+    """Names a name-before-paren scan must not read as a call, for one language."""
+    return NON_CALL_KEYWORDS | _LANGUAGE_NON_CALL_KEYWORDS.get(language, frozenset())
+
+
+def extract_referenced_symbols(text: str, *, language: str = "") -> list[str]:
     refs = [match.group(1) for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", text)]
-    keywords = {
-        # C/C++
-        "if",
-        "for",
-        "while",
-        "switch",
-        "return",
-        "sizeof",
-        "defined",
-        "do",
-        "else",
-        "case",
-        "catch",
-        # Go anonymous function literals: `func() { ... }`
-        "func",
-        # JS/TS: `function() { ... }`, typeof(x), new Foo(), delete(x), void(0), throw(e), await(p)
-        "function",
-        "typeof",
-        "instanceof",
-        "new",
-        "delete",
-        "void",
-        "throw",
-        "yield",
-        "await",
-        # Rust
-        "fn",
-        "match",
-        "loop",
-        # Python
-        "lambda",
-    }
-    return sorted({ref for ref in refs if ref not in keywords})[:160]
+    skip = non_call_keywords(language)
+    return sorted({ref for ref in refs if ref not in skip})[:160]
 
 
 def _covered_line_numbers(records: list[IntelRecord]) -> set[int]:
@@ -270,7 +285,7 @@ def make_module_record(intel_file: IntelFile, lines: list[tuple[int, str]], ordi
     body = "\n".join(line for _lineno, line in lines)
     metadata: JsonObject = {
         **common_extracts(body),
-        "symbols_referenced": extract_referenced_symbols(body)[:120],
+        "symbols_referenced": extract_referenced_symbols(body, language=intel_file.language)[:120],
         "module_level": True,
         "chunk_ordinal": ordinal,
     }

@@ -72,6 +72,7 @@ from project_code_intelligence.parsers import (
     rust_records,
     security_records,
 )
+from project_code_intelligence.parsers.python import python_class_owner, python_referenced_symbols
 from project_code_intelligence.records import line_for_offset_with_index, line_offsets, line_window_records
 from project_code_intelligence.runtime import RuntimeMetrics
 from project_code_intelligence.sarif import (
@@ -1000,6 +1001,137 @@ class CodeIntelParserTests(unittest.TestCase):
         self.assertFalse(settings.preembed)
         self.assertEqual(settings.runtime_heartbeat_seconds, 60)
         self.assertEqual(settings.run_ledger_seconds, 0)
+
+    def test_python_records_do_not_emit_self_name_call_edges(self) -> None:
+        # `def start(self)` puts "start" in the body text the reference extractor
+        # scans. Without the own-name guard this emits a call edge that the resolver
+        # binds to the unrelated module-level `start` in the same file.
+        text = "\n".join([
+            "class Foo:",
+            "    def start(self):",
+            "        return helper()",
+            "",
+            "def start():",
+            "    return 1",
+        ])
+
+        records, edges = python_records(fixture_file("pkg/example.py", "python"), text, 2400, 0)
+        method = next(
+            record for record in records if record.record_type == "symbol_definition" and record.symbol == "Foo.start"
+        )
+        targets = sorted(edge.target_symbol or "" for edge in edges if edge.source_record_id == method.record_id)
+
+        self.assertEqual(targets, ["helper"])
+        self.assertEqual(method.metadata["symbols_referenced"], ["helper"])
+
+
+class PythonReferenceTests(unittest.TestCase):
+    def test_self_call_qualifies_with_the_enclosing_class(self) -> None:
+        # Own-name filtering happens in make_symbol_chunk; this covers the receiver rewrite.
+        self.assertEqual(
+            python_referenced_symbols("    return self.validate()", class_owner="Settings"),
+            ["Settings.validate"],
+        )
+        self.assertEqual(
+            python_referenced_symbols("    return cls.coerce()", class_owner="Settings"),
+            ["Settings.coerce"],
+        )
+        # `cls(...)` instantiates the class, and `self.a.b()` calls `a`, not `b`.
+        self.assertEqual(python_referenced_symbols("    return cls(env)", class_owner="Settings"), ["Settings"])
+        self.assertEqual(
+            python_referenced_symbols("    return self.builder.build()", class_owner="Settings"),
+            ["Settings.builder"],
+        )
+        # No enclosing class: keep the plain member the bare scan would have produced.
+        self.assertEqual(python_referenced_symbols("    return self.validate()", class_owner=""), ["self.validate"])
+
+    def test_self_call_inside_nested_function_qualifies_with_the_class(self) -> None:
+        # `self` inside a closure in a method still means the instance, so the owner is the
+        # class, not the intermediate function name.
+        qualified = "Settings.load.wrapper"
+        self.assertEqual(python_class_owner(qualified, is_class=False), "Settings")
+        self.assertEqual(python_class_owner("Outer.Inner.method", is_class=False), "Outer.Inner")
+        self.assertEqual(python_class_owner("top", is_class=False), "")
+        self.assertEqual(python_class_owner("Settings", is_class=True), "Settings")
+
+    def test_dotted_call_keeps_receiver_and_member(self) -> None:
+        text = "\n".join([
+            "settings = DatabaseSettings.from_env(env)",
+            "os.path.join(a, b)",
+            "plain()",
+            "if cond:",
+            "    pass",
+        ])
+
+        self.assertEqual(
+            python_referenced_symbols(text, class_owner=""),
+            ["DatabaseSettings.from_env", "path.join", "plain"],
+        )
+
+    def test_records_bind_a_class_qualified_call_site_to_the_method(self) -> None:
+        text = "\n".join([
+            "class Settings:",
+            "    @classmethod",
+            "    def from_env(cls, env):",
+            "        return env",
+            "",
+            "def build():",
+            "    return Settings.from_env({})",
+        ])
+
+        records, edges = python_records(fixture_file("pkg/example.py", "python"), text, 2400, 0)
+        build = next(record for record in records if record.symbol == "build")
+        targets = {edge.target_symbol for edge in edges if edge.source_record_id == build.record_id}
+
+        self.assertEqual(targets, {"Settings.from_env"})
+
+    def test_signature_lines_are_not_calls(self) -> None:
+        body = "\n".join([
+            "class FakeThread(Thread):",
+            "    def start(self, flag):",
+            "        return flag",
+            "",
+            "    async def stop(self):",
+            "        def inner():",
+            "            pass",
+            "",
+            "@decorator(enabled=True)",
+            "def top():",
+            "    pass",
+        ])
+
+        # A class record's body contains its methods' signature lines; reading those as calls
+        # made the class call whatever `start`/`stop`/`inner` resolved to elsewhere.
+        self.assertEqual(python_referenced_symbols(body, class_owner="FakeThread"), ["decorator"])
+
+    def test_python_keywords_before_a_parenthesis_are_not_calls(self) -> None:
+        body = "\n".join([
+            "with (open(path) as handle):",
+            "    assert (handle is not None)",
+            "try:",
+            "    pass",
+            "except (OSError, ValueError):",
+            "    pass",
+        ])
+
+        self.assertEqual(python_referenced_symbols(body, class_owner=""), ["open"])
+        # Soft keywords stay callable, and `type` is not in the shared keyword set. `match` is,
+        # from the Rust entries, so a Python callable named `match` loses its reference.
+        self.assertEqual(python_referenced_symbols("return type(value)", class_owner=""), ["type"])
+
+    def test_class_record_does_not_call_its_own_method_names(self) -> None:
+        text = "\n".join([
+            "class FakeThread:",
+            "    def start(self):",
+            "        return None",
+        ])
+
+        records, edges = python_records(fixture_file("pkg/example.py", "python"), text, 2400, 0)
+        fake = next(record for record in records if record.symbol == "FakeThread")
+        targets = {edge.target_symbol for edge in edges if edge.source_record_id == fake.record_id}
+
+        self.assertEqual(targets, set())
+        self.assertEqual(fake.metadata["symbols_referenced"], [])
 
 
 class TypescriptParserRegressionTests(unittest.TestCase):

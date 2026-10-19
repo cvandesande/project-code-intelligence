@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence import db
-from project_code_intelligence.common import sha256_text
+from project_code_intelligence.common import last_symbol_component, sha256_text
 from project_code_intelligence.storage.copy import copy_unchanged_edges, copy_unchanged_parser_failures
 from project_code_intelligence.storage.schema import (
     ensure_schema,
@@ -630,9 +630,18 @@ def _load_symbol_definition_index(
     scope: SnapshotScope,
     target_symbols: set[str],
 ) -> dict[str, _SymbolDefinitionChoices]:
-    """Look up symbol_definition records visible in one snapshot."""
+    """Look up symbol_definition records visible in one snapshot.
+
+    A call site records either a bare callee name (``from_env``) or a receiver-qualified one
+    (``DatabaseSettings.from_env``, from the Python parser), while definitions are stored
+    qualified. Exact names win; otherwise the member segment falls back to a qualified
+    definition, and only when exactly one qualified name ends in it — two classes defining the
+    same method name produce no fallback, because guessing a receiver is worse than leaving the
+    edge unresolved.
+    """
     if not target_symbols:
         return {}
+    members = sorted({last_symbol_component(symbol) for symbol in target_symbols})
     rows = conn.execute(
         """
         SELECT r.symbol, r.record_id, r.source_path, r.symbol_kind
@@ -647,26 +656,33 @@ def _load_symbol_definition_index(
           AND r.repo = %s
           AND r.record_type = 'symbol_definition'
           AND r.symbol IS NOT NULL
-          AND r.symbol = ANY(%s::text[])
+          AND (r.symbol = ANY(%s::text[]) OR regexp_replace(r.symbol, '^.*[.]', '') = ANY(%s::text[]))
         ORDER BY r.symbol, r.source_path, r.record_id
         """,
-        [scope.snapshot_id, scope.collection, scope.repo, sorted(target_symbols)],
+        [scope.snapshot_id, scope.collection, scope.repo, sorted(target_symbols), members],
     ).fetchall()
-    definitions_by_symbol: dict[str, list[_SymbolDefinitionTarget]] = {}
+    exact: dict[str, list[_SymbolDefinitionTarget]] = {}
+    suffix: dict[str, dict[str, list[_SymbolDefinitionTarget]]] = {}
     for row in rows:
         symbol = str(row["symbol"])
-        definitions_by_symbol.setdefault(symbol, []).append(
-            _SymbolDefinitionTarget(
-                record_id=str(row["record_id"]),
-                source_path=str(row["source_path"]),
-                symbol_kind=str(row["symbol_kind"]) if row.get("symbol_kind") is not None else None,
-            )
+        definition = _SymbolDefinitionTarget(
+            record_id=str(row["record_id"]),
+            source_path=str(row["source_path"]),
+            symbol_kind=str(row["symbol_kind"]) if row.get("symbol_kind") is not None else None,
         )
-    return {
-        symbol: _symbol_definition_choices(definitions)
-        for symbol, definitions in definitions_by_symbol.items()
-        if definitions
-    }
+        if symbol in target_symbols:
+            exact.setdefault(symbol, []).append(definition)
+        suffix.setdefault(last_symbol_component(symbol), {}).setdefault(symbol, []).append(definition)
+    choices: dict[str, _SymbolDefinitionChoices] = {}
+    for symbol in target_symbols:
+        definitions = exact.get(symbol)
+        if definitions is None:
+            suffix_candidates = suffix.get(last_symbol_component(symbol)) or {}
+            if len(suffix_candidates) == 1:
+                definitions = next(iter(suffix_candidates.values()))
+        if definitions:
+            choices[symbol] = _symbol_definition_choices(definitions)
+    return choices
 
 
 _EDGE_TARGET_PRE_RESOLVE_BATCH_SIZE = 5_000
@@ -741,9 +757,12 @@ def resolve_edge_targets(
     in the stable record_id string. When multiple records share the same symbol
     name, prefer same-file matches, then same-directory matches, then anything
     else (lexicographic tiebreak) — collisions across unrelated subtrees were
-    otherwise resolving by alphabetical accident. The resolver walks unresolved
-    edges in bounded batches so large snapshots do not spend minutes in one
-    opaque UPDATE statement.
+    otherwise resolving by alphabetical accident. Exact-name matches take that
+    whole tier first; a bare callee name then falls back to a qualified definition
+    (``from_env`` -> ``DatabaseSettings.from_env``) only when exactly one qualified
+    name ends in it, so an ambiguous method name stays unresolved instead of
+    binding to an arbitrary class. The resolver walks unresolved edges in bounded
+    batches so large snapshots do not spend minutes in one opaque UPDATE statement.
     """
     resolved = 0
     last_target_symbol: str | None = None
@@ -752,7 +771,8 @@ def resolve_edge_targets(
         row = conn.execute(
             """
             WITH candidate_edges AS MATERIALIZED (
-                SELECT id, source_path, target_symbol
+                SELECT id, source_path, target_symbol,
+                       regexp_replace(target_symbol, '^.*[.]', '') AS target_member
                 FROM project_code_intel_edges
                 WHERE snapshot_id = %s
                   AND target_record_id IS NULL
@@ -773,7 +793,7 @@ def resolve_edge_targets(
                     (array_agg(id ORDER BY target_symbol DESC, id DESC))[1] AS last_edge_id
                 FROM candidate_edges
             ),
-            resolved_pairs AS MATERIALIZED (
+            exact_choices AS MATERIALIZED (
                 SELECT DISTINCT ON (c.source_path, c.target_symbol)
                        c.source_path AS edge_source_path,
                        c.target_symbol,
@@ -812,6 +832,55 @@ def resolve_edge_targets(
                 ) r
                 ORDER BY c.source_path, c.target_symbol
             ),
+            suffix_choices AS MATERIALIZED (
+                SELECT c.source_path AS edge_source_path,
+                       c.target_symbol,
+                       (array_agg(r.record_id ORDER BY
+                            CASE
+                                WHEN r.source_path = c.source_path THEN 0
+                                WHEN regexp_replace(r.source_path, '/[^/]+$', '')
+                                   = regexp_replace(c.source_path, '/[^/]+$', '') THEN 1
+                                ELSE 2
+                            END,
+                            r.source_path,
+                            r.record_id))[1] AS record_id,
+                       (array_agg(r.source_path ORDER BY
+                            CASE
+                                WHEN r.source_path = c.source_path THEN 0
+                                WHEN regexp_replace(r.source_path, '/[^/]+$', '')
+                                   = regexp_replace(c.source_path, '/[^/]+$', '') THEN 1
+                                ELSE 2
+                            END,
+                            r.source_path,
+                            r.record_id))[1] AS target_path
+                FROM candidate_edges c
+                JOIN project_code_intel_records r
+                  ON right(r.symbol, length(c.target_member) + 1) = '.' || c.target_member
+                JOIN project_code_intel_files f
+                  ON f.collection = r.collection
+                 AND f.repo = r.repo
+                 AND f.source_path = r.source_path
+                 AND r.file_sha256 = coalesce(f.file_sha256, '')
+                WHERE f.snapshot_id = %s
+                  AND r.collection = %s
+                  AND r.repo = %s
+                  AND r.record_type = 'symbol_definition'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM exact_choices e
+                      WHERE e.edge_source_path IS NOT DISTINCT FROM c.source_path
+                        AND e.target_symbol = c.target_symbol
+                  )
+                GROUP BY c.source_path, c.target_symbol
+                -- The member segment of the callee name binds to a qualified definition only
+                -- when one qualified name ends in it; two classes with the same method name
+                -- leave the edge unresolved rather than guessing a receiver type.
+                HAVING count(DISTINCT r.symbol) = 1
+            ),
+            resolved_pairs AS MATERIALIZED (
+                SELECT edge_source_path, target_symbol, record_id, target_path FROM exact_choices
+                UNION ALL
+                SELECT edge_source_path, target_symbol, record_id, target_path FROM suffix_choices
+            ),
             updated AS (
                 UPDATE project_code_intel_edges e
                 SET target_record_id = p.record_id,
@@ -837,6 +906,9 @@ def resolve_edge_targets(
                 last_target_symbol,
                 last_edge_id,
                 max(1, batch_size),
+                scope.snapshot_id,
+                scope.collection,
+                scope.repo,
                 scope.snapshot_id,
                 scope.collection,
                 scope.repo,

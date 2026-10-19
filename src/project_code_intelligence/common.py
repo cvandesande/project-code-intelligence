@@ -127,6 +127,15 @@ def database_scope_path_for_root_repos(root: Path, repos: list[str]) -> Path:
     return resolved_root
 
 
+def last_symbol_component(symbol: str) -> str:
+    """Bare name of a possibly qualified symbol: ``DatabaseSettings.from_env`` -> ``from_env``.
+
+    Call sites record bare names while parsers store qualified ones, so every
+    name-based join between the two needs this projection.
+    """
+    return symbol.rpartition(".")[2]
+
+
 def source_path_for(repo: str, rel_path: str) -> str:
     return rel_path if repo == "." else f"{repo}/{rel_path}"
 

@@ -161,9 +161,17 @@ def bounded_brace_body(
 
 def make_symbol_chunk(intel_file: IntelFile, spec: SymbolChunkSpec) -> tuple[IntelRecord, IntelRecord, list[IntelEdge]]:
     source_refs = (
-        spec.referenced_symbols if spec.referenced_symbols is not None else extract_referenced_symbols(spec.body)
+        spec.referenced_symbols
+        if spec.referenced_symbols is not None
+        else extract_referenced_symbols(spec.body, language=intel_file.language)
     )
-    refs = sorted({ref for ref in source_refs if ref not in spec.non_resolvable_targets})[:160]
+    # A definition's own name sits on its signature line, so a body scan always
+    # finds it. The resolver binds by name, which turns that self-reference into a
+    # call edge to any same-named definition elsewhere (a method `Foo.start` gained
+    # a callee in an unrelated TypeScript file). Recursive self-calls carry no
+    # delete-safety information either: evidence drops self-edges on both sides.
+    own_names = {spec.name, spec.name.rpartition(".")[2]}
+    refs = sorted({ref for ref in source_refs if ref not in spec.non_resolvable_targets and ref not in own_names})[:160]
     meta = {
         **common_extracts(spec.body),
         "symbols_defined": [spec.name],
