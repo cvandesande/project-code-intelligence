@@ -5,6 +5,7 @@ import os
 import queue
 import unittest
 import urllib.error
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
@@ -17,9 +18,11 @@ import project_code_intelligence.embedding.utils as _embedding_utils
 from project_code_intelligence import db, process
 from project_code_intelligence.embedding.endpoint import clear_embedding_endpoint_framework_cache
 from project_code_intelligence.embeddings import (
+    CONTRACT_PACKAGES,
     EmbeddingBackend,
     EmbeddingEndpointUnavailableError,
     EmbeddingRunConfig,
+    client_library_versions,
     embed_items_with_retry,
     embed_record_batch,
     embed_with_endpoint,
@@ -464,7 +467,13 @@ class EmbeddingContractTests(unittest.TestCase):
         )
         self.assertEqual(
             embedding_contract(run_config, "[0.1,0.2]"),
-            {"version": 1, "backend": "endpoint", "model": "demo", "dimensions": 2},
+            {
+                "version": 1,
+                "backend": "endpoint",
+                "model": "demo",
+                "dimensions": 2,
+                "client_versions": client_library_versions(),
+            },
         )
 
     def test_preembedding_records_same_metadata_contract_as_post_insert_embedding(self) -> None:
@@ -653,6 +662,14 @@ class EmbeddingContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             require_compatible_embedding_contract(existing, incompatible_dimensions)
 
+        # Deliberate: an inference-library upgrade that leaves model and dimensions
+        # alone must not force a full re-embed, so client_versions is recorded but
+        # never compared -- in either direction, including against rows written
+        # before the field existed.
+        upgraded = dict(compatible, client_versions={"mlx": "0.32.4", "transformers": "5.20.1"})
+        require_compatible_embedding_contract(existing, upgraded)
+        require_compatible_embedding_contract(upgraded, existing)
+
     def test_snapshot_embedding_contract_parses_snapshot_metadata(self) -> None:
         metadata = {"embedding_contract": {"version": 1, "backend": "endpoint", "model": "demo", "dimensions": 3}}
 
@@ -749,6 +766,32 @@ class EmbeddingContractTests(unittest.TestCase):
         self.assertEqual(embedded, [])
         self.assertEqual(skipped_count, 1)
         self.assertEqual(skipped, [("a", "context exceeded", 800)])
+
+
+class EmbeddingContractProvenanceTests(unittest.TestCase):
+    def test_contract_records_and_tolerates_missing_client_versions(self) -> None:
+        # A CPU-only or container-hosted setup has some of these installed and
+        # others not; the contract must record what is actually present rather
+        # than fail the index run over a missing distribution.
+        run_config = EmbeddingRunConfig(
+            backend=EmbeddingBackend(
+                endpoint="http://127.0.0.1:18081/v1/embeddings", endpoint_model="demo", use_llama_cli=False
+            ),
+            max_chars=800,
+        )
+
+        def lookup(package: str) -> str:
+            if package == "mlx-lm":
+                raise PackageNotFoundError(package)
+            return f"1.0-{package}"
+
+        with patch("project_code_intelligence.embedding.store.distribution_version", side_effect=lookup):
+            contract = embedding_contract(run_config, "[0.1,0.2]")
+            versions = cast("dict[str, str]", contract["client_versions"])
+
+        self.assertNotIn("mlx-lm", versions)
+        self.assertEqual(versions["transformers"], "1.0-transformers")
+        self.assertEqual(set(versions), set(CONTRACT_PACKAGES) - {"mlx-lm"})
 
 
 class ResolveEmbeddingEndpointFrameworkTests(unittest.TestCase):

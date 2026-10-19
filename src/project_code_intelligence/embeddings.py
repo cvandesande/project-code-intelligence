@@ -42,8 +42,10 @@ from project_code_intelligence.embedding.preembedding import (
     start_record_preembedding,
 )
 from project_code_intelligence.embedding.store import (
+    CONTRACT_PACKAGES,
     EMBEDDING_CONTRACT_METADATA_KEY,
     EmbeddingContractMismatchError,
+    client_library_versions,
     database_retries,
     embed_db_records,
     embedding_contract,
@@ -74,6 +76,7 @@ from project_code_intelligence.embedding.types import (
 )
 
 __all__ = [
+    "CONTRACT_PACKAGES",
     "EMBEDDING_CONTRACT_METADATA_KEY",
     "EmbeddingBackend",
     "EmbeddingContractMismatchError",
@@ -83,6 +86,7 @@ __all__ = [
     "EmbeddingRunConfig",
     "SkippedEmbeddingRow",
     "abandon_preembedding",
+    "client_library_versions",
     "code_preembedding_enabled",
     "consume_preembedding_results",
     "database_retries",

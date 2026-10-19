@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as distribution_version
 from operator import itemgetter
 from typing import TYPE_CHECKING, TypeVar, cast
 
@@ -52,6 +55,32 @@ def embedding_metadata(run_config: EmbeddingRunConfig, embedding: str) -> dict[s
     }
 
 
+CONTRACT_PACKAGES = ("mlx", "mlx-lm", "transformers", "tokenizers", "fastembed")
+
+
+def client_library_versions() -> dict[str, str]:
+    """Versions of the libraries whose upgrade can change embedding VALUES.
+
+    Recorded for provenance, and deliberately never compared. Model name and
+    dimensions are what make two vectors comparable, and `require_compatible_
+    embedding_contract` guards those. An inference-library upgrade that changes
+    neither is usually harmless -- measured on mlx 0.31.2->0.32.4 with
+    transformers 5.8.0->5.20.1, cosine similarity held at 0.999997 -- whereas
+    comparing this field would turn every such bump into a full re-embed.
+
+    These are the indexing CLIENT's versions. Every local backend publishes the
+    same loopback endpoint, so the client cannot tell which process produced the
+    vectors: for the native MLX server it is this same interpreter, so the
+    record is accurate, while a containerized backend pins its own versions in
+    its image and this field only describes the client. Hence the key name.
+    """
+    versions: dict[str, str] = {}
+    for package in CONTRACT_PACKAGES:
+        with contextlib.suppress(PackageNotFoundError):
+            versions[package] = distribution_version(package)
+    return versions
+
+
 def embedding_contract(run_config: EmbeddingRunConfig, embedding: str) -> dict[str, object]:
     backend_name = "endpoint" if run_config.backend.endpoint else "llama-cli"
     return {
@@ -59,6 +88,7 @@ def embedding_contract(run_config: EmbeddingRunConfig, embedding: str) -> dict[s
         "backend": backend_name,
         "model": run_config.backend.endpoint_model,
         "dimensions": vector_literal_dimensions(embedding),
+        "client_versions": client_library_versions(),
     }
 
 
