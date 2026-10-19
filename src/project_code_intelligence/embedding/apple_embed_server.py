@@ -8,9 +8,13 @@ Writes a PID file so pci-doctor --stop can terminate the server.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import plistlib
 import sys
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from importlib import import_module
 from pathlib import Path
@@ -50,6 +54,12 @@ else:
 _STATE_DIR = Path.home() / ".local" / "state" / "project-code-intelligence"
 APPLE_EMBED_SERVER_PID_FILE = _STATE_DIR / "pci-apple-embed-server.pid"
 APPLE_EMBED_SERVER_LOG_FILE = _STATE_DIR / "pci-apple-embed-server.log"
+APPLE_EMBED_LAUNCHD_LABEL = "com.project-code-intelligence.apple-embed"
+# The plist lives in the state dir, NOT ~/Library/LaunchAgents: LaunchAgents
+# auto-bootstrap at login, which would reload the ~600 MB model without being
+# asked. Bootstrapping by path keeps the service strictly on-demand — crash
+# restarts (KeepAlive) while loaded, gone after bootout until the next start.
+APPLE_EMBED_LAUNCHD_PLIST = _STATE_DIR / f"{APPLE_EMBED_LAUNCHD_LABEL}.plist"
 
 
 def _err(msg: str) -> None:
@@ -78,6 +88,11 @@ def apple_embed_server_is_running() -> bool:
     """Return True if a pci embed apple daemon is currently running."""
     pid = _read_pid(APPLE_EMBED_SERVER_PID_FILE)
     return pid is not None and _is_running(pid)
+
+
+def apple_embed_available() -> bool:
+    """True when this host can run the MLX server (macOS with mlx_lm importable)."""
+    return sys.platform == "darwin" and _mlx_lm_module is not None
 
 
 def apple_embed_model_name() -> str:
@@ -195,6 +210,7 @@ class AppleEmbedHTTPServer(HTTPServer):
     model: _MlxLmModel
     tokenizer: object
     model_name: str
+    last_request_monotonic: float
 
     def __init__(
         self,
@@ -209,6 +225,33 @@ class AppleEmbedHTTPServer(HTTPServer):
         self.model = model
         self.tokenizer = tokenizer
         self.model_name = model_name
+        self.last_request_monotonic = time.monotonic()
+
+    def idle_seconds(self) -> float:
+        return time.monotonic() - self.last_request_monotonic
+
+    def touch(self) -> None:
+        self.last_request_monotonic = time.monotonic()
+
+
+def apple_embed_idle_timeout_seconds() -> int:
+    """Idle seconds before the server exits to release the model (0 disables)."""
+    return config.env_int("PCI_APPLE_EMBED_IDLE_SECONDS", 1800, minimum=0)
+
+
+def idle_watchdog(server: AppleEmbedHTTPServer, timeout_seconds: int) -> None:
+    """Shut the server down after a request-free timeout.
+
+    A clean exit stays down under launchd (KeepAlive SuccessfulExit=False only
+    restarts crashes); the next embedding demand auto-starts the agent again.
+    """
+    while True:
+        remaining = timeout_seconds - server.idle_seconds()
+        if remaining <= 0:
+            _err(f"pci embed apple idle for {timeout_seconds}s; exiting to release the model.")
+            server.shutdown()
+            return
+        time.sleep(min(remaining, 60.0))
 
 
 def embedding_response(model: _MlxLmModel, tokenizer: object, model_name: str, request: JsonObject) -> JsonObject:
@@ -256,6 +299,7 @@ class AppleEmbedHandler(BaseHTTPRequestHandler):
             write_json(self, 404, json_error("not found"))
             return
         server = self._embed_server()
+        server.touch()
         try:
             request = _parse_request(self)
             payload = embedding_response(server.model, server.tokenizer, server.model_name, request)
@@ -275,6 +319,11 @@ def _serve() -> None:
     host = config.env_text("PCI_EMBEDDING_HOST", "127.0.0.1") or "127.0.0.1"
     port = config.env_int("PCI_EMBEDDING_PORT", 18081, minimum=1)
 
+    # The serve process records its own PID: under launchd there is no parent
+    # launcher to write it, and status checks read this file either way.
+    _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _ = APPLE_EMBED_SERVER_PID_FILE.write_text(str(os.getpid()) + "\n")
+
     _err(f"Loading Apple embed model: {model_name}")
     model, tokenizer = _load_model(model_name)
 
@@ -283,29 +332,102 @@ def _serve() -> None:
     )
     _err(f"pci embed apple ready on http://{host}:{port}")
     _ = sys.stderr.flush()
+    idle_timeout = apple_embed_idle_timeout_seconds()
+    if idle_timeout > 0:
+        threading.Thread(
+            target=idle_watchdog,
+            args=(server, idle_timeout),
+            name="apple-embed-idle-watchdog",
+            daemon=True,
+        ).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
+        with contextlib.suppress(OSError):
+            APPLE_EMBED_SERVER_PID_FILE.unlink()
 
 
 # ---------------------------------------------------------------------------
-# Launcher — daemonizes into _serve
+# Launcher — launchd-managed on macOS, plain daemon elsewhere
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
-    if "--serve" in sys.argv:
-        _serve()
-        return
+def _launchd_domain() -> str:
+    return f"gui/{os.getuid()}"
 
-    pid = _read_pid(APPLE_EMBED_SERVER_PID_FILE)
-    if pid is not None and _is_running(pid):
-        _err(f"pci embed apple already running (PID {pid}).")
-        return
 
+def launch_agent_plist() -> bytes:
+    """launchd job definition for the serve process.
+
+    ProgramArguments uses sys.executable so the agent tracks the install that
+    started it (the uv tool shim path is stable across `uv tool install
+    --force`; a versioned interpreter path would go stale on upgrade).
+    KeepAlive(SuccessfulExit=False) restarts crashes but lets a clean exit
+    stand. Environment carries the PCI_* embedding config visible at start
+    time, so the agent serves the same model/host/port the caller configured.
+    """
+    environment = {
+        name: value
+        for name in ("PCI_APPLE_EMBED_MODEL", "PCI_EMBEDDING_HOST", "PCI_EMBEDDING_PORT")
+        if (value := os.environ.get(name))
+    }
+    job: dict[str, object] = {
+        "Label": APPLE_EMBED_LAUNCHD_LABEL,
+        "ProgramArguments": [
+            sys.executable,
+            "-m",
+            "project_code_intelligence.embedding.apple_embed_server",
+            "--serve",
+        ],
+        "RunAtLoad": True,
+        "KeepAlive": {"SuccessfulExit": False},
+        "StandardOutPath": str(APPLE_EMBED_SERVER_LOG_FILE),
+        "StandardErrorPath": str(APPLE_EMBED_SERVER_LOG_FILE),
+    }
+    if environment:
+        job["EnvironmentVariables"] = environment
+    return plistlib.dumps(job)
+
+
+def _launchctl(args: list[str]) -> process.CompletedProcess[str]:
+    return process.run(["launchctl", *args], process.RunOptions(capture_output=True))
+
+
+def stop_launch_agent() -> bool:
+    """Unload the launchd agent; True if launchctl ran (loaded or not).
+
+    Must run BEFORE any SIGTERM/pkill fallback: killing a KeepAlive'd process
+    without booting the job out makes launchd restart it immediately.
+    """
+    try:
+        _ = _launchctl(["bootout", f"{_launchd_domain()}/{APPLE_EMBED_LAUNCHD_LABEL}"])
+    except (FileNotFoundError, OSError):
+        return False
+    return True
+
+
+def start_launch_agent() -> bool:
+    """(Re)write the plist and bootstrap it; True when launchctl succeeded."""
+    _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _ = APPLE_EMBED_LAUNCHD_PLIST.write_bytes(launch_agent_plist())
+    # bootout first so a re-start picks up a rewritten plist (e.g. after
+    # `uv tool install --force` or a model/env change); ignore "not loaded".
+    _ = stop_launch_agent()
+    try:
+        result = _launchctl(["bootstrap", _launchd_domain(), str(APPLE_EMBED_LAUNCHD_PLIST)])
+    except (FileNotFoundError, OSError):
+        return False
+    if result.returncode != 0:
+        _err(f"launchctl bootstrap failed ({result.returncode}): {result.stderr.strip()}")
+        return False
+    _err(f"pci embed apple started under launchd ({APPLE_EMBED_LAUNCHD_LABEL}). Log: {APPLE_EMBED_SERVER_LOG_FILE}")
+    return True
+
+
+def _start_daemon_fallback() -> None:
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
     with APPLE_EMBED_SERVER_LOG_FILE.open("a") as log_file:
         proc = process.popen(
@@ -319,6 +441,21 @@ def main() -> None:
         )
     _ = APPLE_EMBED_SERVER_PID_FILE.write_text(str(proc.pid) + "\n")
     _err(f"pci embed apple started (PID {proc.pid}). Log: {APPLE_EMBED_SERVER_LOG_FILE}")
+
+
+def main() -> None:
+    if "--serve" in sys.argv:
+        _serve()
+        return
+
+    pid = _read_pid(APPLE_EMBED_SERVER_PID_FILE)
+    if pid is not None and _is_running(pid):
+        _err(f"pci embed apple already running (PID {pid}).")
+        return
+
+    if sys.platform == "darwin" and start_launch_agent():
+        return
+    _start_daemon_fallback()
 
 
 if __name__ == "__main__":

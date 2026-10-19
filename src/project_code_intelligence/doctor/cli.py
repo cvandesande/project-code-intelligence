@@ -404,7 +404,14 @@ def _stop_pid_file(pid_file: Path) -> None:
 
 
 def _stop_pid_file_process() -> None:
-    """Send SIGTERM to all host-native server processes recorded in PID files."""
+    """Stop host-native embedding servers.
+
+    The launchd bootout must come before any SIGTERM/pkill: the agent is
+    KeepAlive'd, so killing its process without unloading the job makes
+    launchd restart it immediately.
+    """
+    if sys.platform == "darwin":
+        _ = apple_embed_server.stop_launch_agent()
     _stop_pid_file(APPLE_EMBED_SERVER_PID_FILE)
 
 
@@ -569,6 +576,9 @@ def clean_all() -> int:
         with contextlib.suppress(OSError):
             user_config.parent.rmdir()
         write_stdout(f"Removed generated pci-index user config at {user_config}.")
+
+    with contextlib.suppress(OSError):
+        apple_embed_server.APPLE_EMBED_LAUNCHD_PLIST.unlink()
 
     write_stdout("Clean complete.")
     return 0

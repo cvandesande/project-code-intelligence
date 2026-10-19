@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from typing_extensions import override
 
+import project_code_intelligence.embedding.endpoint as _endpoint
 import project_code_intelligence.embedding.preembedding as _preembedding
 import project_code_intelligence.embedding.utils as _embedding_utils
 from project_code_intelligence import db, process
@@ -811,6 +812,43 @@ class ResolveEmbeddingEndpointFrameworkTests(unittest.TestCase):
         self.assertEqual(first, "Apple MLX")
         self.assertEqual(second, "Apple MLX")
         self.assertEqual(read_text.call_count, 1)
+
+
+class AutostartLocalEmbeddingServerTests(unittest.TestCase):
+    @override
+    def setUp(self) -> None:
+        _endpoint.reset_autostart_state()
+        self.addCleanup(_endpoint.reset_autostart_state)
+
+    def test_disabled_by_env(self) -> None:
+        with patch.dict(os.environ, {"PCI_EMBED_AUTOSTART": "0"}, clear=False):
+            self.assertFalse(_endpoint.autostart_local_embedding_server("http://127.0.0.1:18081/v1/embeddings"))
+
+    def test_non_loopback_endpoint_is_ignored(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(_endpoint.autostart_local_embedding_server("http://10.0.0.5:18081/v1/embeddings"))
+
+    def test_running_server_is_left_alone(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(_endpoint.apple_embed_server, "apple_embed_available", return_value=True),
+            patch.object(_endpoint.apple_embed_server, "apple_embed_server_is_running", return_value=True),
+            patch.object(_endpoint.apple_embed_server, "start_launch_agent") as start_mock,
+        ):
+            self.assertFalse(_endpoint.autostart_local_embedding_server("http://127.0.0.1:18081/v1/embeddings"))
+        start_mock.assert_not_called()
+
+    def test_attempted_only_once_per_process(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(_endpoint.apple_embed_server, "apple_embed_available", return_value=True),
+            patch.object(_endpoint.apple_embed_server, "apple_embed_server_is_running", return_value=False),
+            patch.object(_endpoint.apple_embed_server, "start_launch_agent", return_value=True) as start_mock,
+            patch.object(_endpoint, "_endpoint_accepts_connections", return_value=True),
+        ):
+            self.assertTrue(_endpoint.autostart_local_embedding_server("http://127.0.0.1:18081/v1/embeddings"))
+            self.assertFalse(_endpoint.autostart_local_embedding_server("http://127.0.0.1:18081/v1/embeddings"))
+        start_mock.assert_called_once_with()
 
 
 if __name__ == "__main__":

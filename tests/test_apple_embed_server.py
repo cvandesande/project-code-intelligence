@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import plistlib
+import sys
 import tempfile
 import unittest
 from email.message import Message
@@ -371,6 +373,66 @@ class AppleEmbedHandlerPostTests(unittest.TestCase):
         self.assertEqual(payload["object"], "list")
         self.assertEqual(payload["model"], "qwen3")
         self.assertEqual(len(cast("list[object]", payload["data"])), 2)
+
+
+class LaunchAgentPlistTests(unittest.TestCase):
+    def test_plist_defines_on_demand_keepalive_job(self) -> None:
+        with patch.dict(os.environ, {"PCI_APPLE_EMBED_MODEL": "test-model"}, clear=False):
+            job = cast("JsonObject", plistlib.loads(_server.launch_agent_plist()))
+        self.assertEqual(job["Label"], _server.APPLE_EMBED_LAUNCHD_LABEL)
+        arguments = cast("list[str]", job["ProgramArguments"])
+        self.assertEqual(arguments[0], sys.executable)
+        self.assertEqual(arguments[-1], "--serve")
+        self.assertEqual(job["KeepAlive"], {"SuccessfulExit": False})
+        environment = cast("JsonObject", job["EnvironmentVariables"])
+        self.assertEqual(environment["PCI_APPLE_EMBED_MODEL"], "test-model")
+
+    def test_plist_lives_outside_launch_agents_dir(self) -> None:
+        # ~/Library/LaunchAgents auto-bootstraps at login; the on-demand
+        # contract requires the job to stay down until the next start.
+        self.assertNotIn("LaunchAgents", str(_server.APPLE_EMBED_LAUNCHD_PLIST))
+
+    def test_stop_launch_agent_boots_the_job_out(self) -> None:
+        completed = MagicMock(returncode=0, stderr="")
+        with patch.object(_server.process, "run", return_value=completed) as run_mock:
+            self.assertTrue(_server.stop_launch_agent())
+        command = cast("list[str]", run_mock.call_args.args[0])
+        self.assertEqual(command[0], "launchctl")
+        self.assertEqual(command[1], "bootout")
+        self.assertTrue(command[2].endswith(_server.APPLE_EMBED_LAUNCHD_LABEL))
+
+    def test_stop_launch_agent_survives_missing_launchctl(self) -> None:
+        with patch.object(_server.process, "run", side_effect=FileNotFoundError):
+            self.assertFalse(_server.stop_launch_agent())
+
+
+class _FakeIdleServer:
+    """Typed stand-in for AppleEmbedHTTPServer in watchdog tests."""
+
+    def __init__(self) -> None:
+        self.shutdown_calls = 0
+        self._idle = 10.0
+
+    def idle_seconds(self) -> float:
+        return self._idle
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+
+class IdleTimeoutTests(unittest.TestCase):
+    def test_default_is_thirty_minutes(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_server.apple_embed_idle_timeout_seconds(), 1800)
+
+    def test_zero_disables(self) -> None:
+        with patch.dict(os.environ, {"PCI_APPLE_EMBED_IDLE_SECONDS": "0"}, clear=False):
+            self.assertEqual(_server.apple_embed_idle_timeout_seconds(), 0)
+
+    def test_watchdog_shuts_down_after_idle_timeout(self) -> None:
+        server = _FakeIdleServer()
+        _server.idle_watchdog(cast("AppleEmbedHTTPServer", server), 5)
+        self.assertEqual(server.shutdown_calls, 1)
 
 
 if __name__ == "__main__":

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import json
+import socket
 import time
 import urllib.error
 from typing import TYPE_CHECKING, cast
@@ -11,6 +13,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from project_code_intelligence import config, db, http_client
 from project_code_intelligence import runtime as runtime_state
+from project_code_intelligence.embedding import apple_embed_server
 from project_code_intelligence.embedding.types import EmbeddingEndpointUnavailableError
 from project_code_intelligence.progress import progress_event
 
@@ -301,6 +304,55 @@ def vector_literals_from_items(endpoint: str, items: list[JsonObject]) -> list[s
     return vectors
 
 
+_AUTOSTART_STATE = {"attempted": False}
+
+
+def reset_autostart_state() -> None:
+    """Allow another autostart attempt (used by tests)."""
+    _AUTOSTART_STATE["attempted"] = False
+
+
+def _endpoint_accepts_connections(host: str, port: int, deadline: float) -> bool:
+    """Poll until a TCP connect succeeds or the deadline passes.
+
+    The server binds its port only after the model finishes loading, so a
+    successful connect means ready to serve.
+    """
+    while time.monotonic() < deadline:
+        with contextlib.suppress(OSError), socket.create_connection((host, port), timeout=1.0):
+            return True
+        time.sleep(1.0)
+    return False
+
+
+def autostart_local_embedding_server(endpoint: str) -> bool:
+    """Start the local Apple embed server when an embedding call finds it down.
+
+    On-demand counterpart to the server's idle exit: the server releases the
+    model after PCI_APPLE_EMBED_IDLE_SECONDS without requests, and the next
+    embedding demand (index preflight, MCP semantic query, edit hook) brings
+    it back through this hook. Gated to loopback endpoints on hosts that can
+    actually run the MLX server; attempted at most once per process so a
+    broken server cannot loop. PCI_EMBED_AUTOSTART=0 disables.
+    """
+    parts = urlsplit(endpoint)
+    eligible = (
+        not _AUTOSTART_STATE["attempted"]
+        and config.env_bool("PCI_EMBED_AUTOSTART", default=True)
+        and parts.hostname in {"127.0.0.1", "localhost", "::1"}
+        and apple_embed_server.apple_embed_available()
+    )
+    if not eligible:
+        return False
+    _AUTOSTART_STATE["attempted"] = True
+    # A live-but-unreachable server (port mismatch, wedged) is another owner's
+    # process; leave it alone rather than fight it.
+    if apple_embed_server.apple_embed_server_is_running() or not apple_embed_server.start_launch_agent():
+        return False
+    deadline = time.monotonic() + config.env_float("PCI_EMBED_AUTOSTART_TIMEOUT_SECONDS", 120.0, minimum=1.0)
+    return _endpoint_accepts_connections(parts.hostname or "127.0.0.1", parts.port or 18081, deadline)
+
+
 def embed_with_endpoint(endpoint: str, texts: list[str], model: str, *, track_metrics: bool = True) -> list[str]:
     validate_embedding_endpoint(endpoint)
     if track_metrics:
@@ -319,6 +371,8 @@ def embed_with_endpoint(endpoint: str, texts: list[str], model: str, *, track_me
             )
             break
         except EmbeddingEndpointUnavailableError as exc:
+            if attempt == 1 and not exc.recoverable_batch and autostart_local_embedding_server(endpoint):
+                continue
             if exc.recoverable_batch or attempt >= attempts:
                 raise
             runtime_state.active_metrics.add("embedding_endpoint_retries", 1)
