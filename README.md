@@ -214,6 +214,9 @@ models download on first use.
 Choose a backend explicitly when desired:
 
 ```sh
+# Apple Silicon GPU (MLX)
+pci doctor --start-embedding --embedding-backend apple
+
 # AMD GPU
 pci doctor --start-embedding --embedding-backend rocm
 
@@ -229,7 +232,12 @@ pci doctor --start-embedding --embedding-backend lemonade
 
 Available selectors are `auto`, `fastembed`, `lemonade`, `rocm`, `cuda`, and
 `apple`. PCI rejects a requested backend when its required hardware or runtime
-is unavailable. `apple` runs natively rather than through Quadlet.
+is unavailable. `apple` runs natively rather than through Quadlet: it is
+supervised by a launchd agent and needs no container engine, `pci embed apple`
+starts it directly, and it also starts on demand from the first index run or
+semantic query, so on Apple Silicon no start command is required at all. The
+agent releases the model after `PCI_APPLE_EMBED_IDLE_SECONDS` without requests
+and the next demand brings it back.
 
 To start the database and an explicit backend together:
 
