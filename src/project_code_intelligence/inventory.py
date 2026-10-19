@@ -181,7 +181,11 @@ class DiscoveryReuse:
 def run_git_required(root: Path, args: list[str]) -> str:
     value = run_git(root, args)
     if value is None:
-        raise ValueError(f"git {' '.join(args)} failed in {root}; pass --root pointing at a Git checkout")
+        raise ValueError(
+            f"git {' '.join(args)} failed in {root}; the path is not a Git checkout "
+            "(or has no commits yet). Check the spelling, fix the offending repo "
+            "argument to pci-index, or point --root at a Git checkout."
+        )
     return value
 
 

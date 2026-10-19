@@ -28,6 +28,15 @@ cd /path/to/workspace
 pci index repo-a repo-b repo-c
 ```
 
+The workspace directory itself does not need to be a Git repository — only the
+subdirectories passed to `pci index` must be tracked Git repos. It can be any
+stable directory you launch your MCP client from (for example,
+`~/work/widget-service/` holding clones of `api/` and `worker/`). Generated MCP
+client configs such as `.mcp.json` are written to that workspace directory, not
+into any individual repo. They reference the project scope by path and carry no
+database credentials, which PCI keeps in its private user config; still treat
+them as local-only, because the workspace path itself can be sensitive.
+
 The MCP server also infers its collection from its configured working directory
 when `PCI_COLLECTION` is unset. Set the MCP `cwd` to the
 same repo or workspace directory you used when indexing. Agents then use repo
