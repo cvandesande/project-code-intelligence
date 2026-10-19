@@ -39,6 +39,13 @@ def _evidence(**overrides: object) -> Evidence:
     return replace(_BASE, **overrides)
 
 
+# Bundle caps, duplicated from evidence.py on purpose: they are a published response
+# shape (docs/PUBLIC_API.md), so a change here must be a deliberate contract change.
+_CALLER_CAP = 25
+_CALLEE_CAP = 40
+_TESTED_CALLER_INDEX = 40
+
+
 class IsParentChildTests(unittest.TestCase):
     def test_same_symbol_is_nested(self) -> None:
         self.assertTrue(evidence.is_parent_child(("A", "m.py", (1, 9)), ("A", "m.py", (1, 9))))
@@ -151,6 +158,35 @@ class RenderJsonTests(unittest.TestCase):
         self.assertEqual(neighbor_rows[0]["similarity"], 0.9412)
         staleness = cast("dict[str, object]", item["staleness"])
         self.assertIn("is_stale", staleness)
+        self.assertEqual(item["callers_truncated"], False)
+        self.assertEqual(item["callees_total"], 0)
+
+    def test_json_bounds_lists_and_reports_the_cut(self) -> None:
+        callers = tuple(
+            Caller(
+                symbol=f"c{i}",
+                source_path="tests/test_user.py" if i == _TESTED_CALLER_INDEX else f"c{i}.py",
+                line=i,
+                is_test=i == _TESTED_CALLER_INDEX,
+                at_module_level=False,
+            )
+            for i in range(60)
+        )
+        callees = tuple(
+            evidence.Callee(target_symbol=f"d{i}", target_path=f"d{i}.py", resolved=True) for i in range(90)
+        )
+
+        item = evidence.bundle_to_json(_evidence(callers=callers, callees=callees))
+
+        self.assertEqual(len(cast("list[object]", item["callers"])), _CALLER_CAP)
+        self.assertEqual(item["callers_truncated"], True)
+        # inbound_count stays the untruncated total, so a short list is not the full set.
+        self.assertEqual(item["inbound_count"], 60)
+        self.assertEqual(len(cast("list[object]", item["callees"])), _CALLEE_CAP)
+        self.assertEqual(item["callees_total"], 90)
+        self.assertEqual(item["callees_truncated"], True)
+        # Coverage comes from the full tuple, so a test caller past the cap still counts.
+        self.assertEqual(item["covered_by_tests"], ["tests/test_user.py"])
 
 
 if __name__ == "__main__":

@@ -1156,6 +1156,42 @@ class McpSemanticSearchTests(unittest.TestCase):
         query, _params = conn.calls[0]
         self.assertIn("count(r.embedding) AS embedded_records", query)
 
+    def test_semantic_search_warns_when_nearest_match_is_weak(self) -> None:
+        """Nearest neighbours are returned even for a nonsense query; say so."""
+        conn = QueuedConnection([FakeCursor(many=[{"id": 5, "symbol": "hooks", "distance": 0.72}])])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_search_code_intel_semantic({"query": "cooking pasta water temperature"})
+
+        payload = mcp_text_payload(response)
+        self.assertEqual(len(cast("list[object]", payload["results"])), 1)
+        warnings = cast("list[dict[str, object]]", payload["warnings"])
+        kinds = [warning["kind"] for warning in warnings]
+        self.assertIn("low_semantic_similarity", kinds)
+        low_match = next(warning for warning in warnings if warning["kind"] == "low_semantic_similarity")
+        self.assertEqual(low_match["similarity"], 0.28)
+        self.assertIn("search_code_intel_text", cast("str", low_match["message"]))
+
+    def test_semantic_search_omits_low_match_warning_for_strong_neighbour(self) -> None:
+        conn = QueuedConnection([FakeCursor(many=[{"id": 5, "symbol": "hooks", "distance": 0.25}])])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_tools, "query_embedding", return_value=("[0.1,0.2]", 2)),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_search_code_intel_semantic({"query": "parse the database connection string"})
+
+        payload = mcp_text_payload(response)
+        kinds = [warning["kind"] for warning in cast("list[dict[str, object]]", payload.get("warnings", []))]
+        self.assertNotIn("low_semantic_similarity", kinds)
+
     def test_semantic_search_content_class_filter_still_excludes_security_patterns(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[])])
 
@@ -1212,6 +1248,29 @@ class McpSemanticSearchTests(unittest.TestCase):
         payload = mcp_text_payload(response)
         warnings = cast("list[dict[str, object]]", payload["warnings"])
         self.assertEqual([warning["kind"] for warning in warnings], ["empty_path_scope"])
+
+    def test_empty_metadata_filter_is_blamed_instead_of_the_record_type(self) -> None:
+        """`record_type` alone matches thousands of records, so it is not the cause."""
+        conn = QueuedConnection([FakeCursor(many=[])])
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(mcp_db, "code_intel_tables_exist", return_value=True),
+            patch.object(mcp_db, "connect", return_value=FakeConnect(conn)),
+        ):
+            response = mcp_tools.tool_search_code_intel_text({
+                "mode": "enumerate",
+                "record_type": "symbol_definition",
+                "metadata_contains": {"qualified_symbol": "."},
+            })
+
+        payload = mcp_text_payload(response)
+        self.assertEqual(payload["results"], [])
+        warnings = cast("list[dict[str, object]]", payload["warnings"])
+        self.assertEqual([warning["kind"] for warning in warnings], ["empty_metadata_scope"])
+        self.assertIn("qualified_symbol", cast("str", warnings[0]["metadata_filter"]))
+        self.assertIn("substring", cast("str", warnings[0]["message"]))
+        self.assertNotIn("record_type=", cast("str", warnings[0]["message"]))
 
     def test_repo_root_path_scope_returns_warning(self) -> None:
         conn = QueuedConnection([FakeCursor(many=[{"source_path": "tokio/src/lib.rs"}])])

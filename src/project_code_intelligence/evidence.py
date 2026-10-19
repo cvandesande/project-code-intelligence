@@ -30,6 +30,7 @@ from project_code_intelligence.analyze import (
     newest_per_repo,
     select_snapshots,
 )
+from project_code_intelligence.common import last_symbol_component
 from project_code_intelligence.exceptions import DatabaseConnectionError
 from project_code_intelligence.mcp import db as mcp_db
 from project_code_intelligence.mcp.status import annotate_status_snapshots
@@ -45,10 +46,11 @@ DEFAULT_NEIGHBOR_THRESHOLD = 0.80
 # Over-fetch factor so parent/child and prefix filtering still leaves N results.
 _NEIGHBOR_OVERFETCH = 5
 _ENTRYPOINT_NAMES = frozenset({"main"})
-
-
-def _last_component(symbol: str) -> str:
-    return symbol.rsplit(".", 1)[-1]
+# Structured-bundle caps. A hub function's caller list and every callee of a large
+# file-mode bundle otherwise serialize straight into the agent's context with no
+# bound; the text report already caps callers for the same reason.
+_JSON_MAX_CALLERS = 25
+_JSON_MAX_CALLEES = 40
 
 
 # --- data model -----------------------------------------------------------------
@@ -124,7 +126,7 @@ class Evidence:
 
     @property
     def is_conventional_entrypoint(self) -> bool:
-        return _last_component(self.symbol) in _ENTRYPOINT_NAMES
+        return last_symbol_component(self.symbol) in _ENTRYPOINT_NAMES
 
     @property
     def looks_orphaned(self) -> bool:
@@ -324,7 +326,7 @@ def name_reference_count(conn: db.DbConnection, target: TargetDef) -> int:
           AND e.target_symbol = %s
           AND e.source_record_id <> %s
         """,
-        [target.snapshot.snapshot_id, _last_component(target.symbol), target.record_id],
+        [target.snapshot.snapshot_id, last_symbol_component(target.symbol), target.record_id],
     ).fetchone()
     return coerce_int(row["n"]) or 0 if row is not None else 0
 
@@ -342,7 +344,7 @@ def is_service_entrypoint(conn: db.DbConnection, target: TargetDef) -> bool:
         WHERE f.snapshot_id = %s AND r.record_type = 'service_entrypoint' AND r.symbol = %s
         LIMIT 1
         """,
-        [target.snapshot.snapshot_id, _last_component(target.symbol)],
+        [target.snapshot.snapshot_id, last_symbol_component(target.symbol)],
     ).fetchone()
     return row is not None
 
@@ -517,6 +519,8 @@ def render_text(evidence: Evidence) -> str:
 
 
 def _evidence_to_json(evidence: Evidence) -> dict[str, object]:
+    shown_callers = evidence.callers[:_JSON_MAX_CALLERS]
+    shown_callees = evidence.callees[:_JSON_MAX_CALLEES]
     return {
         "symbol": evidence.symbol,
         "symbol_kind": evidence.symbol_kind,
@@ -532,14 +536,19 @@ def _evidence_to_json(evidence: Evidence) -> dict[str, object]:
                 "is_test": caller.is_test,
                 "at_module_level": caller.at_module_level,
             }
-            for caller in evidence.callers
+            for caller in shown_callers
         ],
+        # inbound_count is the untruncated total, so a truncated list is never
+        # misread as the full caller set.
+        "callers_truncated": len(shown_callers) < len(evidence.callers),
         "inbound_count": evidence.inbound_count,
         "name_reference_count": evidence.name_reference_count,
         "callees": [
             {"target_symbol": callee.target_symbol, "target_path": callee.target_path, "resolved": callee.resolved}
-            for callee in evidence.callees
+            for callee in shown_callees
         ],
+        "callees_total": len(evidence.callees),
+        "callees_truncated": len(shown_callees) < len(evidence.callees),
         "covered_by_tests": list(evidence.covered_by_tests),
         "is_entrypoint": evidence.is_conventional_entrypoint or evidence.is_service_entrypoint,
         "wired_at_module_level": evidence.wired_at_module_level,

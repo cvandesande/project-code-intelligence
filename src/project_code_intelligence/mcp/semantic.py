@@ -8,6 +8,7 @@ this module supplies the math.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -32,7 +33,7 @@ from project_code_intelligence.mcp.status import snapshot_scope_warning
 from project_code_intelligence.storage import row_int
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
 SEMANTIC_BOOST_STOP_WORDS = frozenset({
     "about",
@@ -65,6 +66,8 @@ SEMANTIC_GENERATED_DISTANCE_PENALTY = 0.24
 SEMANTIC_DIVERSITY_OVERFETCH_FACTOR = 4
 SEMANTIC_DIVERSITY_MIN_EXTRA_ROWS = 20
 SEMANTIC_DIVERSITY_MAX_SQL_LIMIT = 200
+# Below this cosine similarity the nearest embedded record is not about the query.
+SEMANTIC_LOW_MATCH_SIMILARITY = 0.40
 SEMANTIC_EXECUTABLE_QUERY_TERMS = frozenset({
     "add",
     "added",
@@ -348,6 +351,36 @@ def query_embedding(query: str) -> tuple[str, int]:
         return vector, vector_literal_dimensions(vector)
     embedding_values = llama.embed_text(query)
     return db.vector_literal(embedding_values), len(embedding_values)
+
+
+def semantic_low_match_warnings(rows: Sequence[Mapping[str, object]]) -> list[Json]:
+    """Zero or one warning when the nearest embedded record is weakly related to the query.
+
+    Vector search returns the nearest neighbours whether or not anything relevant
+    exists, so a nonsense query comes back looking like a result set. Measured on a
+    191-file Python repo: queries with a real match land at 0.52-0.79 cosine
+    similarity, unrelated ones at 0.32-0.35. The warning is advisory and never
+    drops rows, so "no match" stays distinguishable from "weak match".
+    """
+    distances = [row.get("distance") for row in rows]
+    numeric = [value for value in distances if isinstance(value, float) and not math.isnan(value)]
+    if not numeric:
+        return []
+    similarity = 1.0 - min(numeric)
+    if similarity >= SEMANTIC_LOW_MATCH_SIMILARITY:
+        return []
+    return [
+        make_warning(
+            "low_semantic_similarity",
+            similarity=round(similarity, 4),
+            min_similarity=SEMANTIC_LOW_MATCH_SIMILARITY,
+            message=(
+                "the closest embedded record is weakly related to this query; semantic search always "
+                "returns nearest neighbours, so treat these results as leads and verify them in source. "
+                "Use search_code_intel_text for identifiers, file paths, and config keys."
+            ),
+        )
+    ]
 
 
 def semantic_filter_queryability_warning(conn: db.DbConnection, args: Json) -> Json | None:

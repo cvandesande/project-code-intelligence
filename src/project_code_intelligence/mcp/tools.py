@@ -81,6 +81,7 @@ from project_code_intelligence.mcp.semantic import (
     semantic_executable_symbol_distance_boost,
     semantic_filter_queryability_response,
     semantic_generated_distance_penalty,
+    semantic_low_match_warnings,
     semantic_match_terms,
     semantic_non_source_distance_penalty,
     semantic_search_limit_plan,
@@ -407,7 +408,12 @@ def tool_search_code_intel_semantic(args: Json) -> Json:
     }
     attach_warnings(
         response,
-        scope_filter_warnings(args, rows, repo_exists=repo_exists, missing_snapshot_warning=missing_snapshot_warning),
+        [
+            *scope_filter_warnings(
+                args, rows, repo_exists=repo_exists, missing_snapshot_warning=missing_snapshot_warning
+            ),
+            *semantic_low_match_warnings(rows),
+        ],
     )
     return ok(response)
 

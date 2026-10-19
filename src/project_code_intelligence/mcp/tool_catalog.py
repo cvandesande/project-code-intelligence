@@ -39,6 +39,12 @@ _BOOLEAN_FILTER_DESC = (
     "false is an active filter, not a default."
 )
 _BRANCH_DESC = "Restrict to this branch's snapshot. Omit to use the newest snapshot per repo, any branch."
+_METADATA_KEY_DESC = "Filter on a metadata key; with metadata_value it must equal that value, alone it tests presence."
+_METADATA_VALUE_DESC = "Exact string value for metadata_key."
+_METADATA_CONTAINS_DESC = (
+    "Metadata subset matched by jsonb containment: each value must equal the stored value exactly, "
+    "so a substring of a stored string does not match."
+)
 
 
 TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
@@ -104,9 +110,9 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "source_path_prefix": {"type": "string", "description": _SOURCE_PATH_PREFIX_DESC},
                 "symbol": {"type": "string"},
                 "parent_record_id": {"type": "string"},
-                "metadata_key": {"type": "string"},
-                "metadata_value": {"type": "string"},
-                "metadata_contains": {"type": "object"},
+                "metadata_key": {"type": "string", "description": _METADATA_KEY_DESC},
+                "metadata_value": {"type": "string", "description": _METADATA_VALUE_DESC},
+                "metadata_contains": {"type": "object", "description": _METADATA_CONTAINS_DESC},
                 "is_untracked": {"type": "boolean", "description": _BOOLEAN_FILTER_DESC},
                 "is_generated": {"type": "boolean", "description": _BOOLEAN_FILTER_DESC},
                 "snapshot_id": {"type": "integer", "minimum": 1},
@@ -123,7 +129,8 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         },
     ),
     "search_code_intel_semantic": ToolDefinition(
-        "Concept search for behavior when identifiers are unknown. Use text search for symbols.",
+        "Concept search for behavior when identifiers are unknown. Use text search for symbols. "
+        "Results whose nearest match is weak carry a low_semantic_similarity warning.",
         {
             "type": "object",
             "properties": {
@@ -140,9 +147,9 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
                 "source_path_prefix": {"type": "string", "description": _SOURCE_PATH_PREFIX_DESC},
                 "symbol": {"type": "string"},
                 "parent_record_id": {"type": "string"},
-                "metadata_key": {"type": "string"},
-                "metadata_value": {"type": "string"},
-                "metadata_contains": {"type": "object"},
+                "metadata_key": {"type": "string", "description": _METADATA_KEY_DESC},
+                "metadata_value": {"type": "string", "description": _METADATA_VALUE_DESC},
+                "metadata_contains": {"type": "object", "description": _METADATA_CONTAINS_DESC},
                 "is_untracked": {"type": "boolean", "description": _BOOLEAN_FILTER_DESC},
                 "is_generated": {"type": "boolean", "description": _BOOLEAN_FILTER_DESC},
                 "snapshot_id": {"type": "integer", "minimum": 1},
@@ -227,8 +234,9 @@ TOOL_DEFINITIONS: dict[str, ToolDefinition] = {
         "Impact of removing/refactoring a symbol: resolved callers (with test and "
         "module-level wiring), test coverage, entry-point and orphan flags, semantic "
         "neighbours, and index staleness. Evidence, not a verdict -- verify live callers "
-        "in source. Call before deleting a definition. Cannot see uncommitted code: the "
-        "index refreshes on git post-commit.",
+        "in source. Call before deleting a definition. Caller/callee lists carry totals "
+        "and truncation flags. Cannot see uncommitted code: the index refreshes on git "
+        "post-commit.",
         {
             "type": "object",
             "properties": {

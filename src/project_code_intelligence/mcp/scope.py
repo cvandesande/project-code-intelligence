@@ -12,6 +12,7 @@ producer or consumer side fail type-checking.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, cast
 
 from project_code_intelligence import db
@@ -139,6 +140,33 @@ def path_scope_matches_repo_root(args: Json) -> bool:
     return bool(collection and prefix == normalize_source_path_filter(collection, "collection"))
 
 
+def empty_metadata_scope_warning(metadata_filter: str) -> Json:
+    return make_warning(
+        "empty_metadata_scope",
+        metadata_filter=metadata_filter,
+        message=(
+            f"no results matched the metadata filter {metadata_filter}; metadata filters match exactly "
+            "(metadata_value is string equality, metadata_contains is jsonb containment of the whole value, "
+            "so a substring never matches). Read one candidate record with include_metadata=true to see the "
+            "stored value before filtering on it."
+        ),
+    )
+
+
+def metadata_filter_description(args: Json) -> str | None:
+    """The metadata filter in effect, phrased for a warning, or None when unset."""
+    metadata_key = optional_text(args, "metadata_key")
+    metadata_value = optional_text(args, "metadata_value")
+    if metadata_key and metadata_value:
+        return f"metadata_key={metadata_key!r} metadata_value={metadata_value!r}"
+    if metadata_key:
+        return f"metadata_key={metadata_key!r} (key presence)"
+    metadata_contains = args.get("metadata_contains")
+    if metadata_contains is not None:
+        return f"metadata_contains={json.dumps(metadata_contains, sort_keys=True)}"
+    return None
+
+
 def scope_filter_warnings(
     args: Json,
     rows: Sequence[object],
@@ -164,10 +192,18 @@ def scope_filter_warnings(
         warnings.append(empty_repo_scope_warning(repo))
     if missing_snapshot_warning is not None:
         warnings.append(missing_snapshot_warning)
-    for dimension in _ENUM_FILTER_DIMENSIONS:
-        value = optional_text(args, dimension)
-        if value:
-            warnings.append(empty_enum_scope_warning(dimension, value))
+    # A metadata filter is the narrowest predicate here and matches exactly, so it
+    # takes the blame instead of the enum dimensions: an empty result with
+    # record_type + metadata_contains was reported as a bad record_type, which sent
+    # callers off to validate a value that was demonstrably in the index.
+    metadata_filter = metadata_filter_description(args)
+    if metadata_filter is not None:
+        warnings.append(empty_metadata_scope_warning(metadata_filter))
+    else:
+        for dimension in _ENUM_FILTER_DIMENSIONS:
+            value = optional_text(args, dimension)
+            if value:
+                warnings.append(empty_enum_scope_warning(dimension, value))
     if source_path or source_path_prefix:
         warnings.append(
             make_warning(
